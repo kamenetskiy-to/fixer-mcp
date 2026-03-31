@@ -1,0 +1,10 @@
+fixer_mcp
+fixer.db
+fixer.db-shm
+fixer.db-wal
+fixer_mcp.log
+fixer_genui.db
+import.log
+main
+migration_backups/
+migration_reports/

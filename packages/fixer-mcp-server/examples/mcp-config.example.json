@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "fixer_mcp": {
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd /path/to/github_repo/packages/fixer-mcp-server && ./fixer_mcp"
+      ],
+      "env": {},
+      "startup_timeout_sec": 30,
+      "timeout": 21600,
+      "tool_timeout_sec": 21600,
+      "per_tool_timeout_ms": 21600000
+    }
+  }
+}

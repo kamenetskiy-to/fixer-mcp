@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fixer_mcp": {
+      "command": "./packages/fixer-mcp-server/bin/fixer_mcp",
+      "args": []
+    }
+  }
+}
