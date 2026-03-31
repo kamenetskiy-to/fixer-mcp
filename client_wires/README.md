@@ -2,6 +2,28 @@
 
 Canonical client launch wires for Fixer MCP live in this directory.
 
+These wires are the bridge between durable orchestration state in `fixer_mcp` and actual worker execution in Codex-backed sessions. They are what turns stored sessions, attached docs, MCP selections, and review rules into real Fixer, Netrunner, and Overseer runs.
+
+## Common Path
+
+For a new operator, the usual first commands are:
+
+```bash
+python3 client_wires/fixer_wire.py --wire-info
+python3 client_wires/fixer_wire.py --role fixer
+```
+
+If `mcp_servers/codex_pro_app` is not in the default sibling location, set `MCP_SERVERS_ROOT` first.
+
+## Why These Wires Matter
+
+This directory is more than a launch convenience layer. It is where the repo converts the control-plane model into disciplined execution:
+- role-aware startup for Fixer, Netrunner, and Overseer
+- session-aware resume flows
+- deterministic MCP assignment injection
+- explicit autonomous worker dispatch and wake-up behavior
+- backend-aware launch metadata for `codex` and `droid`
+
 ## Flow Map
 
 - `explicit Fixer MCP flow`: this is the canonical explicit path for MCP-sensitive or durable Fixer-managed Netrunners. For live Fixer threads, prefer `fixer_mcp.launch_and_wait_netrunner`, `launch_explicit_netrunner` plus `wait_for_netrunner_session`, or `launch_explicit_netrunner` plus `wait_for_netrunner_sessions` when multiple safe sidecar workers are already running. The durable/background variant is still implemented by `client_wires/fixer_autonomous.py`.

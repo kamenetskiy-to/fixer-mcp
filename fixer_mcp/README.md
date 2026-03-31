@@ -2,12 +2,26 @@
 
 `fixer_mcp` is the Go control-plane server behind the Fixer / Netrunner / Overseer workflow.
 
-It provides:
+This is the durable part of the system. It stores the orchestration state that lighter agent wrappers usually keep only in terminal history: sessions, project canon, doc proposals, handoffs, MCP assignment, launch metadata, and review lifecycle state.
+
+## What The Server Owns
+
 - project and session orchestration backed by SQLite
-- explicit Netrunner launch / wait primitives
+- explicit Netrunner launch and wait primitives
 - project-scoped docs, handoff, and MCP assignment storage
-- optional native Telegram operator notifications
-- a small Flutter desktop dashboard in [`dashboard_app`](dashboard_app)
+- native operator notification hooks, including Telegram
+- optional desktop inspection UI in [`dashboard_app`](dashboard_app)
+
+## Why This Layer Exists
+
+Fixer MCP is intentionally not just a launcher. The MCP server form factor gives the workflow one durable control plane that multiple clients and launch surfaces can talk to.
+
+That matters when you need:
+- resumable work after a terminal or model session disappears
+- review authority before a worker result is accepted
+- deliberate tool assignment per project or task
+- a canonical project memory attached to the work itself
+- explicit launch and wait behavior for long-running workers
 
 ## Layout
 
@@ -31,9 +45,17 @@ From this directory:
 go build -o fixer_mcp .
 ```
 
-## Run
+## Quick Start
 
-The server uses `fixer.db` in the current working directory.
+Run the server from this directory:
+
+```bash
+./fixer_mcp
+```
+
+It uses `fixer.db` in the current working directory. In the common Fixer MCP workflow, this binary is paired with the sibling Python launch wires in [`../client_wires`](../client_wires), which start and resume Fixer-managed sessions against this server.
+
+## Run
 
 ```bash
 ./fixer_mcp
@@ -55,6 +77,12 @@ Then set:
 ```bash
 go test ./...
 ```
+
+## Why Use This Instead Of A Thin Wrapper
+
+If all you need is a few prompts and a way to spawn sub-agents, this server is probably more structure than you want.
+
+If you need durable orchestration state, governed delegation, project canon, resumable workers, and a reviewable lifecycle, this is the layer that makes those workflows reliable rather than aspirational.
 
 ## Dashboard
 
