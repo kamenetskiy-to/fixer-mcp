@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+*.log
+__pycache__/
+.pytest_cache/
+
+# Local env and runtime state
+.env
+.env.local
+.factory/
+.codex/
+
+# SQLite runtime data
+fixer_mcp/fixer.db
+fixer_mcp/fixer.db-*
+fixer_mcp/fixer_genui.db
+
+# Go build outputs
+fixer_mcp/fixer_mcp
+fixer_mcp/main
+
+# Flutter generated output
+fixer_mcp/dashboard_app/build/
+fixer_mcp/dashboard_app/macos/Pods/
+fixer_mcp/dashboard_app/macos/Flutter/ephemeral/
