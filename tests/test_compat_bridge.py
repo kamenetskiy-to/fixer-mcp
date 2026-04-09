@@ -117,32 +117,6 @@ class CompatBridgeTest(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertIn("Compatibility note:", stderr.getvalue())
 
-    def test_fixer_entrypoint_defaults_to_real_launch(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            _, package_root = self._make_layout(Path(temp_dir))
-            config_path = package_root / "config" / "mcp-config.json"
-            runtime_root = package_root / "runtime"
-            delegated: list[list[str]] = []
-
-            def _fake_main(argv: list[str] | None = None) -> int:
-                delegated.append(list(argv or []))
-                return 0
-
-            with patch.dict(
-                "os.environ",
-                {
-                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
-                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
-                },
-                clear=False,
-            ):
-                with patch.object(sys, "argv", ["fixer"]):
-                    with patch("fixer_client_wires.cli.main", side_effect=_fake_main):
-                        exit_code = cli.main([])
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(delegated[0][:4], ["launch", "--role", "fixer", "--backend"])
-
 
 if __name__ == "__main__":
     unittest.main()

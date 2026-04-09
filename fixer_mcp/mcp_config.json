@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "fixer_mcp": {
+      "command": "/Users/hensybex/Desktop/projects/self_orchestration/fixer_mcp/fixer_mcp",
+      "args": [],
+      "env": {
+        "PGPASSWORD": "fixer_password"
+      },
+      "startup_timeout_sec": 30,
+      "timeout": 21600,
+      "tool_timeout_sec": 21600,
+      "per_tool_timeout_ms": 21600000
+    }
+  }
+}

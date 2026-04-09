@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 
 [project.scripts]
 fixer-client-wires = "fixer_client_wires.cli:main"
+fixer = "fixer_client_wires.cli:main"
 
 [tool.setuptools]
 include-package-data = true

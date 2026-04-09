@@ -34,10 +34,10 @@ This keeps the old invocation vocabulary usable while forcing execution through 
 ## Incremental Operator Move
 
 1. Install `packages/client-wires`.
-2. Install `packages/compat-bridge`.
-3. Validate runtime/config resolution with `python3 -m fixer_compat_bridge --wire-info`.
-4. Preview role launches with `fixer-compat-bridge --role fixer` or `--role netrunner`.
-5. Move to direct `fixer-client-wires` commands once the staged contract is familiar.
+2. Use the repo-owned `fixer` command for the primary launcher path.
+3. Install `packages/compat-bridge` only if an operator still needs the old flag shape.
+4. Validate compatibility resolution with `python3 -m fixer_compat_bridge --wire-info`.
+5. Preview compatibility launches with `fixer-compat-bridge --role fixer` or `--role netrunner`.
 
 ## Compatibility Surfaces To Change
 
