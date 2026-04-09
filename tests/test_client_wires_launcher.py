@@ -279,16 +279,18 @@ class ClientWiresLauncherTest(unittest.TestCase):
             ):
                 with patch.object(sys, "argv", ["fixer"]):
                     with patch("sys.stdin.isatty", return_value=True):
-                        with patch("builtins.input", return_value="2"):
+                        with patch("builtins.input", side_effect=["1", "1", "codex", "gpt-5.4", "medium"]):
                             with patch("fixer_client_wires.cli.execute_launch_plan", return_value=0) as execute_launch:
                                 with redirect_stdout(stdout):
                                     exit_code = cli.main([])
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Select role:", stdout.getvalue())
+        self.assertIn("Fixer launch mode:", stdout.getvalue())
         execute_launch.assert_called_once()
         launched_plan = execute_launch.call_args.args[0]
-        self.assertEqual(launched_plan.role.name, "netrunner")
+        self.assertEqual(launched_plan.role.name, "fixer")
+        self.assertEqual(launched_plan.backend.name, "codex")
 
     def test_direct_fixer_entrypoint_dry_run_renders_selected_role_launch_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -307,7 +309,7 @@ class ClientWiresLauncherTest(unittest.TestCase):
             ):
                 with patch.object(sys, "argv", ["fixer"]):
                     with patch("sys.stdin.isatty", return_value=True):
-                        with patch("builtins.input", return_value="overseer"):
+                        with patch("builtins.input", side_effect=["overseer", "codex", "gpt-5.4", "medium"]):
                             with redirect_stdout(stdout):
                                 exit_code = cli.main(["--dry-run", "--json"])
 
@@ -318,6 +320,35 @@ class ClientWiresLauncherTest(unittest.TestCase):
         self.assertEqual(payload["role"]["name"], "overseer")
         self.assertEqual(payload["backend"]["name"], "codex")
         self.assertEqual(payload["mode"], "fresh")
+
+    def test_direct_fixer_entrypoint_resume_mode_prompts_for_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            stdout = io.StringIO()
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with patch.object(sys, "argv", ["fixer"]):
+                    with patch("sys.stdin.isatty", return_value=True):
+                        with patch("builtins.input", side_effect=["fixer", "2", "resume-session-123"]):
+                            with redirect_stdout(stdout):
+                                with patch("fixer_client_wires.cli.execute_launch_plan", return_value=0) as execute_launch:
+                                    exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("Fixer launch mode:", rendered)
+        launched_plan = execute_launch.call_args.args[0]
+        self.assertEqual(launched_plan.mode, "resume")
+        self.assertEqual(launched_plan.external_session_id, "resume-session-123")
 
     def test_direct_fixer_entrypoint_requires_role_when_not_interactive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

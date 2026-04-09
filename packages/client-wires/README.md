@@ -104,3 +104,4 @@ The packaged execution path now also handles the missing repo-native bootstrap w
 - `examples/mcp-config.example.json`: package-local example config for first boot and docs
 - `runtime/fixer_runtime/`: staged local runtime placeholder for the public track
 - `pyproject.toml`: installable packaging metadata for the new distribution path
+- direct `fixer` entrypoint now runs a phased interactive flow: role selection first, then Fixer `Start new` vs `Resume existing`, then backend/model/reasoning prompts for fresh launches

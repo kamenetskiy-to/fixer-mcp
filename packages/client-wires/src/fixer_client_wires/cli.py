@@ -11,6 +11,9 @@ from .backends import available_backend_descriptors
 from .bootstrap import bootstrap_runtime_import_path, wire_info_lines
 from .launcher import available_roles, build_fresh_launch_plan, build_resume_plan, render_launch_plan
 
+FIXER_LAUNCH_NEW = "__fixer_launch_new__"
+FIXER_LAUNCH_RESUME = "__fixer_launch_resume__"
+
 
 def _role_choice_lines() -> list[str]:
     roles = available_roles()
@@ -42,6 +45,91 @@ def _prompt_for_role_selection() -> str | None:
             if 1 <= index <= len(roles):
                 return roles[index - 1].name
         print("Choose fixer, netrunner, or overseer.")
+
+
+def _prompt_select(
+    *,
+    title: str,
+    options: list[tuple[str, str]],
+    empty_message: str,
+) -> str | None:
+    if not sys.stdin.isatty():
+        return None
+    lines = [title]
+    for index, (_value, label) in enumerate(options, start=1):
+        lines.append(f"{index}. {label}")
+    print("\n".join(lines))
+    while True:
+        try:
+            raw_choice = input("Enter number or name: ").strip()
+        except EOFError:
+            return None
+        if not raw_choice:
+            print(empty_message)
+            continue
+        normalized = raw_choice.lower()
+        for value, label in options:
+            if normalized == value.lower() or normalized == label.lower():
+                return value
+        if raw_choice.isdigit():
+            index = int(raw_choice)
+            if 1 <= index <= len(options):
+                return options[index - 1][0]
+        print(empty_message)
+
+
+def _prompt_for_fixer_launch_action() -> str | None:
+    return _prompt_select(
+        title="Fixer launch mode:",
+        options=[
+            (FIXER_LAUNCH_NEW, "Start new Fixer"),
+            (FIXER_LAUNCH_RESUME, "Resume existing Fixer"),
+        ],
+        empty_message="Choose Start new Fixer or Resume existing Fixer.",
+    )
+
+
+def _prompt_for_backend_selection(preferred_backend: str) -> str | None:
+    descriptors = available_backend_descriptors()
+    options = [(descriptor.name, f"{descriptor.label} - {descriptor.description}") for descriptor in descriptors]
+    return _prompt_select(
+        title="Select backend:",
+        options=options,
+        empty_message=f"Choose one of: {', '.join(descriptor.name for descriptor in descriptors)}.",
+    ) or preferred_backend
+
+
+def _prompt_for_model_selection(backend: str, preferred_model: str | None) -> str | None:
+    descriptor = next(item for item in available_backend_descriptors() if item.name == backend)
+    options = [(model, model) for model in descriptor.model_options]
+    return _prompt_select(
+        title=f"Select model for {backend}:",
+        options=options,
+        empty_message="Choose one of the listed models.",
+    ) or preferred_model
+
+
+def _prompt_for_reasoning_selection(backend: str, preferred_reasoning: str | None) -> str | None:
+    descriptor = next(item for item in available_backend_descriptors() if item.name == backend)
+    options = [(reasoning, reasoning) for reasoning in descriptor.reasoning_options]
+    return _prompt_select(
+        title=f"Select reasoning for {backend}:",
+        options=options,
+        empty_message="Choose one of the listed reasoning values.",
+    ) or preferred_reasoning
+
+
+def _prompt_for_resume_session_id(role: str, backend: str) -> str | None:
+    if not sys.stdin.isatty():
+        return None
+    while True:
+        try:
+            raw_value = input(f"Enter existing {backend} session id to resume for role {role}: ").strip()
+        except EOFError:
+            return None
+        if raw_value:
+            return raw_value
+        print("Session id is required for resume.")
 
 
 def _build_direct_entry_parser() -> argparse.ArgumentParser:
@@ -293,23 +381,51 @@ def _run_direct_entry(argv: list[str], *, invoked_as: str) -> int:
     if not role:
         return _render_missing_role_message(parser)
 
+    backend = args.backend
+    model = args.model
+    reasoning = args.reasoning
+    resume_session_id = args.resume_session_id
+
+    if sys.stdin.isatty():
+        if role == "fixer" and not resume_session_id:
+            launch_mode = _prompt_for_fixer_launch_action()
+            if not launch_mode:
+                return 130
+            if launch_mode == FIXER_LAUNCH_RESUME:
+                resume_session_id = _prompt_for_resume_session_id(role, backend)
+                if not resume_session_id:
+                    return 130
+
+        if not resume_session_id:
+            backend = _prompt_for_backend_selection(backend)
+            if not backend:
+                return 130
+            if not model:
+                model = _prompt_for_model_selection(backend, model)
+                if not model:
+                    return 130
+            if not reasoning:
+                reasoning = _prompt_for_reasoning_selection(backend, reasoning)
+                if not reasoning:
+                    return 130
+
     render_only = args.dry_run or args.json
-    if args.resume_session_id:
+    if resume_session_id:
         delegated_args = [
             "plan-resume" if render_only else "resume",
             "--role",
             role,
             "--backend",
-            args.backend,
+            backend,
             "--session-id",
-            args.resume_session_id,
+            resume_session_id,
         ]
     else:
-        delegated_args = ["plan-launch" if render_only else "launch", "--role", role, "--backend", args.backend]
-        if args.model:
-            delegated_args.extend(["--model", args.model])
-        if args.reasoning:
-            delegated_args.extend(["--reasoning", args.reasoning])
+        delegated_args = ["plan-launch" if render_only else "launch", "--role", role, "--backend", backend]
+        if model:
+            delegated_args.extend(["--model", model])
+        if reasoning:
+            delegated_args.extend(["--reasoning", reasoning])
     if args.prompt:
         delegated_args.extend(["--prompt", args.prompt])
     for server in args.mcp_servers:

@@ -89,7 +89,7 @@ The launcher resolves runtime and config through the public contract first:
 - `FIXER_CLIENT_WIRES_CONFIG_PATH`
 - `FIXER_CLIENT_WIRES_STATE_ROOT`
 
-The packaged wrapper keeps `fixer_mcp` state in `~/.local/state/fixer-client-wires/` by default and auto-builds the staged Go server when needed. The repo-owned `fixer` command now comes directly from `packages/client-wires`; `packages/compat-bridge` and `fixer_compat_bridge` are optional compatibility surfaces for operators who still want the old flag shape through `fixer-compat-bridge`. The old copy-and-strip export path remains compatibility-only rather than part of the primary install story.
+The packaged wrapper keeps `fixer_mcp` state in `~/.local/state/fixer-client-wires/` by default and auto-builds the staged Go server when needed. The repo-owned `fixer` command now comes directly from `packages/client-wires`; it starts with a phased interactive operator flow: role selection first, then Fixer `Start new` vs `Resume existing`, then backend/model/reasoning prompts for fresh launches. `packages/compat-bridge` and `fixer_compat_bridge` remain optional compatibility surfaces for operators who still want the old flag shape through `fixer-compat-bridge`, while the old copy-and-strip export path remains compatibility-only rather than part of the primary install story.
 
 ## Architecture
 

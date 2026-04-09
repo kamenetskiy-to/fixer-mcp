@@ -40,6 +40,8 @@ fixer
 This onboarding path is repo-native:
 
 - `fixer` now begins with a first-step role selector for `fixer`, `netrunner`, or `overseer`
+- choosing `fixer` now continues into a second-step selector for `Start new Fixer` vs `Resume existing Fixer`
+- fresh launches then prompt for backend, model, and reasoning instead of dropping straight into execution
 - no sibling `../mcp_servers` checkout is required for first boot
 - package-local config in `packages/client-wires/config/mcp-config.json` is the default starting point
 - `fixer` now comes from the repo-owned `packages/client-wires` install instead of the compatibility bridge
