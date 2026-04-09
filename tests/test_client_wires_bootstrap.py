@@ -21,6 +21,7 @@ from fixer_client_wires.bootstrap import (
     bootstrap_runtime_import_path,
     resolve_config_path,
     resolve_example_config_path,
+    resolve_staged_skills_root,
     resolve_runtime_root,
     wire_info_lines,
 )
@@ -89,6 +90,21 @@ class ClientWiresBootstrapTest(unittest.TestCase):
         self.assertEqual(resolution.source, f"compat env:{LEGACY_RUNTIME_ROOT_ENV}")
         self.assertEqual(resolution.package_name, "codex_pro_app")
 
+    def test_bundled_runtime_is_used_when_package_local_runtime_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "github_repo"
+            package_root = repo_root / "packages" / "client-wires"
+
+            resolution = resolve_runtime_root(
+                repo_root=repo_root,
+                package_root=package_root,
+                environ={},
+            )
+
+        self.assertEqual(resolution.source, "bundled staged runtime")
+        self.assertTrue((resolution.root / PUBLIC_RUNTIME_PACKAGE / "__init__.py").is_file())
+
     def test_package_local_config_is_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -156,6 +172,22 @@ class ClientWiresBootstrapTest(unittest.TestCase):
 
         self.assertEqual(resolution.source, "package-local example")
         self.assertEqual(resolution.kind, "example config")
+
+    def test_bundled_config_is_used_when_package_local_config_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "github_repo"
+            package_root = repo_root / "packages" / "client-wires"
+
+            resolution = resolve_config_path(
+                repo_root=repo_root,
+                package_root=package_root,
+                environ={},
+            )
+
+        self.assertEqual(resolution.source, "bundled staged config")
+        self.assertEqual(resolution.kind, "active config")
+        self.assertTrue(resolution.path.is_file())
 
     def test_repo_example_is_used_when_package_local_files_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,7 +262,16 @@ class ClientWiresBootstrapTest(unittest.TestCase):
 
         self.assertIn("runtime source: package-local runtime", info)
         self.assertIn("config source: package-local config", info)
+        self.assertIn("staged skills root:", info)
         self.assertIn("example config:", info)
+
+    def test_staged_skills_bundle_is_materialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            resolution = resolve_staged_skills_root(
+                environ={"FIXER_CLIENT_WIRES_CACHE_ROOT": temp_dir},
+            )
+            self.assertEqual(resolution.source, "bundled staged skills")
+            self.assertTrue((resolution.root / "start-fixer" / "SKILL.md").is_file())
 
 
 if __name__ == "__main__":

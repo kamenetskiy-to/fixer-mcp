@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fixer_mcp": {
+      "args": [
+        "-lc",
+        "cd /path/to/github_repo/packages/fixer-mcp-server && ./fixer_mcp"
+      ],
+      "command": "bash",
+      "transport": "stdio"
+    }
+  }
+}

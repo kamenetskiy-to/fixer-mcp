@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -225,6 +224,67 @@ func setupWakeFixerAutonomousTestDB(t *testing.T, projectCWD string) *sql.DB {
 	}
 
 	return testDB
+}
+
+func TestResolveRuntimeLaunchEnvPersistsCurrentProxySnapshot(t *testing.T) {
+	projectCWD := t.TempDir()
+
+	resolvedEnv, err := resolveRuntimeLaunchEnv(projectCWD, []string{
+		"PATH=/usr/bin",
+		"ALL_PROXY=socks5h://[::1]:11024",
+		"HTTP_PROXY=socks5h://[::1]:11024",
+		"HTTPS_PROXY=socks5h://[::1]:11024",
+	})
+	if err != nil {
+		t.Fatalf("resolveRuntimeLaunchEnv failed: %v", err)
+	}
+
+	envMap := envSliceToMap(resolvedEnv)
+	if envMap["all_proxy"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected lowercase all_proxy alias, got %q", envMap["all_proxy"])
+	}
+	if envMap["http_proxy"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected lowercase http_proxy alias, got %q", envMap["http_proxy"])
+	}
+
+	payload, err := os.ReadFile(runtimeProxyEnvStatePath(projectCWD))
+	if err != nil {
+		t.Fatalf("read runtime proxy state: %v", err)
+	}
+	var state runtimeProxyEnvState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("unmarshal runtime proxy state: %v", err)
+	}
+	if state.ProxyEnv["HTTPS_PROXY"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected persisted HTTPS_PROXY, got %q", state.ProxyEnv["HTTPS_PROXY"])
+	}
+	if state.ProxyEnv["https_proxy"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected persisted https_proxy alias, got %q", state.ProxyEnv["https_proxy"])
+	}
+}
+
+func TestResolveRuntimeLaunchEnvFallsBackToPersistedSnapshot(t *testing.T) {
+	projectCWD := t.TempDir()
+	if err := saveRuntimeProxyEnvState(projectCWD, map[string]string{
+		"ALL_PROXY":   "socks5h://[::1]:11024",
+		"HTTP_PROXY":  "socks5h://[::1]:11024",
+		"HTTPS_PROXY": "socks5h://[::1]:11024",
+	}); err != nil {
+		t.Fatalf("seed runtime proxy state: %v", err)
+	}
+
+	resolvedEnv, err := resolveRuntimeLaunchEnv(projectCWD, []string{"PATH=/usr/bin"})
+	if err != nil {
+		t.Fatalf("resolveRuntimeLaunchEnv failed: %v", err)
+	}
+
+	envMap := envSliceToMap(resolvedEnv)
+	if envMap["ALL_PROXY"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected persisted ALL_PROXY, got %q", envMap["ALL_PROXY"])
+	}
+	if envMap["all_proxy"] != "socks5h://[::1]:11024" {
+		t.Fatalf("expected persisted all_proxy alias, got %q", envMap["all_proxy"])
+	}
 }
 
 func TestGetProjects_DeniesFixerRole(t *testing.T) {
@@ -760,226 +820,62 @@ func TestSetAndGetProjectMcpServers_GatesSessionAssignment(t *testing.T) {
 	}
 }
 
-func TestWakeFixerAutonomous_NetrunnerRole_Succeeds(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	originalSessionID := authorizedSessionId
-	originalExecCommand := execCommand
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-		authorizedSessionId = originalSessionID
-		execCommand = originalExecCommand
-	}()
-
-	projectDir := t.TempDir()
-	stateDir := filepath.Join(projectDir, ".codex")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatalf("mkdir state dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, "autonomous_resolution.json"), []byte(`{"fixer_codex_session_id":"fixer-123"}`), 0o644); err != nil {
-		t.Fatalf("write state file: %v", err)
-	}
-	launcherScript := filepath.Join(projectDir, "fixer_autonomous.py")
-	if err := os.WriteFile(launcherScript, []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
-		t.Fatalf("write launcher script: %v", err)
-	}
-	t.Setenv(clientWiresLauncherEnv, launcherScript)
-
-	testDB := setupWakeFixerAutonomousTestDB(t, projectDir)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	db = testDB
-	authorizedRole = "netrunner"
-	authorizedProjectId = 1
-	authorizedSessionId = 1
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		return exec.Command("true")
-	}
-
-	callResult, out, err := WakeFixerAutonomous(context.Background(), nil, WakeFixerAutonomousInput{
+func TestWakeFixerAutonomous_Disabled(t *testing.T) {
+	callResult, _, err := WakeFixerAutonomous(context.Background(), nil, WakeFixerAutonomousInput{
 		Summary: "worker finished cleanly",
 	})
-	if err != nil {
-		t.Fatalf("wake_fixer_autonomous failed: %v", err)
-	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
-	}
-	if out.Status != "success" {
-		t.Fatalf("unexpected output: %+v", out)
-	}
-	if out.SessionId != 1 {
-		t.Fatalf("expected session id 1, got %+v", out)
-	}
-	if !out.SpawnedBackground {
-		t.Fatalf("expected background launch flag")
-	}
-}
-
-func TestWakeFixerAutonomous_DeniesFixerRole(t *testing.T) {
-	originalRole := authorizedRole
-	defer func() {
-		authorizedRole = originalRole
-	}()
-
-	authorizedRole = "fixer"
-	callResult, _, err := WakeFixerAutonomous(context.Background(), nil, WakeFixerAutonomousInput{})
 	if err == nil {
-		t.Fatal("expected access denied error")
+		t.Fatal("expected disabled error")
 	}
 	if callResult == nil || !callResult.IsError {
 		t.Fatal("expected MCP error result")
 	}
-	if !strings.Contains(err.Error(), "requires netrunner role") {
+	if !strings.Contains(err.Error(), "temporarily disabled") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestLaunchExplicitNetrunner_FixerRole_Succeeds(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	originalExecCommand := execCommand
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-		execCommand = originalExecCommand
-	}()
-
-	testDB := setupGetProjectsTestDB(t)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	if _, err := testDB.Exec("INSERT INTO session_mcp_server (session_id, mcp_server_id) VALUES (1, 1)"); err != nil {
-		t.Fatalf("seed session_mcp_server: %v", err)
+func TestWakeFixerAutonomous_DisabledForFixerRoleToo(t *testing.T) {
+	callResult, _, err := WakeFixerAutonomous(context.Background(), nil, WakeFixerAutonomousInput{})
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-	if _, err := testDB.Exec("INSERT INTO session_codex_link (session_id, codex_session_id) VALUES (1, 'codex-launch-1')"); err != nil {
-		t.Fatalf("seed session_codex_link: %v", err)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-
-	db = testDB
-	authorizedRole = "fixer"
-	authorizedProjectId = 1
-	launcherScript := filepath.Join(t.TempDir(), "fixer_autonomous.py")
-	if err := os.WriteFile(launcherScript, []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
-		t.Fatalf("write launcher script: %v", err)
-	}
-	t.Setenv(clientWiresLauncherEnv, launcherScript)
-
-	var capturedName string
-	var capturedArgs []string
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		capturedName = name
-		capturedArgs = append([]string{}, arg...)
-		return exec.Command("true")
-	}
-
-	callResult, out, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
-		SessionId:      1,
-		FixerSessionId: "fixer-live-123",
-	})
-	if err != nil {
-		t.Fatalf("launch_explicit_netrunner failed: %v", err)
-	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
-	}
-	if out.Status != "success" {
-		t.Fatalf("unexpected output: %+v", out)
-	}
-	if capturedName != "python3" {
-		t.Fatalf("expected python3 launcher, got %q", capturedName)
-	}
-	joinedArgs := strings.Join(capturedArgs, " ")
-	if !strings.Contains(joinedArgs, "launch-netrunner") {
-		t.Fatalf("expected launch-netrunner args, got %q", joinedArgs)
-	}
-	if !strings.Contains(joinedArgs, "--session-id 1") {
-		t.Fatalf("expected session id in args, got %q", joinedArgs)
-	}
-	if !strings.Contains(joinedArgs, "--fixer-session-id fixer-live-123") {
-		t.Fatalf("expected fixer session id in args, got %q", joinedArgs)
-	}
-	if !out.Launch.SpawnedBackground {
-		t.Fatalf("expected background launch metadata, got %+v", out.Launch)
-	}
-	if out.Launch.SessionId != 1 {
-		t.Fatalf("expected visible session id 1, got %+v", out.Launch)
-	}
-	if out.Launch.CodexSessionId != "codex-launch-1" {
-		t.Fatalf("expected codex session id to be returned, got %+v", out.Launch)
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestLaunchExplicitNetrunner_FixerRole_AllowsEmptyAssignedMcpSet(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	originalExecCommand := execCommand
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-		execCommand = originalExecCommand
-	}()
-
-	testDB := setupGetProjectsTestDB(t)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	if _, err := testDB.Exec("INSERT INTO session_codex_link (session_id, codex_session_id) VALUES (1, 'codex-launch-empty')"); err != nil {
-		t.Fatalf("seed session_codex_link: %v", err)
+func TestLaunchExplicitNetrunner_Disabled(t *testing.T) {
+	callResult, _, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
+		SessionId:      1,
+		FixerSessionId: "fixer-live-123",
+	})
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-
-	db = testDB
-	authorizedRole = "fixer"
-	authorizedProjectId = 1
-	launcherScript := filepath.Join(t.TempDir(), "fixer_autonomous.py")
-	if err := os.WriteFile(launcherScript, []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
-		t.Fatalf("write launcher script: %v", err)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-	t.Setenv(clientWiresLauncherEnv, launcherScript)
-
-	var capturedName string
-	var capturedArgs []string
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		capturedName = name
-		capturedArgs = append([]string{}, arg...)
-		return exec.Command("true")
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
+}
 
-	callResult, out, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
+func TestLaunchExplicitNetrunner_DisabledWithoutAssignedMcpSet(t *testing.T) {
+	callResult, _, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
 		SessionId: 1,
 	})
-	if err != nil {
-		t.Fatalf("launch_explicit_netrunner with empty assigned MCP set failed: %v", err)
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-	if out.Status != "success" {
-		t.Fatalf("unexpected output: %+v", out)
-	}
-	if capturedName != "python3" {
-		t.Fatalf("expected python3 launcher, got %q", capturedName)
-	}
-	joinedArgs := strings.Join(capturedArgs, " ")
-	if !strings.Contains(joinedArgs, "launch-netrunner") {
-		t.Fatalf("expected launch-netrunner args, got %q", joinedArgs)
-	}
-	if !strings.Contains(joinedArgs, "--session-id 1") {
-		t.Fatalf("expected session id in args, got %q", joinedArgs)
-	}
-	if out.Launch.CodexSessionId != "codex-launch-empty" {
-		t.Fatalf("expected codex session id to be returned, got %+v", out.Launch)
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1167,169 +1063,53 @@ func TestWaitForNetrunnerSession_TimesOutBeforeWorkerProgress(t *testing.T) {
 	}
 }
 
-func TestWaitForNetrunnerSessions_ExplicitListReturnsDeterministicLowestWinner(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-	}()
-
-	testDB := setupGetProjectsTestDB(t)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task C', 'review')"); err != nil {
-		t.Fatalf("seed review session: %v", err)
-	}
-	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'Worker one ready' WHERE id = 1"); err != nil {
-		t.Fatalf("seed winning review session: %v", err)
-	}
-	if _, err := testDB.Exec("UPDATE session SET report = 'Worker two ready' WHERE id = 3"); err != nil {
-		t.Fatalf("seed second review report: %v", err)
-	}
-	if _, err := testDB.Exec("INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type) VALUES (1, 1, 'pending', 'Doc delta', 'documentation')"); err != nil {
-		t.Fatalf("seed doc proposal: %v", err)
-	}
-	if _, err := testDB.Exec("INSERT INTO session_codex_link (session_id, codex_session_id) VALUES (1, 'runner-1')"); err != nil {
-		t.Fatalf("seed session_codex_link for winner: %v", err)
-	}
-	if _, err := testDB.Exec("INSERT INTO session_codex_link (session_id, codex_session_id) VALUES (3, 'runner-2')"); err != nil {
-		t.Fatalf("seed session_codex_link for second worker: %v", err)
-	}
-
-	db = testDB
-	authorizedRole = "fixer"
-	authorizedProjectId = 1
-
-	callResult, out, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
+func TestWaitForNetrunnerSessions_Disabled(t *testing.T) {
+	callResult, _, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
 		SessionIds:          []int{2, 1},
 		TimeoutSeconds:      2,
 		PollIntervalSeconds: 1,
 	})
-	if err != nil {
-		t.Fatalf("wait_for_netrunner_sessions explicit list failed: %v", err)
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-	if out.Result.WinningSessionId != 1 {
-		t.Fatalf("expected lowest project-scoped winner id 1, got %+v", out.Result)
-	}
-	if out.Result.TerminalCondition != "review_ready" {
-		t.Fatalf("expected review_ready, got %+v", out.Result)
-	}
-	if out.Result.SelectionMode != "explicit_list" {
-		t.Fatalf("expected explicit_list selection mode, got %+v", out.Result)
-	}
-	if strings.TrimSpace(out.Result.Report) != "Worker one ready" {
-		t.Fatalf("expected winning report, got %+v", out.Result)
-	}
-	if len(out.Result.ProposalIds) != 1 || out.Result.ProposalIds[0] != 1 {
-		t.Fatalf("expected local proposal id [1], got %+v", out.Result.ProposalIds)
-	}
-	if len(out.Result.ConsideredSessionIds) != 2 || out.Result.ConsideredSessionIds[0] != 1 || out.Result.ConsideredSessionIds[1] != 2 {
-		t.Fatalf("expected sorted considered session ids [1 2], got %+v", out.Result.ConsideredSessionIds)
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestWaitForNetrunnerSessions_AutoDiscoveryFindsExplicitLaunchCandidates(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-	}()
-
-	testDB := setupGetProjectsTestDB(t)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, report) VALUES (1, 'Task C', 'review', 'Auto worker ready')"); err != nil {
-		t.Fatalf("seed auto review session: %v", err)
-	}
-	if _, err := testDB.Exec("INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type) VALUES (1, 3, 'pending', 'Auto doc delta', 'documentation')"); err != nil {
-		t.Fatalf("seed auto doc proposal: %v", err)
-	}
-	if _, err := testDB.Exec("INSERT INTO session_codex_link (session_id, codex_session_id) VALUES (3, 'runner-auto')"); err != nil {
-		t.Fatalf("seed auto session_codex_link: %v", err)
-	}
-
-	db = testDB
-	authorizedRole = "fixer"
-	authorizedProjectId = 1
-
-	callResult, out, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
+func TestWaitForNetrunnerSessions_DisabledWithoutExplicitList(t *testing.T) {
+	callResult, _, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
 		TimeoutSeconds:      2,
 		PollIntervalSeconds: 1,
 	})
-	if err != nil {
-		t.Fatalf("wait_for_netrunner_sessions auto discovery failed: %v", err)
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-	if out.Result.SelectionMode != "auto_project_candidates" {
-		t.Fatalf("expected auto_project_candidates selection mode, got %+v", out.Result)
-	}
-	if out.Result.WinningSessionId != 2 {
-		t.Fatalf("expected project-scoped winner id 2, got %+v", out.Result)
-	}
-	if out.Result.CodexSessionId != "runner-auto" {
-		t.Fatalf("expected codex session id runner-auto, got %+v", out.Result)
-	}
-	if len(out.Result.ConsideredSessionIds) != 1 || out.Result.ConsideredSessionIds[0] != 2 {
-		t.Fatalf("expected discovered session ids [2], got %+v", out.Result.ConsideredSessionIds)
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestWaitForNetrunnerSessions_TimesOutWithoutWinner(t *testing.T) {
-	originalDB := db
-	originalRole := authorizedRole
-	originalProjectID := authorizedProjectId
-	defer func() {
-		db = originalDB
-		authorizedRole = originalRole
-		authorizedProjectId = originalProjectID
-	}()
-
-	testDB := setupGetProjectsTestDB(t)
-	defer func() {
-		_ = testDB.Close()
-	}()
-
-	db = testDB
-	authorizedRole = "fixer"
-	authorizedProjectId = 1
-
-	callResult, out, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
+func TestWaitForNetrunnerSessions_DisabledOnTimeoutPathToo(t *testing.T) {
+	callResult, _, err := WaitForNetrunnerSessions(context.Background(), nil, WaitForNetrunnerSessionsInput{
 		SessionIds:          []int{1},
 		TimeoutSeconds:      1,
 		PollIntervalSeconds: 1,
 	})
-	if err != nil {
-		t.Fatalf("wait_for_netrunner_sessions timeout path failed: %v", err)
+	if err == nil {
+		t.Fatal("expected disabled error")
 	}
-	if callResult != nil {
-		t.Fatalf("expected nil call result on success, got %+v", callResult)
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
-	if !out.Result.TimedOut || out.Result.Terminal {
-		t.Fatalf("expected timeout without terminal winner, got %+v", out.Result)
-	}
-	if out.Result.WinningSessionId != 0 {
-		t.Fatalf("expected no winning session on timeout, got %+v", out.Result)
-	}
-	if out.Result.TerminalCondition != "timed_out" {
-		t.Fatalf("expected timed_out condition, got %+v", out.Result)
-	}
-	if len(out.Result.ConsideredSessionIds) != 1 || out.Result.ConsideredSessionIds[0] != 1 {
-		t.Fatalf("expected considered session ids [1], got %+v", out.Result.ConsideredSessionIds)
+	if !strings.Contains(err.Error(), "temporarily disabled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -2580,6 +2360,52 @@ func TestGetSession_AccessControlAndSuccess(t *testing.T) {
 	}
 }
 
+func TestBootstrapDefaultNetrunnerAuthFromEnv(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 999
+
+	withEnv := map[string]string{
+		fixerMcpDefaultRoleEnv: "netrunner",
+		fixerMcpDefaultCwdEnv:  testProjectCWD,
+	}
+	for key, value := range withEnv {
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("setenv %s: %v", key, err)
+		}
+		defer os.Unsetenv(key)
+	}
+
+	bootstrapDefaultNetrunnerAuthFromEnv()
+
+	if authorizedRole != "netrunner" {
+		t.Fatalf("expected env bootstrap role netrunner, got %q", authorizedRole)
+	}
+	if authorizedProjectId != 1 {
+		t.Fatalf("expected env bootstrap project_id=1, got %d", authorizedProjectId)
+	}
+	if authorizedSessionId != 0 {
+		t.Fatalf("expected env bootstrap session reset to 0, got %d", authorizedSessionId)
+	}
+}
+
 func TestProjectScopedSessionIDs_DenseAndIsolated(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
@@ -3060,7 +2886,7 @@ func TestProjectHandoffDeniesNetrunner(t *testing.T) {
 	}
 }
 
-func TestLaunchExplicitNetrunner_RejectsOverlappingWriteScopeWithoutOverride(t *testing.T) {
+func TestLaunchExplicitNetrunnerWithMetadata_RejectsSecondActiveWorker(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -3077,10 +2903,10 @@ func TestLaunchExplicitNetrunner_RejectsOverlappingWriteScopeWithoutOverride(t *
 		_ = testDB.Close()
 	}()
 
-	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = '[\"fixer_mcp\"]', parallel_wave_id = 'wave-1' WHERE id = 1"); err != nil {
+	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = '[\"fixer_mcp\"]' WHERE id = 1"); err != nil {
 		t.Fatalf("seed source write scope: %v", err)
 	}
-	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, declared_write_scope, parallel_wave_id) VALUES (1, 'Task C', 'pending', '[\"fixer_mcp/main.go\"]', 'wave-1')"); err != nil {
+	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task C', 'pending', '[\"fixer_mcp/main.go\"]')"); err != nil {
 		t.Fatalf("seed concurrent session: %v", err)
 	}
 	if _, err := testDB.Exec("INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status) VALUES (1, 1, ?, 0, 'running')", os.Getpid()); err != nil {
@@ -3097,19 +2923,16 @@ func TestLaunchExplicitNetrunner_RejectsOverlappingWriteScopeWithoutOverride(t *
 		return exec.Command("true")
 	}
 
-	callResult, _, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
+	_, err := launchExplicitNetrunnerWithMetadata(context.Background(), LaunchExplicitNetrunnerInput{
 		SessionId: 2,
 	})
 	if err == nil {
-		t.Fatal("expected overlapping write scope rejection")
-	}
-	if callResult == nil || !callResult.IsError {
-		t.Fatal("expected MCP error result")
+		t.Fatal("expected serial launch rejection")
 	}
 	if executed {
-		t.Fatal("launcher should not run when overlap validation fails")
+		t.Fatal("launcher should not run when another worker is active")
 	}
-	if !strings.Contains(err.Error(), "declared write scope overlaps active sessions") {
+	if !strings.Contains(err.Error(), "serial explicit launch only") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -3137,14 +2960,11 @@ func TestLaunchExplicitNetrunner_RequiresRepairForkAfterForcedStopWithoutOverrid
 	authorizedRole = "fixer"
 	authorizedProjectId = 1
 
-	callResult, _, err := LaunchExplicitNetrunner(context.Background(), nil, LaunchExplicitNetrunnerInput{
+	_, err := launchExplicitNetrunnerWithMetadata(context.Background(), LaunchExplicitNetrunnerInput{
 		SessionId: 1,
 	})
 	if err == nil {
 		t.Fatal("expected repair-fork guidance rejection")
-	}
-	if callResult == nil || !callResult.IsError {
-		t.Fatal("expected MCP error result")
 	}
 	if !strings.Contains(err.Error(), "fork_repair_session_from") {
 		t.Fatalf("unexpected error: %v", err)
@@ -3195,7 +3015,7 @@ func TestCompleteTask_RejectsUnstructuredFinalReport(t *testing.T) {
 	}
 }
 
-func TestCompleteTask_RejectsStaleOrchestrationEpoch(t *testing.T) {
+func TestCompleteTask_IgnoresStaleOrchestrationEpoch(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -3234,18 +3054,22 @@ func TestCompleteTask_RejectsStaleOrchestrationEpoch(t *testing.T) {
 		SessionId:   1,
 		FinalReport: structuredTestFinalReport,
 	})
-	if err == nil {
-		t.Fatal("expected stale epoch rejection")
+	if err != nil {
+		t.Fatalf("complete_task should ignore stale epoch metadata now: %v", err)
 	}
-	if callResult == nil || !callResult.IsError {
-		t.Fatal("expected MCP error result")
+	if callResult != nil {
+		t.Fatalf("expected nil call result on success, got %+v", callResult)
 	}
-	if !strings.Contains(err.Error(), "launched under orchestration epoch 1") {
-		t.Fatalf("unexpected error: %v", err)
+	var status string
+	if queryErr := testDB.QueryRow("SELECT status FROM session WHERE id = 1").Scan(&status); queryErr != nil {
+		t.Fatalf("read session status: %v", queryErr)
+	}
+	if status != "review" {
+		t.Fatalf("expected session to advance to review, got %q", status)
 	}
 }
 
-func TestWaitForNetrunnerSession_FollowUpBlockedWhenFrozenOrEpochStale(t *testing.T) {
+func TestWaitForNetrunnerSession_IgnoresFrozenOrEpochMetadata(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -3288,14 +3112,8 @@ func TestWaitForNetrunnerSession_FollowUpBlockedWhenFrozenOrEpochStale(t *testin
 	if !out.Result.Terminal || out.Result.TerminalCondition != "review_ready" {
 		t.Fatalf("expected terminal review_ready result, got %+v", out.Result)
 	}
-	if out.Result.FollowUpAllowed {
-		t.Fatalf("expected follow-up to be blocked, got %+v", out.Result)
-	}
-	if out.Result.LaunchEpoch != 1 || out.Result.CurrentEpoch != 2 || !out.Result.OrchestrationFrozen {
-		t.Fatalf("unexpected wait epoch/freeze metadata: %+v", out.Result)
-	}
-	if !strings.Contains(out.Result.FollowUpBlockedReason, "project_orchestration_frozen") || !strings.Contains(out.Result.FollowUpBlockedReason, "stale_orchestration_epoch:1->2") {
-		t.Fatalf("unexpected follow-up block reason: %+v", out.Result)
+	if out.Result.RepairForkRecommended {
+		t.Fatalf("did not expect repair fork recommendation, got %+v", out.Result)
 	}
 }
 

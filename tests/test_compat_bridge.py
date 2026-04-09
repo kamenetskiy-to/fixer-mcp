@@ -83,6 +83,31 @@ class CompatBridgeTest(unittest.TestCase):
         self.assertEqual(payload["role"]["name"], "fixer")
         self.assertEqual(payload["backend"]["name"], "codex")
 
+    def test_resume_role_delegation_renders_plan_resume_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            stdout = io.StringIO()
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with redirect_stdout(stdout):
+                    exit_code = cli.main(
+                        ["--role", "netrunner", "--backend", "codex", "--resume-session-id", "codex-42", "--json"]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["mode"], "resume")
+        self.assertEqual(payload["external_session_id"], "codex-42")
+
     def test_missing_role_returns_migration_guidance(self) -> None:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -91,6 +116,32 @@ class CompatBridgeTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("Compatibility note:", stderr.getvalue())
+
+    def test_fixer_entrypoint_defaults_to_real_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+            delegated: list[list[str]] = []
+
+            def _fake_main(argv: list[str] | None = None) -> int:
+                delegated.append(list(argv or []))
+                return 0
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with patch.object(sys, "argv", ["fixer"]):
+                    with patch("fixer_client_wires.cli.main", side_effect=_fake_main):
+                        exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(delegated[0][:4], ["launch", "--role", "fixer", "--backend"])
 
 
 if __name__ == "__main__":

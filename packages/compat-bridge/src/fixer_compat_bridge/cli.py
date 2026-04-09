@@ -31,6 +31,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Legacy role selector. Delegates to the staged plan-launch command.",
     )
     parser.add_argument("--backend", default="codex")
+    parser.add_argument(
+        "--resume-session-id",
+        help="Legacy-style external session id for resume preview. Delegates to plan-resume when provided.",
+    )
     parser.add_argument("--model")
     parser.add_argument("--reasoning")
     parser.add_argument("--prompt")
@@ -38,7 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Accepted for legacy parity. Compatibility mode always renders a launch preview.",
+        help="Render the delegated launch preview instead of executing it.",
     )
     parser.add_argument(
         "--json",
@@ -61,6 +65,7 @@ def _render_missing_role_message(parser: argparse.ArgumentParser) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    invoked_as = Path(sys.argv[0]).name
 
     _bootstrap_client_wires_import()
     from fixer_client_wires import cli as client_cli
@@ -68,14 +73,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.wire_info:
         return client_cli.main(["wire-info"])
 
-    if not args.role:
+    role = args.role
+    if role is None and invoked_as == "fixer":
+        role = "fixer"
+
+    if not role:
         return _render_missing_role_message(parser)
 
-    delegated_args = ["plan-launch", "--role", args.role, "--backend", args.backend]
-    if args.model:
-        delegated_args.extend(["--model", args.model])
-    if args.reasoning:
-        delegated_args.extend(["--reasoning", args.reasoning])
+    render_only = args.dry_run or args.json
+    if args.resume_session_id:
+        delegated_args = ["plan-resume" if render_only else "resume", "--role", role, "--backend", args.backend, "--session-id", args.resume_session_id]
+    else:
+        delegated_args = ["plan-launch" if render_only else "launch", "--role", role, "--backend", args.backend]
+        if args.model:
+            delegated_args.extend(["--model", args.model])
+        if args.reasoning:
+            delegated_args.extend(["--reasoning", args.reasoning])
     if args.prompt:
         delegated_args.extend(["--prompt", args.prompt])
     for server in args.mcp_servers:

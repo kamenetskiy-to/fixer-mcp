@@ -70,14 +70,25 @@ Fastest path to the staged launcher surface:
 
 ```bash
 python3 -m pip install -e ./packages/client-wires
-python3 -m fixer_client_wires wire-info
+python3 -m pip install -e ./packages/compat-bridge
+fixer --wire-info
+fixer
+fixer-client-wires list-roles
 ```
 
-If you want to preview a staged launch plan:
+If you want to preview the packaged launch plan instead of executing it:
 
 ```bash
-fixer-client-wires plan-launch --role netrunner --backend codex --mcp-server fixer_mcp
+fixer --dry-run
+fixer-client-wires plan-launch --role fixer --backend codex --mcp-server fixer_mcp
 ```
+
+The launcher resolves runtime and config through the public contract first:
+- `FIXER_CLIENT_WIRES_RUNTIME_ROOT`
+- `FIXER_CLIENT_WIRES_CONFIG_PATH`
+- `FIXER_CLIENT_WIRES_STATE_ROOT`
+
+The packaged wrapper keeps `fixer_mcp` state in `~/.local/state/fixer-client-wires/` by default and auto-builds the staged Go server when needed. Legacy fallbacks such as the old copy-and-strip export path remain compatibility-only, and the migration package still exposes `fixer_compat_bridge` for operators who want the old flag shape explicitly.
 
 ## Architecture
 
@@ -100,7 +111,10 @@ flowchart LR
 ## Project Layout
 
 ```text
+apps/
+  fixer-desktop/      Flutter desktop shell for the first operator UI slice
 packages/
+  desktop-bridge/     local read-oriented HTTP projection over Fixer SQLite state
   fixer-mcp-server/   Go control plane
   client-wires/       Python launcher package
   compat-bridge/      compatibility wrappers for legacy-style flows
@@ -117,6 +131,17 @@ tests/                repo-level validation
 - [Compatibility](docs/compatibility.md)
 - [Migration Plan](docs/migration-plan.md)
 - [Implementation Slices](docs/implementation-slices.md)
+
+The repo-native release path is driven by `scripts/release_public_repo.py`, which assembles a publishable `assembly/github_repo/` payload instead of relying on the legacy export pipeline.
+
+## First Desktop Slice
+
+The first desktop slice now lives in:
+
+- `apps/fixer-desktop`
+- `packages/desktop-bridge`
+
+The bridge reads the same SQLite state used by the current Fixer MCP control plane and exposes a small local HTTP contract for the Flutter shell.
 
 ## Deep Dive
 

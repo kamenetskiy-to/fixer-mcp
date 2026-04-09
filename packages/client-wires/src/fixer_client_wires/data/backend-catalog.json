@@ -1,0 +1,64 @@
+{
+  "backends": {
+    "claude": {
+      "default_model": "claude-sonnet-4-5",
+      "default_reasoning": "medium",
+      "description": "Claude Code backend with staged headless fresh-launch planning and honest sticky-resume limits.",
+      "fresh_launch_supported": true,
+      "label": "Claude Code",
+      "model_options": [
+        "claude-sonnet-4-5",
+        "claude-opus-4-1"
+      ],
+      "reasoning_options": [
+        "medium"
+      ],
+      "resume_supported": false
+    },
+    "codex": {
+      "default_model": "gpt-5.4",
+      "default_reasoning": "medium",
+      "description": "Explicit MCP flag injection for Codex-based launcher flows.",
+      "fresh_launch_supported": true,
+      "label": "Codex CLI",
+      "model_options": [
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2"
+      ],
+      "reasoning_options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "resume_supported": true
+    },
+    "droid": {
+      "default_model": "gpt-5.4",
+      "default_reasoning": "medium",
+      "description": "Layered MCP config materialization for Factory Droid launcher flows.",
+      "fresh_launch_supported": true,
+      "label": "Factory Droid CLI",
+      "model_options": [
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "claude-sonnet-4.5",
+        "claude-opus-4.1",
+        "gemini-3.1-pro",
+        "glm-5",
+        "kimi-k2.5",
+        "minimax-m2.5"
+      ],
+      "reasoning_options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "resume_supported": true
+    }
+  }
+}

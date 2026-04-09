@@ -22,13 +22,20 @@ class ReleasePublicRepoTest(unittest.TestCase):
     def _write_repo_layout(self, repo_root: Path) -> None:
         repo_root.mkdir(parents=True, exist_ok=True)
         (repo_root / "README.md").write_text("# repo\n", encoding="utf-8")
+        (repo_root / "apps").mkdir(parents=True, exist_ok=True)
+        (repo_root / "apps" / "fixer-desktop").mkdir(parents=True, exist_ok=True)
+        (repo_root / "apps" / "fixer-desktop" / "pubspec.yaml").write_text(
+            "name: fixer_desktop\n",
+            encoding="utf-8",
+        )
         (repo_root / "docs").mkdir(parents=True, exist_ok=True)
         (repo_root / "docs" / "architecture.md").write_text("# architecture\n", encoding="utf-8")
 
         client_wires = repo_root / "packages" / "client-wires"
         compat_bridge = repo_root / "packages" / "compat-bridge"
+        desktop_bridge = repo_root / "packages" / "desktop-bridge"
         fixer_server = repo_root / "packages" / "fixer-mcp-server"
-        for package in (client_wires, compat_bridge, fixer_server):
+        for package in (client_wires, compat_bridge, desktop_bridge, fixer_server):
             package.mkdir(parents=True, exist_ok=True)
 
         (client_wires / "pyproject.toml").write_text(
@@ -46,6 +53,15 @@ class ReleasePublicRepoTest(unittest.TestCase):
             "build-backend='setuptools.build_meta'\n\n"
             "[project]\n"
             "name='fixer-compat-bridge'\n"
+            "version='0.1.0'\n",
+            encoding="utf-8",
+        )
+        (desktop_bridge / "pyproject.toml").write_text(
+            "[build-system]\n"
+            "requires=['setuptools>=68']\n"
+            "build-backend='setuptools.build_meta'\n\n"
+            "[project]\n"
+            "name='fixer-desktop-bridge'\n"
             "version='0.1.0'\n",
             encoding="utf-8",
         )
@@ -148,6 +164,7 @@ class ReleasePublicRepoTest(unittest.TestCase):
             payload["assembly_dir"],
             str((repo_root / "dist" / "releases" / "3.0.0" / "assembly" / "github_repo").resolve()),
         )
+        self.assertIn("apps", payload["assembly_included_paths"])
         self.assertIn("docs", payload["assembly_included_paths"])
         self.assertEqual(payload["steps"][0]["name"], "repo python tests")
 

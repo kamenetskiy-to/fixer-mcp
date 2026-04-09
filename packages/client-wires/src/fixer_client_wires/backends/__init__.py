@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from .base import DEFAULT_BACKEND, BackendAdapter, BackendDescriptor, normalize_backend_name
+from .claude import ClaudeCodeBackendAdapter
 from .codex import CodexBackendAdapter
 from .droid import DroidBackendAdapter
 
 _BACKENDS: dict[str, BackendAdapter] = {
+    "claude": ClaudeCodeBackendAdapter(),
     "codex": CodexBackendAdapter(),
     "droid": DroidBackendAdapter(),
 }

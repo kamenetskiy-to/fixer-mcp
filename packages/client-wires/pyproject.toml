@@ -19,3 +19,12 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+fixer_client_wires = [
+  "data/*.json",
+  "staged/config/*.json",
+  "staged/examples/*.json",
+  "staged/runtime/fixer_runtime/*.py",
+  "staged/skills/*/SKILL.md",
+]

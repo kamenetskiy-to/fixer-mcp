@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources as resources
+import shutil
 import os
 import sys
 from dataclasses import dataclass
@@ -16,6 +18,9 @@ LEGACY_RUNTIME_PACKAGE = "codex_pro_app"
 PUBLIC_CONFIG_FILENAME = "mcp-config.json"
 PUBLIC_EXAMPLE_CONFIG_FILENAME = "mcp-config.example.json"
 LEGACY_CONFIG_FILENAME = "mcp_config.json"
+STAGED_RESOURCE_PACKAGE = "fixer_client_wires.staged"
+STAGED_CACHE_ROOT_ENV = "FIXER_CLIENT_WIRES_CACHE_ROOT"
+STAGED_SKILLS_DIRNAME = "skills"
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,12 @@ class ConfigResolution:
     kind: str
 
 
+@dataclass(frozen=True)
+class SkillsResolution:
+    root: Path
+    source: str
+
+
 def resolve_package_root(from_file: Path | None = None) -> Path:
     source_file = from_file or Path(__file__).resolve()
     return source_file.parents[2]
@@ -44,6 +55,46 @@ def resolve_repo_root(from_file: Path | None = None) -> Path:
 
 def _has_runtime_package(root: Path, package_name: str) -> bool:
     return (root / package_name / "__init__.py").is_file()
+
+
+def _staged_cache_root(environ: Mapping[str, str] | None = None) -> Path:
+    env = environ or os.environ
+    override = env.get(STAGED_CACHE_ROOT_ENV, "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".cache" / "fixer-client-wires").resolve()
+
+
+def _materialize_staged_tree(
+    relative_path: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    source_root = resources.files(STAGED_RESOURCE_PACKAGE).joinpath(relative_path)
+    cache_root = _staged_cache_root(environ)
+    destination_root = cache_root / relative_path
+    destination_root.parent.mkdir(parents=True, exist_ok=True)
+
+    if source_root.is_file():
+        destination_root.write_bytes(source_root.read_bytes())
+        return destination_root
+
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for child in source_root.iterdir():
+        child_relative = f"{relative_path}/{child.name}"
+        child_destination = destination_root / child.name
+        if child.is_dir():
+            _materialize_staged_tree(child_relative, environ=environ)
+            continue
+        child_destination.parent.mkdir(parents=True, exist_ok=True)
+        with resources.as_file(child) as child_path:
+            shutil.copy2(child_path, child_destination)
+    return destination_root
+
+
+def resolve_staged_skills_root(environ: Mapping[str, str] | None = None) -> SkillsResolution:
+    root = _materialize_staged_tree(STAGED_SKILLS_DIRNAME, environ=environ)
+    return SkillsResolution(root=root, source="bundled staged skills")
 
 
 def resolve_runtime_root(
@@ -89,6 +140,14 @@ def resolve_runtime_root(
         raise RuntimeError(
             f"{LEGACY_RUNTIME_ROOT_ENV}={candidate} does not contain "
             f"{LEGACY_RUNTIME_PACKAGE}/__init__.py"
+        )
+
+    bundled_runtime_root = _materialize_staged_tree("runtime", environ=environ)
+    if _has_runtime_package(bundled_runtime_root, PUBLIC_RUNTIME_PACKAGE):
+        return RuntimeResolution(
+            root=bundled_runtime_root,
+            package_name=PUBLIC_RUNTIME_PACKAGE,
+            source="bundled staged runtime",
         )
 
     sibling_root = (resolved_repo_root.parent / "mcp_servers").resolve()
@@ -208,6 +267,25 @@ def resolve_config_path(
             kind="legacy config",
         )
 
+    bundled_config = _materialize_staged_tree(f"config/{PUBLIC_CONFIG_FILENAME}", environ=environ)
+    if bundled_config.is_file():
+        return ConfigResolution(
+            path=bundled_config,
+            source="bundled staged config",
+            kind="active config",
+        )
+
+    bundled_example = _materialize_staged_tree(
+        f"examples/{PUBLIC_EXAMPLE_CONFIG_FILENAME}",
+        environ=environ,
+    )
+    if bundled_example.is_file():
+        return ConfigResolution(
+            path=bundled_example,
+            source="bundled staged example",
+            kind="example config",
+        )
+
     raise RuntimeError(
         "Could not resolve a client-wires config. Checked "
         f"{PUBLIC_CONFIG_PATH_ENV}, {PUBLIC_CONFIG_ROOT_ENV}, package-local config, "
@@ -228,6 +306,7 @@ def wire_info_lines(
         package_root=resolved_package_root,
         environ=environ,
     )
+    skills_resolution = resolve_staged_skills_root(environ=environ)
     return [
         "Fixer client-wires bootstrap resolved:",
         f"- repo root: {resolved_repo_root}",
@@ -238,6 +317,8 @@ def wire_info_lines(
         f"- config path: {config_resolution.path}",
         f"- config source: {config_resolution.source}",
         f"- config kind: {config_resolution.kind}",
+        f"- staged skills root: {skills_resolution.root}",
+        f"- staged skills source: {skills_resolution.source}",
         f"- example config: {resolve_example_config_path(resolved_repo_root, resolved_package_root)}",
     ]
 

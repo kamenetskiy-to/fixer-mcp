@@ -23,6 +23,8 @@ This package is intentionally incremental. It brings the current server module, 
 
 The server writes `fixer.db` and `fixer_mcp.log` in its current working directory. Keep local runtime state inside this package directory or a wrapper-managed working directory rather than committing it into the repo.
 
+Explicit worker launches also persist proxy-related launch state in `.codex/runtime_proxy_env.json`. When a later background launch starts from a process without proxy env inheritance, the server reuses the last saved `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` snapshot instead of silently dropping it.
+
 Ignored local artifacts include:
 
 - `fixer.db`

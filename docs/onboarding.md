@@ -32,15 +32,18 @@ Use this when you want the staged launcher contract from the public repo itself.
 ```bash
 python3 -m pip install -e ./packages/client-wires
 python3 -m pip install -e ./packages/compat-bridge
-python3 -m fixer_client_wires wire-info
-fixer-client-wires list-roles
-fixer-client-wires plan-launch --role fixer --backend codex --mcp-server fixer_mcp
+cd packages/fixer-mcp-server && make build
+cd ../..
+fixer --wire-info
+fixer
 ```
 
 This onboarding path is repo-native:
 
 - no sibling `../mcp_servers` checkout is required for first boot
 - package-local config in `packages/client-wires/config/mcp-config.json` is the default starting point
+- `fixer` is now the repo-native operational wrapper instead of a plan-only placeholder
+- packaged launches keep SQLite state in `~/.local/state/fixer-client-wires/` unless overridden
 - legacy env vars and repo-root config files remain compatibility-only fallbacks
 
 ## Config And Runtime Overrides

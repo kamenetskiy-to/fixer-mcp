@@ -17,6 +17,7 @@ DEFAULT_VERSION = "0.1.0"
 ASSEMBLY_ROOT_NAME = "github_repo"
 ASSEMBLY_INCLUDE_PATHS = (
     Path("README.md"),
+    Path("apps"),
     Path("docs"),
     Path("examples"),
     Path("packages"),

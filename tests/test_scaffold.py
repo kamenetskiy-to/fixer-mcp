@@ -11,6 +11,9 @@ class GithubRepoScaffoldTest(unittest.TestCase):
     def test_expected_scaffold_exists(self) -> None:
         expected_paths = [
             REPO_ROOT / "README.md",
+            REPO_ROOT / "apps" / "fixer-desktop" / "pubspec.yaml",
+            REPO_ROOT / "apps" / "fixer-desktop" / "lib" / "main.dart",
+            REPO_ROOT / "apps" / "fixer-desktop" / "test" / "widget_test.dart",
             REPO_ROOT / "docs" / "architecture.md",
             REPO_ROOT / "docs" / "migration-plan.md",
             REPO_ROOT / "docs" / "implementation-slices.md",
@@ -19,6 +22,12 @@ class GithubRepoScaffoldTest(unittest.TestCase):
             REPO_ROOT / "docs" / "release.md",
             REPO_ROOT / "examples" / "mcp-config.example.json",
             REPO_ROOT / "scripts" / "release_public_repo.py",
+            REPO_ROOT / "packages" / "desktop-bridge" / "README.md",
+            REPO_ROOT / "packages" / "desktop-bridge" / "pyproject.toml",
+            REPO_ROOT / "packages" / "desktop-bridge" / "src" / "fixer_desktop_bridge" / "__main__.py",
+            REPO_ROOT / "packages" / "desktop-bridge" / "src" / "fixer_desktop_bridge" / "cli.py",
+            REPO_ROOT / "packages" / "desktop-bridge" / "src" / "fixer_desktop_bridge" / "app.py",
+            REPO_ROOT / "packages" / "desktop-bridge" / "src" / "fixer_desktop_bridge" / "store.py",
             REPO_ROOT / "packages" / "fixer-mcp-server" / "README.md",
             REPO_ROOT / "packages" / "fixer-mcp-server" / "go.mod",
             REPO_ROOT / "packages" / "fixer-mcp-server" / "main.go",
@@ -38,7 +47,14 @@ class GithubRepoScaffoldTest(unittest.TestCase):
             REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "backends" / "base.py",
             REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "backends" / "codex.py",
             REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "backends" / "droid.py",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "backends" / "claude.py",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "data" / "backend-catalog.json",
             REPO_ROOT / "packages" / "client-wires" / "runtime" / "fixer_runtime" / "__init__.py",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "staged" / "__init__.py",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "staged" / "config" / "mcp-config.json",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "staged" / "examples" / "mcp-config.example.json",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "staged" / "runtime" / "fixer_runtime" / "__init__.py",
+            REPO_ROOT / "packages" / "client-wires" / "src" / "fixer_client_wires" / "staged" / "skills" / "start-fixer" / "SKILL.md",
             REPO_ROOT / "packages" / "compat-bridge" / "README.md",
             REPO_ROOT / "packages" / "compat-bridge" / "pyproject.toml",
             REPO_ROOT / "packages" / "compat-bridge" / "src" / "fixer_compat_bridge" / "__init__.py",
@@ -55,6 +71,8 @@ class GithubRepoScaffoldTest(unittest.TestCase):
         migration = (REPO_ROOT / "docs" / "migration-plan.md").read_text(encoding="utf-8")
 
         self.assertIn("FIXER_CLIENT_WIRES_RUNTIME_ROOT", readme)
+        self.assertIn("apps/fixer-desktop", readme)
+        self.assertIn("packages/desktop-bridge", readme)
         self.assertIn("../mcp_servers", architecture)
         self.assertIn("copy-and-strip export", readme)
         self.assertIn("compat-bridge", architecture)
@@ -72,6 +90,7 @@ class GithubRepoScaffoldTest(unittest.TestCase):
         self.assertIn("assembly-manifest.json", architecture)
         self.assertIn("assembly/github_repo", architecture)
         self.assertIn("assembly/github_repo", readme)
+        self.assertIn("desktop bridge", migration.lower())
         self.assertIn("Phase 5: Export Retirement", migration)
         self.assertIn("scripts/release_public_repo.py", migration)
         self.assertIn("packages/fixer-mcp-server", architecture)

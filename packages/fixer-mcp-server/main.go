@@ -34,6 +34,138 @@ var (
 
 var execCommand = exec.Command
 
+const runtimeProxyEnvStateFilename = "runtime_proxy_env.json"
+const (
+	fixerDBPathEnv         = "FIXER_DB_PATH"
+	fixerMcpDefaultRoleEnv = "FIXER_MCP_DEFAULT_ROLE"
+	fixerMcpDefaultCwdEnv  = "FIXER_MCP_DEFAULT_CWD"
+	defaultFixerDBFilename = "fixer.db"
+)
+
+type runtimeProxyEnvState struct {
+	ProxyEnv       map[string]string `json:"proxy_env"`
+	UpdatedAtEpoch int64             `json:"updated_at_epoch"`
+}
+
+var proxyEnvAliasGroups = [][]string{
+	{"ALL_PROXY", "all_proxy"},
+	{"HTTP_PROXY", "http_proxy"},
+	{"HTTPS_PROXY", "https_proxy"},
+	{"NO_PROXY", "no_proxy"},
+}
+
+func runtimeProxyEnvStatePath(projectCWD string) string {
+	return filepath.Join(projectCWD, ".codex", runtimeProxyEnvStateFilename)
+}
+
+func envSliceToMap(env []string) map[string]string {
+	payload := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		payload[key] = value
+	}
+	return payload
+}
+
+func captureProxyEnv(source map[string]string) map[string]string {
+	payload := map[string]string{}
+	for _, aliases := range proxyEnvAliasGroups {
+		value := ""
+		for _, name := range aliases {
+			candidate := strings.TrimSpace(source[name])
+			if candidate != "" {
+				value = candidate
+				break
+			}
+		}
+		if value == "" {
+			continue
+		}
+		for _, name := range aliases {
+			payload[name] = value
+		}
+	}
+	return payload
+}
+
+func saveRuntimeProxyEnvState(projectCWD string, proxyEnv map[string]string) error {
+	path := runtimeProxyEnvStatePath(projectCWD)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload := runtimeProxyEnvState{
+		ProxyEnv:       captureProxyEnv(proxyEnv),
+		UpdatedAtEpoch: time.Now().Unix(),
+	}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	return os.WriteFile(path, encoded, 0o644)
+}
+
+func loadRuntimeProxyEnvState(projectCWD string) (map[string]string, error) {
+	path := runtimeProxyEnvStatePath(projectCWD)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+
+	var state runtimeProxyEnvState
+	if err := json.Unmarshal(payload, &state); err == nil {
+		return captureProxyEnv(state.ProxyEnv), nil
+	}
+
+	var legacy map[string]string
+	if err := json.Unmarshal(payload, &legacy); err != nil {
+		return nil, err
+	}
+	return captureProxyEnv(legacy), nil
+}
+
+func overlayEnvSlice(baseEnv []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return append([]string{}, baseEnv...)
+	}
+	baseMap := envSliceToMap(baseEnv)
+	for key, value := range overrides {
+		baseMap[key] = value
+	}
+	keys := make([]string, 0, len(baseMap))
+	for key := range baseMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	merged := make([]string, 0, len(keys))
+	for _, key := range keys {
+		merged = append(merged, key+"="+baseMap[key])
+	}
+	return merged
+}
+
+func resolveRuntimeLaunchEnv(projectCWD string, baseEnv []string) ([]string, error) {
+	current := captureProxyEnv(envSliceToMap(baseEnv))
+	if len(current) > 0 {
+		if err := saveRuntimeProxyEnvState(projectCWD, current); err != nil {
+			return nil, err
+		}
+		return overlayEnvSlice(baseEnv, current), nil
+	}
+
+	persisted, err := loadRuntimeProxyEnvState(projectCWD)
+	if err != nil {
+		return nil, err
+	}
+	return overlayEnvSlice(baseEnv, persisted), nil
+}
+
 func loadOptionalDotEnv(paths ...string) error {
 	for _, rawPath := range paths {
 		candidate := strings.TrimSpace(rawPath)
@@ -226,7 +358,7 @@ func _() {
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", "fixer.db")
+	db, err = sql.Open("sqlite", resolveFixerDBPath())
 	if err != nil {
 		log.Fatalf("Error opening db: %v", err)
 	}
@@ -497,6 +629,43 @@ func initDB() {
 	if err := seedRolePreprompts(); err != nil {
 		log.Printf("role preprompt seed skipped: %v", err)
 	}
+}
+
+func resolveFixerDBPath() string {
+	if explicitPath := strings.TrimSpace(os.Getenv(fixerDBPathEnv)); explicitPath != "" {
+		return explicitPath
+	}
+	return defaultFixerDBFilename
+}
+
+func bootstrapDefaultNetrunnerAuthFromEnv() {
+	if strings.TrimSpace(authorizedRole) != "" {
+		return
+	}
+	if strings.TrimSpace(os.Getenv(fixerMcpDefaultRoleEnv)) != "netrunner" {
+		return
+	}
+	normalizedCWD, err := normalizeProjectCWD(os.Getenv(fixerMcpDefaultCwdEnv))
+	if err != nil {
+		log.Printf("fixer_mcp env auth bootstrap skipped: invalid cwd: %v", err)
+		return
+	}
+
+	var projId int
+	err = db.QueryRow("SELECT id FROM project WHERE cwd = ?", normalizedCWD).Scan(&projId)
+	if err == sql.ErrNoRows {
+		log.Printf("fixer_mcp env auth bootstrap skipped: cwd not registered: %s", normalizedCWD)
+		return
+	}
+	if err != nil {
+		log.Printf("fixer_mcp env auth bootstrap skipped: project lookup error: %v", err)
+		return
+	}
+
+	authorizedRole = "netrunner"
+	authorizedProjectId = projId
+	authorizedSessionId = 0
+	log.Printf("fixer_mcp env auth bootstrap applied for netrunner project_id=%d cwd=%s", projId, normalizedCWD)
 }
 
 type mcpConfigFile struct {
@@ -1417,7 +1586,6 @@ type sessionLifecycleState struct {
 	CliModel              string
 	CliReasoning          string
 	DeclaredWriteScope    []string
-	ParallelWaveID        string
 	RepairSourceSessionID int
 	ReworkCount           int
 	ForcedStopCount       int
@@ -1572,7 +1740,6 @@ func fetchSessionLifecycleState(sessionID int, projectID int) (sessionLifecycleS
 		        COALESCE(cli_model, ''),
 		        COALESCE(cli_reasoning, ''),
 		        COALESCE(declared_write_scope, ''),
-		        COALESCE(parallel_wave_id, ''),
 		        COALESCE(repair_source_session_id, 0),
 		        COALESCE(rework_count, 0),
 		        COALESCE(forced_stop_count, 0)
@@ -1589,7 +1756,6 @@ func fetchSessionLifecycleState(sessionID int, projectID int) (sessionLifecycleS
 		&state.CliModel,
 		&state.CliReasoning,
 		&writeScope,
-		&state.ParallelWaveID,
 		&state.RepairSourceSessionID,
 		&state.ReworkCount,
 		&state.ForcedStopCount,
@@ -2027,6 +2193,7 @@ func main() {
 	log.Println("Starting Fixer MCP server...")
 
 	initDB()
+	bootstrapDefaultNetrunnerAuthFromEnv()
 
 	// Create MCP server
 	server := mcp.NewServer(&mcp.Implementation{Name: "fixer_mcp", Version: "v1.0.0"}, nil)
@@ -2215,23 +2382,13 @@ func main() {
 	}, GetSession)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "launch_explicit_netrunner",
-		Description: "Launch one MCP-sensitive Netrunner through the existing explicit wire path so the worker gets deterministic project-scoped MCP mounting. Requires fixer role.",
-	}, LaunchExplicitNetrunner)
-
-	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_netrunner_session",
-		Description: "Wait for a launched Netrunner session to reach a review-ready or terminal lifecycle state and return structured status/report/proposal metadata. Requires fixer role.",
+		Description: "Wait for one launched Netrunner session to reach a review-ready or terminal lifecycle state and return structured status/report/proposal metadata. Requires fixer role.",
 	}, WaitForNetrunnerSession)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "wait_for_netrunner_sessions",
-		Description: "Wait across either an explicit list of project-scoped Netrunner sessions or the current project's active explicit-launch candidates and return the first review-ready or terminal winner. Requires fixer role.",
-	}, WaitForNetrunnerSessions)
-
-	mcp.AddTool(server, &mcp.Tool{
 		Name:        "launch_and_wait_netrunner",
-		Description: "Convenience composition for explicit MCP-sensitive Netrunner launch plus structured wait in the same Fixer thread. Requires fixer role.",
+		Description: "Launch exactly one MCP-sensitive Netrunner through the serial explicit wire path and wait for its review-ready or terminal result in the same Fixer thread. Requires fixer role.",
 	}, LaunchAndWaitNetrunner)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -2243,11 +2400,6 @@ func main() {
 		Name:        "stop_active_worker_processes",
 		Description: "Stop active Fixer-managed worker processes for the current project and optionally freeze orchestration follow-up. Requires fixer role.",
 	}, StopActiveWorkerProcesses)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "wake_fixer_autonomous",
-		Description: "For autonomous netrunners: resume the project Fixer thread headlessly after a completed session so it can review results and continue the serial delivery loop.",
-	}, WakeFixerAutonomous)
 
 	// Run stdio transport
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
@@ -3300,7 +3452,6 @@ func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input Regist
 type CreateTaskInput struct {
 	TaskDescription    string   `json:"task_description" jsonschema:"Description of the task to be created"`
 	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional declared project-relative write scope for the session. Defaults to the whole project to preserve serial execution."`
-	ParallelWaveID     string   `json:"parallel_wave_id,omitempty" jsonschema:"Optional explicit wave identifier for sessions that are pre-approved to run in the same parallel launch wave."`
 }
 
 type CreateTaskOutput struct {
@@ -3317,14 +3468,11 @@ func CreateTask(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskI
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateTaskOutput{}, err
 	}
-	parallelWaveID := strings.TrimSpace(input.ParallelWaveID)
-
 	res, err := db.Exec(
-		"INSERT INTO session (project_id, task_description, status, declared_write_scope, parallel_wave_id) VALUES (?, ?, 'pending', ?, ?)",
+		"INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (?, ?, 'pending', ?)",
 		authorizedProjectId,
 		input.TaskDescription,
 		declaredWriteScope,
-		parallelWaveID,
 	)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateTaskOutput{}, fmt.Errorf("DB insert error: %v", err)
@@ -3806,6 +3954,8 @@ type SessionFinalReport struct {
 	CleanupClaims SessionCleanupClaims `json:"cleanup_claims,omitempty"`
 }
 
+const completeTaskReportTemplate = `{"files_changed":["path/to/file"],"commands_run":["cmd"],"checks_run":["check result"],"blockers":[]}`
+
 func normalizeStringList(raw []string) []string {
 	values := make([]string, 0, len(raw))
 	for _, entry := range raw {
@@ -3832,7 +3982,11 @@ func decodeStructuredFinalReport(raw string) (SessionFinalReport, string, error)
 	requiredFields := []string{"files_changed", "commands_run", "checks_run", "blockers"}
 	for _, field := range requiredFields {
 		if _, exists := payload[field]; !exists {
-			return SessionFinalReport{}, "", fmt.Errorf("final_report is missing required field %q", field)
+			return SessionFinalReport{}, "", fmt.Errorf(
+				"final_report is missing required field %q; required top-level keys: files_changed, commands_run, checks_run, blockers. Minimal template: %s",
+				field,
+				completeTaskReportTemplate,
+			)
 		}
 	}
 
@@ -3901,27 +4055,6 @@ func CompleteTask(ctx context.Context, req *mcp.CallToolRequest, input CompleteT
 	_, normalizedReport, err := decodeStructuredFinalReport(input.FinalReport)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, err
-	}
-
-	control, _, err := fetchOrchestrationControl(authorizedProjectId)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("DB query error: %v", err)
-	}
-	if control.OrchestrationFrozen {
-		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("orchestration is frozen for project %d; explicit resume is required before review-ready completion", authorizedProjectId)
-	}
-
-	launchEpoch, err := latestWorkerLaunchEpoch(globalSessionID, authorizedProjectId)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("DB query error: %v", err)
-	}
-	if launchEpoch > 0 && control.OrchestrationEpoch != launchEpoch {
-		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf(
-			"session %d was launched under orchestration epoch %d, but the active epoch is now %d; review-ready completion is blocked until Fixer explicitly resumes or forks repair work",
-			input.SessionId,
-			launchEpoch,
-			control.OrchestrationEpoch,
-		)
 	}
 
 	_, err = db.Exec("UPDATE session SET status = 'review', report = ? WHERE id = ? AND project_id = ?", normalizedReport, globalSessionID, authorizedProjectId)
@@ -4592,7 +4725,6 @@ type ForkRepairSessionFromInput struct {
 	SessionId          int      `json:"session_id" jsonschema:"The project-scoped session ID to fork into a new repair session."`
 	Reason             string   `json:"reason,omitempty" jsonschema:"Optional concise provenance note explaining why the repair fork is being created."`
 	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional replacement declared write scope. Defaults to the source session scope."`
-	ParallelWaveID     string   `json:"parallel_wave_id,omitempty" jsonschema:"Optional replacement explicit parallel wave identifier. Defaults to serial-safe empty."`
 }
 
 type ForkRepairSessionFromOutput struct {
@@ -4647,7 +4779,6 @@ func ForkRepairSessionFrom(ctx context.Context, req *mcp.CallToolRequest, input 
 		provenanceLines = append(provenanceLines, "Repair fork reason: "+reason)
 	}
 	newTaskDescription := strings.Join(provenanceLines, "\n\n")
-	parallelWaveID := strings.TrimSpace(input.ParallelWaveID)
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -4663,13 +4794,11 @@ func ForkRepairSessionFrom(ctx context.Context, req *mcp.CallToolRequest, input 
 			task_description,
 			status,
 			declared_write_scope,
-			parallel_wave_id,
 			repair_source_session_id
-		) VALUES (?, ?, 'pending', ?, ?, ?)`,
+		) VALUES (?, ?, 'pending', ?, ?)`,
 		authorizedProjectId,
 		newTaskDescription,
 		encodedWriteScope,
-		parallelWaveID,
 		sourceSessionID,
 	)
 	if err != nil {
@@ -5017,7 +5146,6 @@ type SessionDetails struct {
 	CliModel              string   `json:"cli_model,omitempty"`
 	CliReasoning          string   `json:"cli_reasoning,omitempty"`
 	DeclaredWriteScope    []string `json:"declared_write_scope"`
-	ParallelWaveID        string   `json:"parallel_wave_id,omitempty"`
 	RepairSourceSessionId int      `json:"repair_source_session_id,omitempty"`
 	ReworkCount           int      `json:"rework_count"`
 	ForcedStopCount       int      `json:"forced_stop_count"`
@@ -5056,7 +5184,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 		        COALESCE(cli_model, ''),
 		        COALESCE(cli_reasoning, ''),
 		        COALESCE(declared_write_scope, ''),
-		        COALESCE(parallel_wave_id, ''),
 		        COALESCE(repair_source_session_id, 0),
 		        COALESCE(rework_count, 0),
 		        COALESCE(forced_stop_count, 0)
@@ -5074,7 +5201,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 		&session.CliModel,
 		&session.CliReasoning,
 		&declaredWriteScope,
-		&session.ParallelWaveID,
 		&session.RepairSourceSessionId,
 		&session.ReworkCount,
 		&session.ForcedStopCount,
@@ -5113,26 +5239,21 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 }
 
 type ExplicitNetrunnerLaunchMetadata struct {
-	SessionId              int      `json:"session_id"`
-	ProjectCwd             string   `json:"project_cwd"`
-	LauncherScript         string   `json:"launcher_script"`
-	Backend                string   `json:"backend"`
-	Model                  string   `json:"model,omitempty"`
-	Reasoning              string   `json:"reasoning,omitempty"`
-	ExternalSessionId      string   `json:"external_session_id,omitempty"`
-	CodexSessionId         string   `json:"codex_session_id,omitempty"`
-	SpawnedBackground      bool     `json:"spawned_background"`
-	OrchestrationEpoch     int      `json:"orchestration_epoch"`
-	DeclaredWriteScope     []string `json:"declared_write_scope"`
-	ParallelWaveID         string   `json:"parallel_wave_id,omitempty"`
-	ConcurrentLaunch       bool     `json:"concurrent_launch"`
-	WriteScopeOverrideUsed bool     `json:"write_scope_override_used"`
+	SessionId          int      `json:"session_id"`
+	ProjectCwd         string   `json:"project_cwd"`
+	LauncherScript     string   `json:"launcher_script"`
+	Backend            string   `json:"backend"`
+	Model              string   `json:"model,omitempty"`
+	Reasoning          string   `json:"reasoning,omitempty"`
+	ExternalSessionId  string   `json:"external_session_id,omitempty"`
+	CodexSessionId     string   `json:"codex_session_id,omitempty"`
+	SpawnedBackground  bool     `json:"spawned_background"`
+	DeclaredWriteScope []string `json:"declared_write_scope"`
 }
 
 type LaunchExplicitNetrunnerInput struct {
 	SessionId                  int    `json:"session_id" jsonschema:"Project-scoped session ID to launch over the explicit MCP-mounted wire path."`
 	FixerSessionId             string `json:"fixer_session_id,omitempty" jsonschema:"Optional current Fixer Codex session ID to pass into the explicit wire runtime."`
-	WriteScopeOverrideReason   string `json:"write_scope_override_reason,omitempty" jsonschema:"Optional explicit reason to override an overlapping declared write scope launch block."`
 	SessionReuseOverrideReason string `json:"session_reuse_override_reason,omitempty" jsonschema:"Optional explicit reason to relaunch a session that should normally be replaced by a repair fork after repeated rework or a forced stop."`
 	Backend                    string `json:"backend,omitempty" jsonschema:"Optional CLI backend to launch for this session. Supported: codex, droid."`
 	Model                      string `json:"model,omitempty" jsonschema:"Optional backend-specific model selection to persist for this session."`
@@ -5166,11 +5287,6 @@ type ExplicitNetrunnerWaitResult struct {
 	Report                string `json:"report,omitempty"`
 	ProposalIds           []int  `json:"proposal_ids"`
 	CodexSessionId        string `json:"codex_session_id,omitempty"`
-	FollowUpAllowed       bool   `json:"follow_up_allowed"`
-	FollowUpBlockedReason string `json:"follow_up_blocked_reason,omitempty"`
-	LaunchEpoch           int    `json:"launch_epoch"`
-	CurrentEpoch          int    `json:"current_epoch"`
-	OrchestrationFrozen   bool   `json:"orchestration_frozen"`
 	RepairForkRecommended bool   `json:"repair_fork_recommended"`
 }
 
@@ -5219,7 +5335,6 @@ type WaitForNetrunnerSessionsOutput struct {
 type LaunchAndWaitNetrunnerInput struct {
 	SessionId                  int    `json:"session_id" jsonschema:"Project-scoped session ID to launch and then wait on over the explicit MCP-mounted wire path."`
 	FixerSessionId             string `json:"fixer_session_id,omitempty" jsonschema:"Optional current Fixer Codex session ID to pass into the explicit wire runtime."`
-	WriteScopeOverrideReason   string `json:"write_scope_override_reason,omitempty" jsonschema:"Optional explicit reason to override an overlapping declared write scope launch block."`
 	SessionReuseOverrideReason string `json:"session_reuse_override_reason,omitempty" jsonschema:"Optional explicit reason to relaunch a session that should normally be replaced by a repair fork after repeated rework or a forced stop."`
 	Backend                    string `json:"backend,omitempty" jsonschema:"Optional CLI backend to launch for this session. Supported: codex, droid."`
 	Model                      string `json:"model,omitempty" jsonschema:"Optional backend-specific model selection to persist for this session."`
@@ -5238,7 +5353,6 @@ type activeLaunchSession struct {
 	LocalSessionID     int
 	GlobalSessionID    int
 	DeclaredWriteScope []string
-	ParallelWaveID     string
 }
 
 func loadActiveLaunchSessions(projectID int) ([]activeLaunchSession, error) {
@@ -5267,7 +5381,6 @@ func loadActiveLaunchSessions(projectID int) ([]activeLaunchSession, error) {
 			LocalSessionID:     localSessionID,
 			GlobalSessionID:    process.SessionID,
 			DeclaredWriteScope: state.DeclaredWriteScope,
-			ParallelWaveID:     state.ParallelWaveID,
 		})
 	}
 	return activeSessions, nil
@@ -5322,62 +5435,26 @@ func launchExplicitNetrunnerWithMetadata(ctx context.Context, input LaunchExplic
 		)
 	}
 
-	control, _, err := fetchOrchestrationControl(authorizedProjectId)
-	if err != nil {
-		return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("DB query error: %v", err)
-	}
-	if control.OrchestrationFrozen {
-		return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("orchestration is frozen for project %d; explicit resume is required before launch", authorizedProjectId)
-	}
-
 	activeSessions, err := loadActiveLaunchSessions(authorizedProjectId)
 	if err != nil {
 		return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("failed to inspect active worker processes: %v", err)
 	}
-	concurrentLaunch := len(activeSessions) > 0
-	writeScopeOverrideUsed := false
-	if concurrentLaunch {
-		if strings.TrimSpace(sessionState.ParallelWaveID) == "" {
-			return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("parallel launch rejected for session %d: active workers already exist and this session has no explicit parallel_wave_id", sessionID)
-		}
-		if containsFoundationWriteScope(sessionState.DeclaredWriteScope) {
-			return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("parallel launch rejected for session %d: declared write scope touches a foundation/bootstrap layer", sessionID)
-		}
-
-		overlappingSessions := make([]int, 0, len(activeSessions))
+	if len(activeSessions) > 0 {
 		for _, activeSession := range activeSessions {
 			if activeSession.GlobalSessionID == globalSessionID {
 				return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("session %d already has an active worker process", sessionID)
 			}
-			if strings.TrimSpace(activeSession.ParallelWaveID) == "" || activeSession.ParallelWaveID != sessionState.ParallelWaveID {
-				return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf(
-					"parallel launch rejected for session %d: active session %d is not in the same explicit parallel wave %q",
-					sessionID,
-					activeSession.LocalSessionID,
-					sessionState.ParallelWaveID,
-				)
-			}
-			if containsFoundationWriteScope(activeSession.DeclaredWriteScope) {
-				return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf(
-					"parallel launch rejected for session %d: active session %d owns a foundation/bootstrap write scope",
-					sessionID,
-					activeSession.LocalSessionID,
-				)
-			}
-			if writeScopesOverlap(sessionState.DeclaredWriteScope, activeSession.DeclaredWriteScope) {
-				overlappingSessions = append(overlappingSessions, activeSession.LocalSessionID)
-			}
 		}
-		if len(overlappingSessions) > 0 {
-			if strings.TrimSpace(input.WriteScopeOverrideReason) == "" {
-				return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf(
-					"parallel launch rejected for session %d: declared write scope overlaps active sessions %v; provide write_scope_override_reason to override intentionally",
-					sessionID,
-					overlappingSessions,
-				)
-			}
-			writeScopeOverrideUsed = true
+		busySessionIDs := make([]int, 0, len(activeSessions))
+		for _, activeSession := range activeSessions {
+			busySessionIDs = append(busySessionIDs, activeSession.LocalSessionID)
 		}
+		sort.Ints(busySessionIDs)
+		return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf(
+			"serial explicit launch only: active worker sessions already exist in this project (%v); stop or finish them before launching session %d",
+			busySessionIDs,
+			sessionID,
+		)
 	}
 
 	launchConfig, err := resolveSessionLaunchConfig(globalSessionID, authorizedProjectId, input.Backend, input.Model, input.Reasoning)
@@ -5415,14 +5492,19 @@ func launchExplicitNetrunnerWithMetadata(ctx context.Context, input LaunchExplic
 	}
 
 	command := execCommand("python3", commandArgs...)
-	command.Env = os.Environ()
+	commandEnv, envErr := resolveRuntimeLaunchEnv(projectCWD, os.Environ())
+	if envErr != nil {
+		log.Printf("warning: failed to resolve persisted runtime proxy env for %s: %v", projectCWD, envErr)
+		commandEnv = os.Environ()
+	}
+	command.Env = commandEnv
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
 		return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("failed to launch explicit netrunner: %v", err)
 	}
 	if command.Process != nil {
-		if err := recordWorkerProcessLaunch(authorizedProjectId, globalSessionID, command.Process.Pid, control.OrchestrationEpoch); err != nil {
+		if err := recordWorkerProcessLaunch(authorizedProjectId, globalSessionID, command.Process.Pid, 0); err != nil {
 			_ = command.Process.Kill()
 			_ = command.Process.Release()
 			return ExplicitNetrunnerLaunchMetadata{}, fmt.Errorf("failed to persist worker process metadata: %v", err)
@@ -5454,20 +5536,16 @@ func launchExplicitNetrunnerWithMetadata(ctx context.Context, input LaunchExplic
 	}
 
 	return ExplicitNetrunnerLaunchMetadata{
-		SessionId:              sessionID,
-		ProjectCwd:             projectCWD,
-		LauncherScript:         launcherScript,
-		Backend:                launchConfig.Backend,
-		Model:                  launchConfig.Model,
-		Reasoning:              launchConfig.Reasoning,
-		ExternalSessionId:      externalSessionID,
-		CodexSessionId:         legacyCodexSessionID,
-		SpawnedBackground:      true,
-		OrchestrationEpoch:     control.OrchestrationEpoch,
-		DeclaredWriteScope:     append([]string{}, sessionState.DeclaredWriteScope...),
-		ParallelWaveID:         sessionState.ParallelWaveID,
-		ConcurrentLaunch:       concurrentLaunch,
-		WriteScopeOverrideUsed: writeScopeOverrideUsed,
+		SessionId:          sessionID,
+		ProjectCwd:         projectCWD,
+		LauncherScript:     launcherScript,
+		Backend:            launchConfig.Backend,
+		Model:              launchConfig.Model,
+		Reasoning:          launchConfig.Reasoning,
+		ExternalSessionId:  externalSessionID,
+		CodexSessionId:     legacyCodexSessionID,
+		SpawnedBackground:  true,
+		DeclaredWriteScope: append([]string{}, sessionState.DeclaredWriteScope...),
 	}, nil
 }
 
@@ -5639,15 +5717,15 @@ func fetchExplicitWaitSnapshot(candidate explicitWaitCandidate, projectID int, c
 	}
 	followUpAllowed, blockedReason := waitFollowUpDecision(control, launchEpoch)
 	return explicitWaitSnapshot{
-		LocalSessionID:        candidate.LocalSessionID,
-		Status:                status,
-		Report:                report,
-		ProposalIDs:           proposalIDs,
-		Backend:               backend,
-		Model:                 model,
-		Reasoning:             reasoning,
-		ExternalSessionID:     externalSessionID,
-		CodexSessionID:        func() string {
+		LocalSessionID:    candidate.LocalSessionID,
+		Status:            status,
+		Report:            report,
+		ProposalIDs:       proposalIDs,
+		Backend:           backend,
+		Model:             model,
+		Reasoning:         reasoning,
+		ExternalSessionID: externalSessionID,
+		CodexSessionID: func() string {
 			if backend == defaultCliBackend {
 				return externalSessionID
 			}
@@ -5837,12 +5915,7 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 	startedAt := time.Now()
 	deadline := startedAt.Add(time.Duration(timeoutSeconds) * time.Second)
 	seenActive := initialStatus == "in_progress" || initialStatus == "review" || initialStatus == "completed"
-	initialLaunchEpoch, err := latestWorkerLaunchEpoch(globalSessionID, authorizedProjectId)
-	if err != nil {
-		return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
-	}
-
-	buildResult := func(currentStatus string, terminal bool, terminalCondition string, timedOut bool, currentReport string, currentProposalIDs []int, currentBackend string, currentModel string, currentReasoning string, currentExternalSessionID string, control orchestrationControl, launchEpoch int, repairForkRecommended bool) ExplicitNetrunnerWaitResult {
+	buildResult := func(currentStatus string, terminal bool, terminalCondition string, timedOut bool, currentReport string, currentProposalIDs []int, currentBackend string, currentModel string, currentReasoning string, currentExternalSessionID string, repairForkRecommended bool) ExplicitNetrunnerWaitResult {
 		if currentProposalIDs == nil {
 			currentProposalIDs = []int{}
 		}
@@ -5850,7 +5923,6 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 		if currentBackend == defaultCliBackend {
 			legacyCodexSessionID = currentExternalSessionID
 		}
-		followUpAllowed, blockedReason := waitFollowUpDecision(control, launchEpoch)
 		return ExplicitNetrunnerWaitResult{
 			SessionId:             sessionID,
 			SessionStatus:         currentStatus,
@@ -5867,11 +5939,6 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 			Report:                currentReport,
 			ProposalIds:           currentProposalIDs,
 			CodexSessionId:        legacyCodexSessionID,
-			FollowUpAllowed:       followUpAllowed,
-			FollowUpBlockedReason: blockedReason,
-			LaunchEpoch:           launchEpoch,
-			CurrentEpoch:          control.OrchestrationEpoch,
-			OrchestrationFrozen:   control.OrchestrationFrozen,
 			RepairForkRecommended: repairForkRecommended,
 		}
 	}
@@ -5881,10 +5948,6 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 			return ExplicitNetrunnerWaitResult{}, err
 		}
 
-		control, _, err := fetchOrchestrationControl(authorizedProjectId)
-		if err != nil {
-			return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
-		}
 		sessionState, err := fetchSessionLifecycleState(globalSessionID, authorizedProjectId)
 		if err != nil {
 			return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
@@ -5896,11 +5959,11 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 
 		terminal, terminalCondition := classifyWaitTerminalCondition(initialStatus, currentStatus, seenActive)
 		if terminal {
-			return buildResult(currentStatus, true, terminalCondition, false, report, proposalIDs, backend, model, reasoning, externalSessionID, control, initialLaunchEpoch, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID)), nil
+			return buildResult(currentStatus, true, terminalCondition, false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID)), nil
 		}
 
 		if time.Now().After(deadline) {
-			return buildResult(currentStatus, false, "timed_out", true, report, proposalIDs, backend, model, reasoning, externalSessionID, control, initialLaunchEpoch, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID)), nil
+			return buildResult(currentStatus, false, "timed_out", true, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID)), nil
 		}
 
 		time.Sleep(time.Duration(pollIntervalSeconds) * time.Second)
@@ -5913,19 +5976,9 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 }
 
 func LaunchExplicitNetrunner(ctx context.Context, req *mcp.CallToolRequest, input LaunchExplicitNetrunnerInput) (*mcp.CallToolResult, LaunchExplicitNetrunnerOutput, error) {
-	if authorizedRole != "fixer" {
-		return &mcp.CallToolResult{IsError: true}, LaunchExplicitNetrunnerOutput{}, fmt.Errorf("access denied: requires fixer role")
-	}
-
-	launch, err := launchExplicitNetrunnerWithMetadata(ctx, input)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, LaunchExplicitNetrunnerOutput{}, err
-	}
-
-	return nil, LaunchExplicitNetrunnerOutput{
-		Status: "success",
-		Launch: launch,
-	}, nil
+	return &mcp.CallToolResult{IsError: true}, LaunchExplicitNetrunnerOutput{}, fmt.Errorf(
+		"launch_explicit_netrunner is temporarily disabled in the GitHub-ready track; use launch_and_wait_netrunner for the one-task autonomous flow or manual-resolution for separate-terminal work",
+	)
 }
 
 func WaitForNetrunnerSession(ctx context.Context, req *mcp.CallToolRequest, input WaitForNetrunnerSessionInput) (*mcp.CallToolResult, WaitForNetrunnerSessionOutput, error) {
@@ -5947,31 +6000,9 @@ func WaitForNetrunnerSession(ctx context.Context, req *mcp.CallToolRequest, inpu
 }
 
 func WaitForNetrunnerSessions(ctx context.Context, req *mcp.CallToolRequest, input WaitForNetrunnerSessionsInput) (*mcp.CallToolResult, WaitForNetrunnerSessionsOutput, error) {
-	if authorizedRole != "fixer" {
-		return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerSessionsOutput{}, fmt.Errorf("access denied: requires fixer role")
-	}
-
-	result, err := waitForNetrunnerSessionsResult(ctx, input.SessionIds, input.TimeoutSeconds, input.PollIntervalSeconds)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerSessionsOutput{}, err
-	}
-
-	log.Printf(
-		"wait_for_netrunner_sessions project_id=%d winner_session_id=%d terminal=%t condition=%q timed_out=%t status=%q mode=%q considered=%v",
-		authorizedProjectId,
-		result.WinningSessionId,
-		result.Terminal,
-		result.TerminalCondition,
-		result.TimedOut,
-		result.SessionStatus,
-		result.SelectionMode,
-		result.ConsideredSessionIds,
+	return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerSessionsOutput{}, fmt.Errorf(
+		"wait_for_netrunner_sessions is temporarily disabled in the GitHub-ready track; parallel Netrunner orchestration is not available",
 	)
-
-	return nil, WaitForNetrunnerSessionsOutput{
-		Status: "success",
-		Result: result,
-	}, nil
 }
 
 func LaunchAndWaitNetrunner(ctx context.Context, req *mcp.CallToolRequest, input LaunchAndWaitNetrunnerInput) (*mcp.CallToolResult, LaunchAndWaitNetrunnerOutput, error) {
@@ -5982,7 +6013,6 @@ func LaunchAndWaitNetrunner(ctx context.Context, req *mcp.CallToolRequest, input
 	launch, err := launchExplicitNetrunnerWithMetadata(ctx, LaunchExplicitNetrunnerInput{
 		SessionId:                  input.SessionId,
 		FixerSessionId:             input.FixerSessionId,
-		WriteScopeOverrideReason:   input.WriteScopeOverrideReason,
 		SessionReuseOverrideReason: input.SessionReuseOverrideReason,
 		Backend:                    input.Backend,
 		Model:                      input.Model,
@@ -6019,78 +6049,7 @@ type WakeFixerAutonomousOutput struct {
 }
 
 func WakeFixerAutonomous(ctx context.Context, req *mcp.CallToolRequest, input WakeFixerAutonomousInput) (*mcp.CallToolResult, WakeFixerAutonomousOutput, error) {
-	if authorizedRole != "netrunner" {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("access denied: requires netrunner role")
-	}
-
-	globalSessionID := authorizedSessionId
-	visibleSessionID := 0
-	if input.SessionId > 0 {
-		mappedGlobalSessionID, err := globalSessionIDFromProjectScoped(input.SessionId, authorizedProjectId)
-		if err == sql.ErrNoRows {
-			return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("session not found in current project")
-		}
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("DB query error: %v", err)
-		}
-		globalSessionID = mappedGlobalSessionID
-		visibleSessionID = input.SessionId
-	}
-
-	if globalSessionID == 0 {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("no active netrunner session is checked out")
-	}
-
-	if visibleSessionID == 0 {
-		mappedSessionID, err := projectScopedSessionIDFromGlobal(globalSessionID, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("failed to map active session to project-scoped id: %v", err)
-		}
-		visibleSessionID = mappedSessionID
-	}
-
-	projectCWD, err := projectCWDFromID(authorizedProjectId)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("failed to resolve project cwd: %v", err)
-	}
-
-	launcherScript, err := resolveExplicitLauncherScript()
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("autonomous launcher script unavailable: %v", err)
-	}
-
-	fixerStateFile := filepath.Join(projectCWD, ".codex", "autonomous_resolution.json")
-	if _, statErr := os.Stat(fixerStateFile); statErr != nil {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("autonomous fixer state file unavailable: %v", statErr)
-	}
-
-	command := execCommand(
-		"python3",
-		launcherScript,
-		"resume-fixer",
-		"--cwd",
-		projectCWD,
-		"--completed-session-id",
-		fmt.Sprintf("%d", visibleSessionID),
-		"--summary",
-		strings.TrimSpace(input.Summary),
+	return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf(
+		"wake_fixer_autonomous is temporarily disabled in the GitHub-ready track; autonomous fixer resume chains are not available",
 	)
-	command.Env = os.Environ()
-	command.Stdout = nil
-	command.Stderr = nil
-
-	if err := command.Start(); err != nil {
-		return &mcp.CallToolResult{IsError: true}, WakeFixerAutonomousOutput{}, fmt.Errorf("failed to launch autonomous fixer resume: %v", err)
-	}
-
-	log.Printf("wake_fixer_autonomous project_id=%d session_id=%d summary=%q", authorizedProjectId, visibleSessionID, strings.TrimSpace(input.Summary))
-
-	return nil, WakeFixerAutonomousOutput{
-		Status:            "success",
-		SessionId:         visibleSessionID,
-		ProjectCwd:        projectCWD,
-		LauncherScript:    launcherScript,
-		FixerStateFile:    fixerStateFile,
-		SpawnedBackground: true,
-	}, nil
 }

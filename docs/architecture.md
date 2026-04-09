@@ -172,9 +172,10 @@ The first server-packaging step is intentionally additive:
 The launcher package now moves beyond bootstrap-only scaffolding:
 
 - `packages/client-wires` exposes installable CLI entrypoints via `fixer-client-wires` and `python -m fixer_client_wires`
-- staged backend descriptors define the public launcher contract for `codex` and `droid`
+- staged backend descriptors define the public launcher contract for `codex`, `droid`, and a staged `claude` catalog entry
 - staged role descriptors define packaged launch semantics for `fixer`, `netrunner`, and `overseer`
-- `plan-launch` previews headless commands and backend-specific notes using package-local config and runtime resolution only
+- `plan-launch` previews fresh headless commands and backend-specific notes using package-local config and runtime resolution only
+- `plan-resume` previews sticky backend/model resume commands using stored external session metadata
 - launcher-oriented tests validate that this staged surface works without importing the legacy workspace tree
 
 ## Main Risks

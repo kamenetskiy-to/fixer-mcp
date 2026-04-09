@@ -66,9 +66,11 @@ Scope:
 Current staging status:
 
 - `packages/client-wires` now ships an installable CLI surface through `fixer-client-wires` and `python -m fixer_client_wires`
-- staged backend adapters exist for `codex` and `droid`
+- staged backend adapters exist for `codex` and `droid`, with a truthful staged `claude` catalog entry
 - staged role descriptors exist for `fixer`, `netrunner`, and `overseer`
-- a packaged `plan-launch` command resolves runtime/config and previews headless launch commands without importing the legacy launcher tree
+- packaged `plan-launch` and `plan-resume` commands resolve runtime/config and preview fresh-vs-resume headless commands without importing the legacy launcher tree
+- the staged launcher already models the required fresh-launch versus resume split for backend and model selection
+- follow-up parity work for the live legacy fixer alias path must happen in a separate session with write scope outside `github_repo/`
 
 Acceptance criteria:
 

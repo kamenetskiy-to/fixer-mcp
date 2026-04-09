@@ -9,10 +9,15 @@ It does not modify the legacy workspace. Instead, it adds a repo-local wrapper t
 - `python3 -m fixer_compat_bridge --wire-info`
 - `python3 -m fixer_compat_bridge --role fixer`
 - `python3 -m fixer_compat_bridge --role netrunner --backend codex --mcp-server fixer_mcp`
+- `fixer`
 - legacy runtime override via `MCP_SERVERS_ROOT`
 - legacy config fallback via repo-root `mcp_config.json`
 
-The bridge intentionally stays dry-run oriented for now. Role launches are translated into `fixer-client-wires plan-launch`, which lets an existing operator verify the new repo-local launch contract before moving off the legacy workspace.
+Execution contract:
+
+- `fixer` defaults to `--role fixer` and performs a real packaged launch
+- `fixer-compat-bridge --role ...` also performs a real launch by default
+- add `--dry-run` or `--json` when you want the old preview-only behavior
 
 ## Quick start
 
@@ -20,11 +25,11 @@ The bridge intentionally stays dry-run oriented for now. Role launches are trans
 python3 -m pip install -e ./packages/client-wires
 python3 -m pip install -e ./packages/compat-bridge
 python3 -m fixer_compat_bridge --wire-info
-fixer-compat-bridge --role fixer
+fixer
 ```
 
 ## Package layout
 
 - `src/fixer_compat_bridge/cli.py`: legacy flag parsing and delegation into `fixer_client_wires.cli`
 - `src/fixer_compat_bridge/__main__.py`: module entrypoint
-- `pyproject.toml`: packaging metadata and `fixer-compat-bridge` console script
+- `pyproject.toml`: packaging metadata and `fixer-compat-bridge` / `fixer` console scripts
