@@ -70,11 +70,12 @@ Fastest path to the staged launcher surface:
 
 ```bash
 python3 -m pip install -e ./packages/client-wires
-python3 -m pip install -e ./packages/compat-bridge
 fixer --wire-info
 fixer
 fixer-client-wires list-roles
 ```
+
+Running `fixer` now restores the phased first step: the operator chooses `fixer`, `netrunner`, or `overseer` before continuing into the newer launch flow. Pass `--role` only when you intentionally want a non-interactive bypass.
 
 If you want to preview the packaged launch plan instead of executing it:
 
@@ -88,7 +89,7 @@ The launcher resolves runtime and config through the public contract first:
 - `FIXER_CLIENT_WIRES_CONFIG_PATH`
 - `FIXER_CLIENT_WIRES_STATE_ROOT`
 
-The packaged wrapper keeps `fixer_mcp` state in `~/.local/state/fixer-client-wires/` by default and auto-builds the staged Go server when needed. Legacy fallbacks such as the old copy-and-strip export path remain compatibility-only, and the migration package still exposes `fixer_compat_bridge` for operators who want the old flag shape explicitly.
+The packaged wrapper keeps `fixer_mcp` state in `~/.local/state/fixer-client-wires/` by default and auto-builds the staged Go server when needed. The repo-owned `fixer` command now comes directly from `packages/client-wires`; `packages/compat-bridge` and `fixer_compat_bridge` are optional compatibility surfaces for operators who still want the old flag shape through `fixer-compat-bridge`. The old copy-and-strip export path remains compatibility-only rather than part of the primary install story.
 
 ## Architecture
 

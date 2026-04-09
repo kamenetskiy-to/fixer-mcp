@@ -7,7 +7,7 @@ It is still additive and compatibility-aware, but it now exposes a real package 
 - repo-local bootstrap and config resolution
 - backend descriptors for `codex`, `droid`, and `claude`
 - role-aware launch-plan building for `fixer`, `netrunner`, and `overseer`
-- package entrypoints that can both preview and execute launcher behavior without importing the legacy `client_wires` tree
+- package entrypoints, including the repo-native `fixer` console script, that can both preview and execute launcher behavior without importing the legacy `client_wires` tree
 
 ## Runtime contract
 
@@ -63,6 +63,8 @@ Parallel Netrunner orchestration and autonomous fixer resume chains are intentio
 
 ```bash
 python3 -m pip install -e ./packages/client-wires
+fixer --wire-info
+fixer
 python3 -m fixer_client_wires wire-info
 fixer-client-wires list-backends
 fixer-client-wires plan-launch --role fixer --backend codex --mcp-server fixer_mcp
@@ -72,6 +74,7 @@ fixer-client-wires resume --role netrunner --backend codex --session-id ext-sess
 
 Commands:
 
+- `fixer`: repo-native direct entrypoint that starts with an interactive role selector for `fixer`, `netrunner`, or `overseer`
 - `python3 -m fixer_client_wires wire-info`: print resolved runtime and config details
 - `fixer-client-wires list-roles`: show the packaged launch roles
 - `fixer-client-wires list-backends`: show the staged backend adapter surface
@@ -79,6 +82,8 @@ Commands:
 - `fixer-client-wires launch ...`: execute a fresh launch and materialize the required backend-specific MCP wiring
 - `fixer-client-wires plan-resume ...`: preview a headless resume command that keeps backend/model metadata sticky to the stored session
 - `fixer-client-wires resume ...`: execute the staged resume command with the same sticky session metadata contract
+
+Pass `--role` to the direct `fixer` entrypoint when you need a non-interactive bypass for scripting or focused dry runs.
 
 The packaged execution path now also handles the missing repo-native bootstrap work:
 

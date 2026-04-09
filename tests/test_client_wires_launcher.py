@@ -5,7 +5,7 @@ import importlib
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -261,6 +261,89 @@ class ClientWiresLauncherTest(unittest.TestCase):
         self.assertEqual(payload["backend"]["name"], "droid")
         self.assertEqual(payload["external_session_id"], "droid-session-9")
         self.assertNotIn("-m", payload["command"])
+
+    def test_direct_fixer_entrypoint_prompts_for_role_before_real_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            stdout = io.StringIO()
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with patch.object(sys, "argv", ["fixer"]):
+                    with patch("sys.stdin.isatty", return_value=True):
+                        with patch("builtins.input", return_value="2"):
+                            with patch("fixer_client_wires.cli.execute_launch_plan", return_value=0) as execute_launch:
+                                with redirect_stdout(stdout):
+                                    exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Select role:", stdout.getvalue())
+        execute_launch.assert_called_once()
+        launched_plan = execute_launch.call_args.args[0]
+        self.assertEqual(launched_plan.role.name, "netrunner")
+
+    def test_direct_fixer_entrypoint_dry_run_renders_selected_role_launch_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            stdout = io.StringIO()
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with patch.object(sys, "argv", ["fixer"]):
+                    with patch("sys.stdin.isatty", return_value=True):
+                        with patch("builtins.input", return_value="overseer"):
+                            with redirect_stdout(stdout):
+                                exit_code = cli.main(["--dry-run", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("Select role:", rendered)
+        payload = json.loads(rendered[rendered.index("{") :])
+        self.assertEqual(payload["role"]["name"], "overseer")
+        self.assertEqual(payload["backend"]["name"], "codex")
+        self.assertEqual(payload["mode"], "fresh")
+
+    def test_direct_fixer_entrypoint_requires_role_when_not_interactive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, package_root = self._make_layout(Path(temp_dir))
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            config_path = package_root / "config" / "mcp-config.json"
+            runtime_root = package_root / "runtime"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    PUBLIC_CONFIG_PATH_ENV: str(config_path),
+                    PUBLIC_RUNTIME_ROOT_ENV: str(runtime_root),
+                },
+                clear=False,
+            ):
+                with patch.object(sys, "argv", ["fixer"]):
+                    with patch("sys.stdin.isatty", return_value=False):
+                        with redirect_stdout(stdout), redirect_stderr(stderr):
+                            exit_code = cli.main([])
+
+        self.assertEqual(exit_code, 2)
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("Select role:", combined)
+        self.assertIn("pass --role to bypass the selector", combined)
 
     def test_available_backends_include_staged_claude_choice(self) -> None:
         stdout = io.StringIO()

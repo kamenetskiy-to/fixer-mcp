@@ -4,11 +4,80 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 from .executor import execute_launch_plan
 from .backends import available_backend_descriptors
 from .bootstrap import bootstrap_runtime_import_path, wire_info_lines
 from .launcher import available_roles, build_fresh_launch_plan, build_resume_plan, render_launch_plan
+
+
+def _role_choice_lines() -> list[str]:
+    roles = available_roles()
+    lines = ["Select role:"]
+    for index, role in enumerate(roles, start=1):
+        lines.append(f"{index}. {role.name} - {role.summary}")
+    return lines
+
+
+def _prompt_for_role_selection() -> str | None:
+    if not sys.stdin.isatty():
+        return None
+    roles = available_roles()
+    print("\n".join(_role_choice_lines()))
+    while True:
+        try:
+            raw_choice = input("Enter role number or name: ").strip()
+        except EOFError:
+            return None
+        if not raw_choice:
+            print("Choose fixer, netrunner, or overseer.")
+            continue
+        normalized = raw_choice.lower()
+        for role in roles:
+            if normalized == role.name:
+                return role.name
+        if raw_choice.isdigit():
+            index = int(raw_choice)
+            if 1 <= index <= len(roles):
+                return roles[index - 1].name
+        print("Choose fixer, netrunner, or overseer.")
+
+
+def _build_direct_entry_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Repo-native Fixer launcher entrypoint for the GitHub-ready Fixer MCP track."
+    )
+    parser.add_argument(
+        "--wire-info",
+        action="store_true",
+        help="Render the staged runtime and config resolution for the direct entrypoint.",
+    )
+    parser.add_argument(
+        "--role",
+        choices=sorted(role.name for role in available_roles()),
+        help="Launch role. Defaults to fixer when invoked via the fixer console script.",
+    )
+    parser.add_argument("--backend", default="codex")
+    parser.add_argument(
+        "--resume-session-id",
+        help="External session id for resume execution or preview.",
+    )
+    parser.add_argument("--model")
+    parser.add_argument("--reasoning")
+    parser.add_argument("--prompt")
+    parser.add_argument("--mcp-server", action="append", dest="mcp_servers", default=[])
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Render the delegated launch preview instead of executing it.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit delegated plan output as JSON for dry-run entrypoint usage.",
+    )
+    return parser
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -64,6 +133,18 @@ def _build_parser() -> argparse.ArgumentParser:
     resume_exec_parser.add_argument("--mcp-server", action="append", dest="mcp_servers", default=[])
 
     return parser
+
+
+def _render_missing_role_message(parser: argparse.ArgumentParser) -> int:
+    parser.print_help()
+    print()
+    print("\n".join(_role_choice_lines()), file=sys.stderr)
+    print(
+        "\nDirect entry note: run `fixer` interactively to choose a role first, pass --role to bypass the selector, "
+        "or use the explicit subcommands.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _print_roles() -> int:
@@ -170,7 +251,7 @@ def _execute_resume_launch(args: argparse.Namespace) -> int:
     return execute_launch_plan(plan)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _run_subcommand(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -197,3 +278,53 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"unsupported command: {args.command}")
     return 2
+
+
+def _run_direct_entry(argv: list[str], *, invoked_as: str) -> int:
+    parser = _build_direct_entry_parser()
+    args = parser.parse_args(argv)
+
+    if args.wire_info:
+        return _run_subcommand(["wire-info"])
+
+    role = args.role
+    if role is None and invoked_as == "fixer":
+        role = _prompt_for_role_selection()
+    if not role:
+        return _render_missing_role_message(parser)
+
+    render_only = args.dry_run or args.json
+    if args.resume_session_id:
+        delegated_args = [
+            "plan-resume" if render_only else "resume",
+            "--role",
+            role,
+            "--backend",
+            args.backend,
+            "--session-id",
+            args.resume_session_id,
+        ]
+    else:
+        delegated_args = ["plan-launch" if render_only else "launch", "--role", role, "--backend", args.backend]
+        if args.model:
+            delegated_args.extend(["--model", args.model])
+        if args.reasoning:
+            delegated_args.extend(["--reasoning", args.reasoning])
+    if args.prompt:
+        delegated_args.extend(["--prompt", args.prompt])
+    for server in args.mcp_servers:
+        delegated_args.extend(["--mcp-server", server])
+    if args.json:
+        delegated_args.append("--json")
+    return _run_subcommand(delegated_args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    invoked_as = Path(sys.argv[0]).name
+    direct_entry_mode = (invoked_as == "fixer" and (not raw_argv or raw_argv[0].startswith("--"))) or (
+        raw_argv and raw_argv[0].startswith("--")
+    )
+    if direct_entry_mode:
+        return _run_direct_entry(raw_argv, invoked_as=invoked_as)
+    return _run_subcommand(raw_argv)
