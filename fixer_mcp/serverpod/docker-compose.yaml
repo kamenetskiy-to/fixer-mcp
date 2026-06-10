@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "28032:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: fixer_dashboard
+      POSTGRES_PASSWORD: fixer-dashboard-dev
+    volumes:
+      - fixer_dashboard_serverpod_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:6.2.6
+    ports:
+      - "28079:6379"
+    command: redis-server --requirepass fixer-dashboard-redis-dev
+
+volumes:
+  fixer_dashboard_serverpod_data:

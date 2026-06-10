@@ -1,0 +1,3 @@
+interface:
+  display_name: "Save Fixer Handoff"
+  short_description: "Persist compact Fixer handoff state"

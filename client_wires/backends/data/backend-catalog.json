@@ -1,0 +1,97 @@
+{
+  "backends": {
+    "antigravity": {
+      "default_model": "default",
+      "default_reasoning": "default",
+      "description": "Google Antigravity CLI launcher flow using agy, workspace .agents MCP config, and workspace skills.",
+      "fresh_launch_supported": true,
+      "label": "Google Antigravity CLI",
+      "model_options": [
+        "default",
+        "Gemini 3.5 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.5 Flash (Low)",
+        "Gemini 3.1 Pro (Low)",
+        "Gemini 3.1 Pro (High)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B (Medium)"
+      ],
+      "reasoning_options": [
+        "default"
+      ],
+      "resume_supported": true
+    },
+    "claude": {
+      "default_model": "sonnet",
+      "default_reasoning": "medium",
+      "description": "Claude Code launcher flow with layered MCP config materialization.",
+      "fresh_launch_supported": true,
+      "label": "Claude Code",
+      "model_options": [
+        "sonnet",
+        "opus",
+        "haiku"
+      ],
+      "reasoning_options": [
+        "medium"
+      ],
+      "resume_supported": true
+    },
+    "codex": {
+      "default_model": "gpt-5.5",
+      "default_reasoning": "high",
+      "description": "Explicit MCP flag injection for Codex-based launcher flows.",
+      "fresh_launch_supported": true,
+      "label": "Codex CLI",
+      "model_options": [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2"
+      ],
+      "reasoning_options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "resume_supported": true
+    },
+    "droid": {
+      "default_model": "kimi-k2.6",
+      "default_reasoning": "high",
+      "description": "Layered MCP config materialization for Factory Droid launcher flows.",
+      "fresh_launch_supported": true,
+      "label": "Factory Droid CLI",
+      "model_options": [
+        "kimi-k2.6",
+        "glm-5.1"
+      ],
+      "reasoning_options": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "resume_supported": true
+    },
+    "junie": {
+      "default_model": "kimi-k2.6",
+      "default_reasoning": "default",
+      "description": "Junie CLI launcher flow with user-scope custom Kimi and GLM BYOK profiles.",
+      "fresh_launch_supported": true,
+      "label": "Junie CLI",
+      "model_options": [
+        "kimi-k2.6",
+        "glm-5.1"
+      ],
+      "reasoning_options": [
+        "default"
+      ],
+      "resume_supported": true
+    }
+  }
+}

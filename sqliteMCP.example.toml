@@ -1,0 +1,3 @@
+# Optional example for a SQLite MCP pointed at Fixer state.
+database_path = "./fixer_mcp/fixer.db"
+read_only = false

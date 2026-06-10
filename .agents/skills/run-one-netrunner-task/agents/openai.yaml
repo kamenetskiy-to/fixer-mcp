@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run One Netrunner Task"
+  short_description: "Dispatch one Fixer-managed worker"

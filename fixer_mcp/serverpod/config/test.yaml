@@ -1,0 +1,34 @@
+apiServer:
+  port: 38080
+  publicHost: localhost
+  publicPort: 38080
+  publicScheme: http
+
+insightsServer:
+  port: 38081
+  publicHost: localhost
+  publicPort: 38081
+  publicScheme: http
+
+webServer:
+  port: 38082
+  publicHost: localhost
+  publicPort: 38082
+  publicScheme: http
+
+database:
+  host: localhost
+  port: 38032
+  name: fixer_dashboard_test
+  user: postgres
+
+redis:
+  enabled: false
+  host: localhost
+  port: 38079
+
+sessionLogs:
+  persistentEnabled: false
+  consoleEnabled: false
+
+futureCallExecutionEnabled: false

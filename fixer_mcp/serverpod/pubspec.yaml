@@ -1,0 +1,17 @@
+name: fixer_dashboard_server
+description: Serverpod app-facing backend foundation for the Fixer dashboard migration.
+publish_to: none
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  serverpod: 3.4.4
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.5
+
+serverpod:
+  scripts:
+    start: dart bin/main.dart --apply-migrations

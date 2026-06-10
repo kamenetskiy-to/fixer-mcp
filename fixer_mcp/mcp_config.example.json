@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "fixer_mcp": {
+      "args": [],
+      "command": "./fixer_mcp",
+      "env": {
+        "FIXER_MCP_DB_PATH": "./fixer_mcp/fixer.db",
+        "FIXER_MCP_TELEGRAM_BOT_TOKEN": "replace-with-token-if-needed",
+        "FIXER_MCP_TELEGRAM_CHAT_ID": "replace-with-chat-id-if-needed"
+      },
+      "per_tool_timeout_ms": 21600000,
+      "startup_timeout_sec": 30,
+      "timeout": 21600,
+      "tool_timeout_sec": 21600,
+      "transport": "stdio"
+    }
+  }
+}

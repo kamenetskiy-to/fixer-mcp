@@ -1,0 +1,3 @@
+interface:
+  display_name: "Init Overseer"
+  short_description: "Initialize the global Overseer role"

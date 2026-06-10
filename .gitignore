@@ -1,0 +1,26 @@
+# Build outputs
+fixer_mcp/fixer_mcp
+fixer_mcp/main
+*.test
+
+# SQLite runtime state
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+
+# Local environment and runtime state
+.env
+.env.*
+.run/
+logs/
+
+# Python / Node / tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.codex/
+
+# Export output
+dist/

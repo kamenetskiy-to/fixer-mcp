@@ -1,0 +1,3 @@
+interface:
+  display_name: "Run Manual Acceptance Netrunner"
+  short_description: "Run post-autonomous manual acceptance"
