@@ -1084,12 +1084,14 @@ class BackendCatalogTests(unittest.TestCase):
 
     def test_subscribed_backend_descriptors_matches_current_architect_subscriptions(self) -> None:
         subscribed = {descriptor.name for descriptor in backends_pkg.subscribed_backend_descriptors()}
-        self.assertEqual(subscribed, {"antigravity", "claude", "codex", "kimi-code", "kimi-code-native"})
+        self.assertEqual(subscribed, {"antigravity", "claude", "codex", "kimi-code-native"})
 
     def test_is_backend_available_reflects_catalog_flag(self) -> None:
         self.assertTrue(backends_pkg.is_backend_available("claude"))
         self.assertTrue(backends_pkg.is_backend_available("codex"))
         self.assertFalse(backends_pkg.is_backend_available("droid"))
+        self.assertFalse(backends_pkg.is_backend_available("kimi-code"))
+        self.assertTrue(backends_pkg.is_backend_available("kimi-code-native"))
 
     def test_set_backend_availability_round_trips_without_touching_real_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

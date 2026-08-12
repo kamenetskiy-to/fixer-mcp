@@ -136,12 +136,12 @@
       "resume_supported": true
     },
     "kimi-code": {
-      "available": true,
+      "available": false,
       "default_model": "kimi-k2.7-code",
       "default_reasoning": "default",
-      "description": "Kimi Code CLI (kimi-cli) launcher flow: managed Kimi K2.7 Code, headless --print mode, project .mcp.json discovery.",
+      "description": "Legacy Python/uv kimi-cli launcher retained only for resuming existing sessions; use the native kimi-code-native backend for new work.",
       "fresh_launch_supported": true,
-      "label": "Kimi Code CLI",
+      "label": "Kimi Code CLI (legacy)",
       "model_options": [
         "kimi-k2.7-code",
         "kimi-k3"

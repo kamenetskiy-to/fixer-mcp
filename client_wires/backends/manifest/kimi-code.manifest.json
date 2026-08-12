@@ -1,7 +1,7 @@
 {
   "provider": "kimi-code",
-  "label": "Kimi Code CLI",
-  "description": "Moonshot Kimi Code CLI provider for the Fixer MCP provider-adapter abstraction. Requires explicit --mcp-config-file to surface project-local MCP servers in headless mode.",
+  "label": "Kimi Code CLI (legacy)",
+  "description": "Legacy Python/uv kimi-cli provider retained for existing session compatibility. New launches should use the current native kimi-code-native backend.",
   "models": {
     "options": [
       "kimi-k2.7-code",
