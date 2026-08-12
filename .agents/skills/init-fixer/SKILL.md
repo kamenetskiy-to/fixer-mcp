@@ -51,4 +51,9 @@ Use canonical skills for flow ownership:
 
 ## Worker Model Policy
 
-Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill — read it before every wave launch. In short: check `check-my-limits` quota first (exhausted buckets are off-limits), kimi k2.7 for simplest tasks, agy/Gemini 3.6 Flash or claude Sonnet 5 as workhorses, Kimi K3-256k (low thinking) for complex work, claude Opus 5 for emergencies only. Claude Fable and non-Flash antigravity models are banned.
+Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill — read it before every wave launch. Check `check-my-limits` quota first; exhausted buckets are off-limits. Use this exact default policy:
+
+- simplest tasks: `codex` + `gpt-5.6-luna` + `high`
+- medium-complexity tasks: `codex` + `gpt-5.6-terra` + `high`
+- complex tasks: `codex` + `gpt-5.6-sol` + `medium`
+- hardest tasks: `codex` + `gpt-5.6-sol` + `xhigh`
