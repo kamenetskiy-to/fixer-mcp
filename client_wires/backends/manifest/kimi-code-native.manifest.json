@@ -1,7 +1,7 @@
 {
   "provider": "kimi-code-native",
-  "label": "Kimi Code (native, prototype)",
-  "description": "Moonshot's native Kimi Code CLI binary (~/.kimi-code/bin/kimi, product name \"Kimi Code\", currently v0.29.0), distinct from the uv-tool kimi-cli package driven by the existing 'kimi-code' backend. Additive prototype only; not wired into SUPPORTED_BACKENDS/get_backend_adapter, so it cannot be selected or dispatched until a future session explicitly activates it.",
+  "label": "Kimi Code (native)",
+  "description": "Moonshot's current native Kimi Code CLI binary (~/.kimi-code/bin/kimi), distinct from the legacy uv-tool kimi-cli package driven by the existing 'kimi-code' backend.",
   "models": {
     "options": [
       "kimi-for-coding",
@@ -40,7 +40,7 @@
       "--yolo"
     ],
     "headless_auto_approve_flags": [],
-    "headless_auto_approve_justification": "Empirically verified against the real `kimi` binary (v0.29.0) that `--auto` and `--yolo` both hard-error when combined with `-p`/`--prompt` (\"Cannot combine --prompt with --auto.\" / \"...--yolo.\"). Plain `kimi -p \"...\"` with no approval flag at all already auto-approves ordinary tool calls (a headless -p run wrote a file via a tool call with zero approval flags passed, confirmed again live 2026-07-24 end-to-end including a real model response), so no approval flag is passed or valid for headless dispatch on this backend."
+    "headless_auto_approve_justification": "Empirically verified against the real `kimi` binary (v0.35.0 on 2026-08-12) that `--auto` and `--yolo` both hard-error when combined with `-p`/`--prompt` (\"Cannot combine --prompt with --auto.\" / \"...--yolo.\"). Plain `kimi -p \"...\"` with no approval flag already auto-approves ordinary tool calls, so no approval flag is passed or valid for headless dispatch on this backend."
   },
   "operator_questions": {
     "supported": true,

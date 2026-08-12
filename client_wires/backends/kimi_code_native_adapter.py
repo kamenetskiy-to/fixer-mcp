@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .base import BackendAdapter, BackendDescriptor
+from .base import (
+    FIXER_ROLE_SKILL_NAMES,
+    BackendAdapter,
+    BackendDescriptor,
+    materialize_kimi_code_workspace_skills,
+)
 from .catalog import load_backend_entry
 from .manifest import load_manifest
 
@@ -20,7 +25,7 @@ KIMI_CODE_NATIVE_INTERNAL_MODEL = "kimi-code/kimi-for-coding"
 # only project-local location it auto-discovers, so the adapter must write
 # there directly. This CAN collide with a config the operator maintains by
 # hand for their own interactive sessions in the same repo; that is a known
-# limitation of this prototype, not an oversight.
+# limitation of the project-config strategy, not an oversight.
 _KIMI_NATIVE_MCP_CONFIG = Path(".kimi-code") / "mcp.json"
 
 _KIMI_NATIVE_MODEL_ALIASES = {
@@ -86,12 +91,7 @@ def normalize_mcp_server_for_kimi_native(source: Mapping[str, object]) -> dict[s
 
 
 class KimiCodeNativeBackendAdapter(BackendAdapter):
-    """Adapter for the native Kimi Code binary (~/.kimi-code/bin/kimi).
-
-    Prototype only. Not referenced by SUPPORTED_BACKENDS or get_backend_adapter
-    in client_wires/backends/__init__.py, so it is unreachable through the
-    normal launcher/picker flow until a future session explicitly wires it in.
-    """
+    """Adapter for the native Kimi Code binary (~/.kimi-code/bin/kimi)."""
 
     def __init__(self) -> None:
         entry = load_backend_entry("kimi-code-native")
@@ -129,7 +129,7 @@ class KimiCodeNativeBackendAdapter(BackendAdapter):
         return ["--yolo"]
 
     def _headless_approve_flags(self) -> list[str]:
-        # Empirically verified (real `kimi` binary v0.29.0): `--auto` and
+        # Empirically verified (real `kimi` binary v0.35.0): `--auto` and
         # `--yolo` both hard-error when combined with `-p`/`--prompt`
         # ("Cannot combine --prompt with --auto."/"...--yolo."). A bare `-p`
         # invocation with no approval flag at all already auto-approves
@@ -251,3 +251,4 @@ class KimiCodeNativeBackendAdapter(BackendAdapter):
             json.dumps({"mcpServers": mcp_servers}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        materialize_kimi_code_workspace_skills(cwd, FIXER_ROLE_SKILL_NAMES)

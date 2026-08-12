@@ -159,9 +159,9 @@
       "available": true,
       "default_model": "kimi-for-coding",
       "default_reasoning": "default",
-      "description": "Prototype launcher flow for Moonshot's native Kimi Code binary (~/.kimi-code/bin/kimi, distinct from the uv-tool kimi-cli package that the existing 'kimi-code' backend drives). Not wired into SUPPORTED_BACKENDS; unreachable from the picker until explicitly activated.",
+      "description": "Launcher flow for Moonshot's current native Kimi Code binary (~/.kimi-code/bin/kimi), distinct from the legacy uv-tool kimi-cli package driven by the existing 'kimi-code' backend.",
       "fresh_launch_supported": true,
-      "label": "Kimi Code (native, prototype)",
+      "label": "Kimi Code (native)",
       "model_options": [
         "kimi-for-coding",
         "kimi-k3"

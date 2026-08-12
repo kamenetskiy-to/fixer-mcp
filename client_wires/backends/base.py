@@ -174,6 +174,23 @@ def materialize_junie_workspace_skills(cwd: Path, skill_names: Sequence[str]) ->
         shutil.copytree(source_dir, destination)
 
 
+def materialize_kimi_code_workspace_skills(cwd: Path, skill_names: Sequence[str]) -> None:
+    skill_root = cwd / ".kimi-code" / "skills"
+    skill_root.mkdir(parents=True, exist_ok=True)
+    _prune_retired_fixer_skills(skill_root)
+    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
+        legacy_flat_file = skill_root / f"{normalized_name}.md"
+        try:
+            legacy_flat_file.unlink()
+        except FileNotFoundError:
+            pass
+        destination = skill_root / normalized_name
+        if _same_path(source_dir, destination):
+            continue
+        shutil.rmtree(destination, ignore_errors=True)
+        shutil.copytree(source_dir, destination)
+
+
 def _prune_retired_fixer_skills(skill_root: Path) -> None:
     for skill_name in FIXER_RETIRED_SKILL_NAMES:
         retired_dir = skill_root / skill_name
