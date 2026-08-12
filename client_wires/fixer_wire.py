@@ -169,7 +169,8 @@ def _build_backend_launch_env(
     adapter.prepare_env(env, llm_selection)
     if cwd is not None:
         env.setdefault(FIXER_DB_PATH_ENV, str(_resolve_fixer_db_path(cwd)))
-    launch_env.clear_proxy_env(env)
+    if normalized_backend != "claude":
+        launch_env.clear_proxy_env(env)
     return env
 
 

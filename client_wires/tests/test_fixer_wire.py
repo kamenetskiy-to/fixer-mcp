@@ -705,7 +705,7 @@ class LaunchEnvTests(unittest.TestCase):
         ):
             self.assertNotIn(key, env)
 
-    def test_build_backend_launch_env_clears_proxy_for_claude_backend(self) -> None:
+    def test_build_backend_launch_env_preserves_proxy_for_claude_backend(self) -> None:
         from client_wires.backends.claude_adapter import ClaudeCodeBackendAdapter
 
         adapter = ClaudeCodeBackendAdapter()
@@ -734,17 +734,10 @@ class LaunchEnvTests(unittest.TestCase):
                         merge_env_with_os=lambda payload: payload,
                     )
 
-        for key in (
-            "ALL_PROXY",
-            "all_proxy",
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        ):
-            self.assertNotIn(key, env)
+        self.assertEqual(env["ALL_PROXY"], "http://example.invalid:8080")
+        self.assertEqual(env["HTTP_PROXY"], "http://example.invalid:8080")
+        self.assertEqual(env["HTTPS_PROXY"], "http://example.invalid:8080")
+        self.assertEqual(env["NO_PROXY"], "127.0.0.1,localhost,::1")
 
     def test_load_project_web_mcp_servers_from_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
