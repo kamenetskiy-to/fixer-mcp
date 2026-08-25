@@ -726,6 +726,15 @@ func isWorkerProcessTerminal(process workerProcessSnapshot) bool {
 	return process.Status != workerStatusRunning || !process.Alive
 }
 
+// explicitWaitPendingStartupFailureApplies decides whether a session stuck in
+// "pending" past the startup grace window should be declared a hard startup
+// failure. A recorded, still-alive worker process means the launch itself is
+// live and the session-status field just has not caught up yet, so a live
+// worker must not be wrongly failed while that metadata is still pending.
+func explicitWaitPendingStartupFailureApplies(processFound bool, workerProcessTerminal bool) bool {
+	return !processFound || workerProcessTerminal
+}
+
 func markAutonomousRunBlockedForWorkerExit(projectID int, globalSessionID int, localSessionID int, diagnostic workerProcessExitDiagnostic) error {
 	control, exists, err := fetchOrchestrationControl(projectID)
 	if err != nil {
@@ -1003,21 +1012,22 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 		if terminal {
 			return buildResult(currentStatus, true, terminalCondition, false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), nil), nil
 		}
-		if isExplicitWaitWorkerWatchdogStatus(currentStatus) {
-			process, found, err := latestWorkerProcessForSession(authorizedProjectId, globalSessionID)
-			if err != nil {
-				return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
+		process, processFound, err := latestWorkerProcessForSession(authorizedProjectId, globalSessionID)
+		if err != nil {
+			return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
+		}
+		workerProcessTerminal := processFound && isWorkerProcessTerminal(process)
+		if isExplicitWaitWorkerWatchdogStatus(currentStatus) && workerProcessTerminal {
+			diagnostic := buildWorkerProcessExitDiagnostic(authorizedProjectId, sessionID, process)
+			if err := markAutonomousRunBlockedForWorkerExit(authorizedProjectId, globalSessionID, sessionID, diagnostic); err != nil {
+				return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB upsert error: %v", err)
 			}
-			if found && isWorkerProcessTerminal(process) {
-				diagnostic := buildWorkerProcessExitDiagnostic(authorizedProjectId, sessionID, process)
-				if err := markAutonomousRunBlockedForWorkerExit(authorizedProjectId, globalSessionID, sessionID, diagnostic); err != nil {
-					return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB upsert error: %v", err)
-				}
-				return buildResult(currentStatus, true, "worker_process_exited", false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), &diagnostic), nil
-			}
+			return buildResult(currentStatus, true, "worker_process_exited", false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), &diagnostic), nil
 		}
 		if initialStatus == "pending" && currentStatus == "pending" && time.Now().After(startupFailureDeadline) {
-			return ExplicitNetrunnerWaitResult{}, errors.New(buildNetrunnerStartupFailureMessage(authorizedProjectId, sessionID, currentStatus))
+			if explicitWaitPendingStartupFailureApplies(processFound, workerProcessTerminal) {
+				return ExplicitNetrunnerWaitResult{}, errors.New(buildNetrunnerStartupFailureMessage(authorizedProjectId, sessionID, currentStatus))
+			}
 		}
 
 		if time.Now().After(deadline) {

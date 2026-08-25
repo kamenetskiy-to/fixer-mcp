@@ -1,0 +1,7 @@
+class: ProjectUiProtocolErrorFrame
+extends: ProjectUiFrame
+immutable: true
+fields:
+  reasonCode: String
+  minimumSupportedVersion: int
+  maximumSupportedVersion: int

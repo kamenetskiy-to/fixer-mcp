@@ -47,6 +47,12 @@ const (
 	parallelWaveCleanupStatusCleaned      = "cleaned"
 	parallelWaveCleanupStatusMissing      = "missing"
 	parallelWaveCleanupStatusFailed       = "failed"
+	parallelWaveReviewPolicyAutomatic     = "automatic"
+	parallelWaveReviewPolicyManual        = "manual"
+	defaultParallelWaveReviewPolicy       = parallelWaveReviewPolicyManual
+	defaultParallelWaveReviewBackend      = "codex"
+	defaultParallelWaveReviewModel        = "opencode-go/deepseek-v4-flash"
+	defaultParallelWaveReviewReasoning    = "high"
 )
 
 var parallelWaveBranchPattern = regexp.MustCompile(`^fixer/wave-[1-9][0-9]*/session-[1-9][0-9]*$`)

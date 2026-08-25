@@ -2,18 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DEFAULT_BACKEND, BackendAdapter, BackendDescriptor, normalize_backend_name
+from .base import DEFAULT_BACKEND, BackendAdapter, BackendDescriptor, is_codex_backend, normalize_backend_name
 from .antigravity_adapter import AntigravityBackendAdapter
 from .catalog import is_backend_available, load_backend_entry, set_backend_availability
 from .claude_adapter import ClaudeCodeBackendAdapter
 from .codex_adapter import CodexBackendAdapter
+from .commandcode_adapter import CommandCodeBackendAdapter
 from .droid_adapter import DroidBackendAdapter
+from .grok_adapter import GrokBackendAdapter
 from .junie_adapter import JunieBackendAdapter
 from .kimi_code_adapter import KimiCodeBackendAdapter
-from .kimi_code_native_adapter import KimiCodeNativeBackendAdapter
 
 
-SUPPORTED_BACKENDS = ("codex", "droid", "claude", "antigravity", "junie", "kimi-code", "kimi-code-native")
+SUPPORTED_BACKENDS = ("codex", "commandcode", "droid", "claude", "antigravity", "junie", "kimi-code", "grok")
 
 
 def available_backend_descriptors() -> list[BackendDescriptor]:
@@ -62,6 +63,8 @@ def get_backend_adapter(name: str | None, *, codex_adapter: Any) -> BackendAdapt
     normalized = normalize_backend_name(name)
     if normalized == "codex":
         return CodexBackendAdapter(codex_adapter)
+    if normalized == "commandcode":
+        return CommandCodeBackendAdapter()
     if normalized == "droid":
         return DroidBackendAdapter()
     if normalized == "claude":
@@ -72,8 +75,8 @@ def get_backend_adapter(name: str | None, *, codex_adapter: Any) -> BackendAdapt
         return JunieBackendAdapter()
     if normalized == "kimi-code":
         return KimiCodeBackendAdapter()
-    if normalized == "kimi-code-native":
-        return KimiCodeNativeBackendAdapter()
+    if normalized == "grok":
+        return GrokBackendAdapter()
     supported = ", ".join(SUPPORTED_BACKENDS)
     raise RuntimeError(f"Unsupported CLI backend {name!r}. Supported backends: {supported}")
 
@@ -86,6 +89,7 @@ __all__ = [
     "available_backend_descriptors",
     "get_backend_adapter",
     "is_backend_available",
+    "is_codex_backend",
     "normalize_backend_name",
     "set_backend_availability",
     "subscribed_backend_descriptors",

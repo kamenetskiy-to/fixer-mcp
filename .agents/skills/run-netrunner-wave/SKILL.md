@@ -17,6 +17,16 @@ Use this skill for every Fixer-managed Netrunner launch. A wave may contain one 
 - Each session has a narrow, disjoint `declared_write_scope`.
 - No session owns broad scope such as `.`, whole repo, shared app root, shared migrations, or the same test/dev-server state unless the Fixer has an explicit dependency DAG and a concrete isolation reason.
 
+## Review Policy
+
+Every wave has a `review_policy`:
+
+- `manual` is the default. No reviewer Netrunner is created; the Fixer personally reviews every worker result.
+- A one-worker wave (monowave) must always use `manual`.
+- `automatic` adds an independent reviewer Netrunner after all workers are terminal. Use it only when the Architect explicitly requests automatic review or for a genuinely large parallel wave where the additional review materially helps.
+- The Fixer still owns the final review and integration decision under both policies. `manual` does not disable review.
+- When `automatic` is selected, the Fixer may set `review_backend`, `review_model`, and `review_reasoning`. Defaults are `codex`, `opencode-go/deepseek-v4-flash`, and `high`. OpenCode Go DeepSeek V4 Pro is forbidden.
+
 ## Dirty Base Dispatch
 
 Do not ask the Architect merely because the base worktree is dirty. Treat dirt
@@ -73,7 +83,7 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
 4. Assign only required MCP servers with `set_session_mcp_servers`.
 5. If old candidate sessions are stale, zombie `in_progress`, secret-dependent,
    or no longer wave-safe, recover or exclude them before wave creation.
-6. Create the wave with `create_netrunner_wave(session_ids=[...])`.
+6. Create the wave with `create_netrunner_wave(session_ids=[...], review_policy="manual")`. The field may be omitted because `manual` is the system default. A monowave must not use `automatic`. Use `automatic` only under the **Review Policy** rules and pass reviewer model overrides when needed.
 7. If wave creation reports dirty base, follow **Dirty Base Dispatch** and retry
    with the safe candidate subset.
 8. Launch it with `launch_netrunner_wave(wave_id=...)`. Use the top-level backend/model/reasoning as defaults and `worker_configs=[{session_id, backend?, model?, reasoning?}, ...]` for per-worker overrides in one mixed-model wave.
@@ -85,12 +95,13 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
    - an estimated wait/execution time for the wave as a whole;
    - the wave id, session ids, and each worker's initial `launched`, `running`, or dependency-pending status.
    Use persisted launch configuration and returned initial statuses, label estimates as approximate when needed, and make this report the first response content required by the active-wave status rule. This launch report does not replace later active-wave reconciliation or the final-response wait requirement.
-10. Wait with `wait_for_netrunner_wave(wave_id, return_when="first_review_ready")`.
-11. Review every returned worker serially:
+10. Wait with `wait_for_netrunner_wave(wave_id, return_when="first_review_ready")`. Under `manual`, this never starts a reviewer Netrunner. Under explicitly selected `automatic`, waiting after all workers become terminal starts the configured independent reviewer.
+11. The Fixer reviews every returned worker serially under both policies:
    - read the session report and proposals
    - inspect changed paths and the captured patch artifact
    - inspect the worker worktree when needed
-   - verify scope boundaries and required tests
+   - verify the worker reported a commit SHA, a clean worktree, scope compliance, and required tests
+   - reject for rework if task changes are uncommitted, the worktree is dirty, or changed paths exceed `declared_write_scope`
    - approve or reject doc proposals by Fixer judgment
    - complete the session or append precise rework
 12. Continue waiting until all workers are terminal; use `return_when="all_terminal"` when you need the final aggregate state.
@@ -125,18 +136,20 @@ malformed-completion handling, and hang recovery follow the provider adapter can
   slices to an explicitly manual operator session or report them blocked.
 - Do not let one unsafe slice block safe independent slices.
 - Netrunners must not remove worktrees, rebase, merge, change wave state, or edit another worker's branch.
+- Netrunners must commit all task changes on their own worker branch before `complete_task`; they must not merge or push.
 - Treat timeout, stale epoch, frozen orchestration, missing process, or scope drift as review blockers.
 - If the wave produces conflicting results, create an explicit dependency-gated repair worker or stop and report the conflict; do not launch a serial autonomous worker.
 
 ## Reporting
 
-**CRITICAL RULE FOR ACTIVE WAVES:** When a wave starts, the Fixer MUST report the status of every active wave at the very beginning of every response they make to the user, until all waves are closed and no wave-reports are pending. This status block must be the first thing in the message.
+**CRITICAL RULE FOR ACTIVE WAVES:** During active conversation with the Architect, the Fixer MUST report the status of every active wave at the beginning of each normal user-facing answer, launch report, review report, handoff, or final answer until all waves are closed and no wave-reports are pending. Do not repeat the full active-wave status block in every intermediate progress update while the Fixer is still working inside a single long turn; for those updates, mention only material changes or blockers.
 
 **CRITICAL RULE BEFORE ANY FINAL ANSWER:** While any wave in the project is active (created/running/review_ready, workers not all terminal), the Fixer MUST NOT send a final/closing message to the Architect without first calling `wait_for_netrunner_wave` on every active wave in that same turn. Every call must use `timeout_seconds` of at least 600 seconds. Use 600 seconds for ordinary polling; raise it as needed up to 21600 seconds for an expected very heavy or long-running Netrunner, and never exceed 21600. The call reconciles stale worker/wave status even when it returns early. The final message must reflect the wave state returned by that call, not stale assumptions.
 
 Report at least:
 
 - wave id
+- review policy and, for `automatic`, reviewer backend/model/reasoning
 - worker session ids
 - worker statuses
 - changed paths and patch artifact paths

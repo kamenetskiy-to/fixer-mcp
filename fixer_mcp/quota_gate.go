@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,8 +25,36 @@ type checkMyLimitsGate struct{}
 
 var DefaultQuotaGate QuotaGate = &checkMyLimitsGate{}
 
+const checkMyLimitsPathEnv = "FIXER_CHECK_MY_LIMITS_PATH"
+
+func resolveCheckMyLimitsCommand() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv(checkMyLimitsPathEnv)); configured != "" {
+		return configured, nil
+	}
+	if resolved, err := exec.LookPath("check-my-limits"); err == nil {
+		return resolved, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve check-my-limits: %w", err)
+	}
+	for _, candidate := range []string{
+		filepath.Join(home, "bin", "check-my-limits"),
+		filepath.Join(home, ".codex", "fixer_unattached", "bin", "check-my-limits"),
+	} {
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("check-my-limits executable not found; set %s or add it to PATH", checkMyLimitsPathEnv)
+}
+
 func (g *checkMyLimitsGate) CheckQuota(providerName string) (ProviderQuota, bool, error) {
-	cmd := exec.Command("check-my-limits")
+	command, err := resolveCheckMyLimitsCommand()
+	if err != nil {
+		return ProviderQuota{}, false, err
+	}
+	cmd := execCommand(command)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,7 +24,12 @@ func dbTableHasColumn(tableName string, columnName string) bool {
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", resolveFixerDBPath())
+	dsn := resolveFixerDBPath()
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	db, err = sql.Open("sqlite", dsn+separator+"_txlock=immediate")
 	if err != nil {
 		log.Fatalf("Error opening db: %v", err)
 	}
@@ -73,6 +80,9 @@ func initDB() {
 				repair_source_session_id INTEGER,
 				rework_count INTEGER NOT NULL DEFAULT 0,
 				forced_stop_count INTEGER NOT NULL DEFAULT 0,
+				session_kind TEXT NOT NULL DEFAULT 'netrunner',
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				FOREIGN KEY(project_id) REFERENCES project(id),
 				FOREIGN KEY(epic_doc_id) REFERENCES project_doc(id) ON DELETE SET NULL ON UPDATE NO ACTION,
 				FOREIGN KEY(repair_source_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
@@ -215,6 +225,10 @@ func initDB() {
 				repair_attempt_count INTEGER NOT NULL DEFAULT 0,
 				handoff_sha TEXT NOT NULL DEFAULT '',
 				acceptance_session_id INTEGER,
+				review_policy TEXT NOT NULL DEFAULT 'manual',
+				review_backend TEXT NOT NULL DEFAULT 'codex',
+					review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash',
+				review_reasoning TEXT NOT NULL DEFAULT 'high',
 				failure_reason TEXT NOT NULL DEFAULT '',
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -508,6 +522,12 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN repair_source_session_id INTEGER;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN rework_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN forced_stop_count INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'netrunner';`)
+	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN created_at TEXT;`)
+	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN updated_at TEXT;`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS session_project_id_idx ON session(project_id, id);`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS session_project_status_idx ON session(project_id, status, id);`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS parallel_wave_project_id_idx ON parallel_wave(project_id, id);`)
 	_, _ = db.Exec(`ALTER TABLE project_doc ADD COLUMN doc_type TEXT DEFAULT 'documentation';`)
 	_, _ = db.Exec(`ALTER TABLE project_doc ADD COLUMN parent_doc_id INTEGER;`)
 	_, _ = db.Exec(`ALTER TABLE project_doc ADD COLUMN level INTEGER NOT NULL DEFAULT 0;`)
@@ -549,6 +569,10 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN repair_attempt_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN handoff_sha TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN acceptance_session_id INTEGER REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION;`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'manual';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_backend TEXT NOT NULL DEFAULT 'codex';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_reasoning TEXT NOT NULL DEFAULT 'high';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN terminal_outcome TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN retry_attempt_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN retry_cause TEXT NOT NULL DEFAULT '';`)
@@ -605,6 +629,10 @@ func initDB() {
 			repair_attempt_count INTEGER NOT NULL DEFAULT 0,
 			handoff_sha TEXT NOT NULL DEFAULT '',
 			acceptance_session_id INTEGER,
+			review_policy TEXT NOT NULL DEFAULT 'manual',
+			review_backend TEXT NOT NULL DEFAULT 'codex',
+				review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash',
+			review_reasoning TEXT NOT NULL DEFAULT 'high',
 			failure_reason TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -877,6 +905,10 @@ func initDB() {
 	_, _ = db.Exec(`UPDATE parallel_wave SET gate_state = 'none' WHERE COALESCE(TRIM(gate_state), '') = ''`)
 	_, _ = db.Exec(`UPDATE parallel_wave SET control_state = 'active' WHERE COALESCE(TRIM(control_state), '') = ''`)
 	_, _ = db.Exec(`UPDATE parallel_wave SET control_reason = '' WHERE control_reason IS NULL`)
+	_, _ = db.Exec(`UPDATE parallel_wave SET review_policy = 'manual' WHERE COALESCE(TRIM(review_policy), '') NOT IN ('automatic', 'manual')`)
+	_, _ = db.Exec(`UPDATE parallel_wave SET review_backend = 'codex' WHERE COALESCE(TRIM(review_backend), '') = ''`)
+	_, _ = db.Exec(`UPDATE parallel_wave SET review_model = 'opencode-go/deepseek-v4-flash' WHERE COALESCE(TRIM(review_model), '') = '' OR review_model = 'opencode-go/deepseek-v4-pro'`)
+	_, _ = db.Exec(`UPDATE parallel_wave SET review_reasoning = 'high' WHERE COALESCE(TRIM(review_reasoning), '') = ''`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET head_sha = '' WHERE head_sha IS NULL`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET changed_paths = '[]' WHERE COALESCE(TRIM(changed_paths), '') = ''`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET diff_patch_path = '' WHERE diff_patch_path IS NULL`)
@@ -894,6 +926,10 @@ func initDB() {
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET retry_cause = '' WHERE retry_cause IS NULL`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET retry_next_eligible_at = '' WHERE retry_next_eligible_at IS NULL`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET cleanup_status = 'pending' WHERE COALESCE(TRIM(cleanup_status), '') = ''`)
+
+	if err := initProjectWorkroomSchema(); err != nil {
+		log.Fatalf("Error initializing Project Workroom schema: %v", err)
+	}
 
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM project").Scan(&count)
@@ -926,6 +962,9 @@ func initDB() {
 	if err := applyCuratedDefaultMcpServers(); err != nil {
 		log.Printf("curated MCP defaults seed skipped: %v", err)
 	}
+	if err := ensureGlobalEdgeMcpBindings(); err != nil {
+		log.Printf("global Edge MCP project bindings seed skipped: %v", err)
+	}
 	if err := applyMcpMarketplaceCatalog(); err != nil {
 		log.Printf("MCP marketplace catalog seed skipped: %v", err)
 	}
@@ -939,6 +978,493 @@ func initDB() {
 	if err := seedRolePreprompts(); err != nil {
 		log.Printf("role preprompt seed skipped: %v", err)
 	}
+}
+
+func initProjectWorkroomSchema() error {
+	_, err := db.Exec(`
+		CREATE TRIGGER IF NOT EXISTS session_timestamps_after_insert
+		AFTER INSERT ON session
+		WHEN NEW.created_at IS NULL OR TRIM(NEW.created_at) = ''
+		  OR NEW.updated_at IS NULL OR TRIM(NEW.updated_at) = ''
+		BEGIN
+			UPDATE session
+			SET created_at = COALESCE(NULLIF(TRIM(NEW.created_at), ''), CURRENT_TIMESTAMP),
+			    updated_at = COALESCE(NULLIF(TRIM(NEW.updated_at), ''), CURRENT_TIMESTAMP)
+			WHERE id = NEW.id;
+		END;
+		CREATE TRIGGER IF NOT EXISTS session_updated_at_after_update
+		AFTER UPDATE ON session
+		WHEN NEW.updated_at IS OLD.updated_at
+		  OR NEW.updated_at IS NULL OR TRIM(NEW.updated_at) = ''
+		BEGIN
+			UPDATE session SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+		END;
+
+		CREATE TABLE IF NOT EXISTS project_ui_cursor (
+			project_id INTEGER PRIMARY KEY,
+			next_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_seq >= 1),
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS project_ui_event (
+			project_id INTEGER NOT NULL,
+			seq INTEGER NOT NULL CHECK(seq > 0),
+			event_id TEXT NOT NULL UNIQUE,
+			schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version = 1),
+			kind TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			aggregate_revision INTEGER NOT NULL CHECK(aggregate_revision > 0),
+			payload_json TEXT NOT NULL CHECK(length(payload_json) <= 65536 AND json_valid(payload_json)),
+			actor_kind TEXT NOT NULL CHECK(actor_kind IN ('principal', 'fixer', 'hands', 'system')),
+			actor_id TEXT NOT NULL,
+			causation_id TEXT NOT NULL,
+			correlation_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(project_id, seq),
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS project_ui_event_aggregate_idx
+			ON project_ui_event(project_id, aggregate_type, aggregate_id, seq);
+		CREATE TABLE IF NOT EXISTS command_dedup (
+			project_id INTEGER NOT NULL,
+			principal_id TEXT NOT NULL,
+			command_kind TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			PRIMARY KEY(project_id, principal_id, command_kind, idempotency_key),
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS command_dedup_expiry_idx ON command_dedup(expires_at);
+
+		CREATE TABLE IF NOT EXISTS fixer_thread (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			external_session_id TEXT,
+			headline TEXT NOT NULL CHECK(length(headline) <= 160),
+			state TEXT NOT NULL CHECK(state IN ('active', 'archived', 'unavailable')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS fixer_thread_project_id_unique_idx ON fixer_thread(project_id, id);
+		CREATE INDEX IF NOT EXISTS fixer_thread_project_updated_idx ON fixer_thread(project_id, updated_at, id);
+		CREATE TABLE IF NOT EXISTS fixer_turn (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			thread_id TEXT NOT NULL,
+			ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+			role TEXT NOT NULL CHECK(role IN ('user', 'fixer', 'tool', 'system')),
+			content TEXT NOT NULL CHECK(length(content) <= 65536),
+			status TEXT NOT NULL CHECK(status IN ('accepted', 'streaming', 'complete', 'failed')),
+			client_message_id TEXT,
+			provider_turn_id TEXT,
+			created_at TEXT NOT NULL,
+			completed_at TEXT,
+			UNIQUE(thread_id, ordinal),
+			UNIQUE(thread_id, client_message_id),
+			FOREIGN KEY(project_id, thread_id) REFERENCES fixer_thread(project_id, id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+
+		CREATE TABLE IF NOT EXISTS genui_surface_instance (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			thread_id TEXT NOT NULL,
+			caused_by_turn_id TEXT NOT NULL,
+			surface_type TEXT NOT NULL,
+			surface_version INTEGER NOT NULL CHECK(surface_version > 0),
+			state TEXT NOT NULL CHECK(state IN ('presented', 'superseded', 'dismissed', 'revoked')),
+			current_revision INTEGER NOT NULL CHECK(current_revision > 0),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(project_id, id),
+			FOREIGN KEY(project_id, thread_id) REFERENCES fixer_thread(project_id, id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(caused_by_turn_id) REFERENCES fixer_turn(id) ON DELETE RESTRICT ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS genui_surface_project_thread_idx ON genui_surface_instance(project_id, thread_id, updated_at);
+		CREATE TABLE IF NOT EXISTS genui_surface_revision (
+			surface_id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK(revision > 0),
+			source_seq INTEGER NOT NULL CHECK(source_seq > 0),
+			document_json TEXT NOT NULL CHECK(length(document_json) <= 262144 AND json_valid(document_json)),
+			document_hash TEXT NOT NULL,
+			renderer_version TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(surface_id, revision),
+			FOREIGN KEY(surface_id) REFERENCES genui_surface_instance(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS genui_demand_example (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			thread_id TEXT NOT NULL DEFAULT '',
+			turn_id TEXT NOT NULL DEFAULT '',
+			requested_type TEXT,
+			requested_version INTEGER,
+			request_json TEXT NOT NULL CHECK(length(request_json) <= 65536 AND json_valid(request_json)),
+			provider TEXT NOT NULL,
+			model TEXT NOT NULL,
+			rejection_code TEXT NOT NULL,
+			privacy_class TEXT NOT NULL CHECK(privacy_class IN ('project_internal', 'sensitive', 'restricted')),
+			triage_state TEXT NOT NULL DEFAULT 'new' CHECK(triage_state IN ('new', 'accepted', 'duplicate', 'rejected', 'shipped')),
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS genui_demand_project_created_idx ON genui_demand_example(project_id, created_at, id);
+		CREATE TABLE IF NOT EXISTS genui_surface_feedback (
+			surface_id TEXT NOT NULL,
+			revision INTEGER NOT NULL,
+			principal_id TEXT NOT NULL,
+			vote INTEGER NOT NULL CHECK(vote IN (-1, 1)),
+			reason_code TEXT,
+			comment TEXT CHECK(comment IS NULL OR length(comment) <= 1000),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(surface_id, revision, principal_id),
+			FOREIGN KEY(surface_id, revision) REFERENCES genui_surface_revision(surface_id, revision) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS genui_action_invocation (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			surface_id TEXT NOT NULL,
+			surface_revision INTEGER NOT NULL,
+			action_id TEXT NOT NULL,
+			action_version INTEGER NOT NULL CHECK(action_version > 0),
+			target_type TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			input_json TEXT NOT NULL CHECK(length(input_json) <= 65536 AND json_valid(input_json)),
+			principal_id TEXT NOT NULL,
+			decision TEXT NOT NULL CHECK(decision IN ('pending', 'denied', 'authorized')),
+			status TEXT NOT NULL CHECK(status IN ('received', 'needs_confirmation', 'executing', 'succeeded', 'failed')),
+			reason_code TEXT,
+			idempotency_key TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			completed_at TEXT,
+			UNIQUE(project_id, principal_id, action_id, idempotency_key),
+			FOREIGN KEY(project_id, surface_id) REFERENCES genui_surface_instance(project_id, id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(surface_id, surface_revision) REFERENCES genui_surface_revision(surface_id, revision) ON DELETE RESTRICT ON UPDATE NO ACTION
+		);
+
+		CREATE TABLE IF NOT EXISTS project_hands (
+			project_id INTEGER PRIMARY KEY,
+			actor_id TEXT NOT NULL UNIQUE,
+			display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
+			authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
+			default_lane TEXT NOT NULL DEFAULT 'codex' CHECK(default_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS hands_instruction (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			actor_id TEXT NOT NULL,
+			ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+			source_channel_kind TEXT NOT NULL,
+			source_channel_id TEXT NOT NULL,
+			source_message_id TEXT NOT NULL DEFAULT '',
+			issuer_principal_id TEXT NOT NULL,
+			instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
+			declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
+			instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
+			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
+			review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
+			state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
+			state_reason_code TEXT,
+			state_reason_text TEXT,
+			compat_session_id INTEGER,
+			idempotency_key TEXT NOT NULL,
+			revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			terminal_at TEXT,
+			UNIQUE(project_id, ordinal),
+			UNIQUE(project_id, source_channel_kind, source_channel_id, idempotency_key),
+			FOREIGN KEY(project_id) REFERENCES project_hands(project_id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS hands_instruction_project_state_idx ON hands_instruction(project_id, state, ordinal);
+		CREATE TABLE IF NOT EXISTS hands_instruction_event (
+			instruction_id TEXT NOT NULL,
+			ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+			event_type TEXT NOT NULL,
+			from_state TEXT,
+			to_state TEXT,
+			actor_kind TEXT NOT NULL,
+			actor_id TEXT NOT NULL,
+			payload_json TEXT NOT NULL CHECK(length(payload_json) <= 65536 AND json_valid(payload_json)),
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(instruction_id, ordinal),
+			FOREIGN KEY(instruction_id) REFERENCES hands_instruction(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS legacy_manual_session_link (
+			project_id INTEGER NOT NULL,
+			session_id INTEGER NOT NULL,
+			disposition TEXT NOT NULL CHECK(disposition IN ('live', 'terminal', 'abandoned', 'unknown')),
+			evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
+			hands_instruction_id TEXT,
+			classified_at TEXT NOT NULL,
+			classified_by TEXT NOT NULL,
+			PRIMARY KEY(project_id, session_id),
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(hands_instruction_id) REFERENCES hands_instruction(id) ON DELETE SET NULL ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS hands_generation (
+			instruction_id TEXT NOT NULL,
+			generation INTEGER NOT NULL CHECK(generation > 0),
+			project_id INTEGER NOT NULL,
+			compat_session_id INTEGER,
+			provider TEXT NOT NULL CHECK(provider IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			model TEXT NOT NULL,
+			reasoning TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
+			external_session_id TEXT,
+			process_id INTEGER,
+			process_start_identity TEXT,
+			binary_build_id TEXT,
+			binary_epoch INTEGER,
+			lease_set_id TEXT,
+			fencing_token INTEGER,
+			launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
+			result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
+			started_at TEXT,
+			heartbeat_at TEXT,
+			ended_at TEXT,
+			exit_code INTEGER,
+			stop_reason TEXT,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(instruction_id, generation),
+			FOREIGN KEY(instruction_id) REFERENCES hands_instruction(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS hands_generation_one_active_project_idx
+			ON hands_generation(project_id) WHERE status IN ('starting', 'running');
+
+		CREATE TABLE IF NOT EXISTS project_write_fence (
+			project_id INTEGER PRIMARY KEY,
+			next_token INTEGER NOT NULL DEFAULT 1 CHECK(next_token > 0),
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS project_write_lease (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			lease_set_id TEXT NOT NULL,
+			owner_kind TEXT NOT NULL CHECK(owner_kind IN ('wave_worker', 'wave_reviewer', 'hands_instruction')),
+			owner_id TEXT NOT NULL,
+			scope_path TEXT NOT NULL,
+			fencing_token INTEGER NOT NULL CHECK(fencing_token > 0),
+			state TEXT NOT NULL CHECK(state IN ('active', 'released', 'revoked')),
+			process_id INTEGER,
+			process_start_identity TEXT,
+			binary_build_id TEXT NOT NULL,
+			binary_epoch INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			heartbeat_at TEXT NOT NULL,
+			released_at TEXT,
+			release_reason TEXT,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS project_write_lease_active_scope_idx ON project_write_lease(project_id, state, scope_path);
+		CREATE INDEX IF NOT EXISTS project_write_lease_set_idx ON project_write_lease(lease_set_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS project_write_lease_active_owner_scope_idx
+			ON project_write_lease(project_id, owner_kind, owner_id, scope_path) WHERE state = 'active';
+		CREATE TABLE IF NOT EXISTS workroom_audit_event (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			principal_id TEXT NOT NULL,
+			action_id TEXT NOT NULL,
+			target_type TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			causation_id TEXT NOT NULL,
+			correlation_id TEXT NOT NULL,
+			detail_json TEXT NOT NULL CHECK(length(detail_json) <= 65536 AND json_valid(detail_json)),
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS workroom_audit_project_created_idx ON workroom_audit_event(project_id, created_at, id);
+	`)
+	if err != nil {
+		return err
+	}
+	_, _ = db.Exec(`ALTER TABLE hands_instruction ADD COLUMN instruction_envelope_json TEXT;`)
+	_, _ = db.Exec(`UPDATE hands_instruction SET instruction_envelope_json = '{}' WHERE instruction_envelope_json IS NULL OR NOT json_valid(instruction_envelope_json);`)
+	_, _ = db.Exec(`DROP TRIGGER IF EXISTS project_hands_after_project_insert`)
+	_, _ = db.Exec(`DROP TABLE IF EXISTS hands_provider_lane`)
+
+	_, err = db.Exec(`
+		INSERT OR IGNORE INTO project_hands (
+			project_id, actor_id, display_name, authority_state, default_lane,
+			next_instruction_ordinal, created_at, updated_at
+		)
+		SELECT id,
+			lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+			substr(lower(hex(randomblob(2))), 2) || '-' ||
+			substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+			lower(hex(randomblob(6))),
+			'Руки', 'enabled', 'codex', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		FROM project;
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`
+		CREATE TRIGGER IF NOT EXISTS project_hands_after_project_insert
+		AFTER INSERT ON project
+		BEGIN
+			INSERT OR IGNORE INTO project_hands (
+				project_id, actor_id, display_name, authority_state, default_lane,
+				next_instruction_ordinal, created_at, updated_at
+			) VALUES (
+				NEW.id,
+				lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+				substr(lower(hex(randomblob(2))), 2) || '-' ||
+				substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+				lower(hex(randomblob(6))),
+				'Руки', 'enabled', 'codex', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+			);
+		END;
+	`)
+	if err != nil {
+		return err
+	}
+	return migrateHandsGrokProviderLane()
+}
+
+// migrateHandsGrokProviderLane widens the Hands provider-lane CHECK constraints
+// on databases created before 'grok' became a registered lane. SQLite cannot
+// ALTER a CHECK constraint, so the three affected tables are rebuilt in place.
+// Fresh databases already carry the widened CHECKs and skip every rebuild.
+func migrateHandsGrokProviderLane() error {
+	rebuilds := map[string][]string{
+		"hands_generation": {
+			`CREATE TABLE hands_generation_grok_mig (
+				instruction_id TEXT NOT NULL,
+				generation INTEGER NOT NULL CHECK(generation > 0),
+				project_id INTEGER NOT NULL,
+				compat_session_id INTEGER,
+				provider TEXT NOT NULL CHECK(provider IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				model TEXT NOT NULL,
+				reasoning TEXT NOT NULL,
+				status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
+				external_session_id TEXT,
+				process_id INTEGER,
+				process_start_identity TEXT,
+				binary_build_id TEXT,
+				binary_epoch INTEGER,
+				lease_set_id TEXT,
+				fencing_token INTEGER,
+				launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
+				result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
+				started_at TEXT,
+				heartbeat_at TEXT,
+				ended_at TEXT,
+				exit_code INTEGER,
+				stop_reason TEXT,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY(instruction_id, generation),
+				FOREIGN KEY(instruction_id) REFERENCES hands_instruction(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO hands_generation_grok_mig SELECT instruction_id, generation, project_id, compat_session_id, provider, model, reasoning, status, external_session_id, process_id, process_start_identity, binary_build_id, binary_epoch, lease_set_id, fencing_token, launch_mode, result_envelope_json, started_at, heartbeat_at, ended_at, exit_code, stop_reason, created_at, updated_at FROM hands_generation;`,
+			`DROP TABLE hands_generation;`,
+			`ALTER TABLE hands_generation_grok_mig RENAME TO hands_generation;`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS hands_generation_one_active_project_idx ON hands_generation(project_id) WHERE status IN ('starting', 'running');`,
+		},
+		"hands_instruction": {
+			`CREATE TABLE hands_instruction_grok_mig (
+				id TEXT PRIMARY KEY,
+				project_id INTEGER NOT NULL,
+				actor_id TEXT NOT NULL,
+				ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+				source_channel_kind TEXT NOT NULL,
+				source_channel_id TEXT NOT NULL,
+				source_message_id TEXT NOT NULL DEFAULT '',
+				issuer_principal_id TEXT NOT NULL,
+				instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
+				declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
+				instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
+				requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
+				review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
+				state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
+				state_reason_code TEXT,
+				state_reason_text TEXT,
+				compat_session_id INTEGER,
+				idempotency_key TEXT NOT NULL,
+				revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				terminal_at TEXT,
+				UNIQUE(project_id, ordinal),
+				UNIQUE(project_id, source_channel_kind, source_channel_id, idempotency_key),
+				FOREIGN KEY(project_id) REFERENCES project_hands(project_id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO hands_instruction_grok_mig SELECT id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, source_message_id, issuer_principal_id, instruction_text, declared_write_scope_json, instruction_envelope_json, requested_lane, risk_class, review_policy, state, state_reason_code, state_reason_text, compat_session_id, idempotency_key, revision, created_at, updated_at, terminal_at FROM hands_instruction;`,
+			`DROP TABLE hands_instruction;`,
+			`ALTER TABLE hands_instruction_grok_mig RENAME TO hands_instruction;`,
+			`CREATE INDEX IF NOT EXISTS hands_instruction_project_state_idx ON hands_instruction(project_id, state, ordinal);`,
+		},
+		"project_hands": {
+			`CREATE TABLE project_hands_grok_mig (
+				project_id INTEGER PRIMARY KEY,
+				actor_id TEXT NOT NULL UNIQUE,
+				display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
+				authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
+				default_lane TEXT NOT NULL DEFAULT 'codex' CHECK(default_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO project_hands_grok_mig SELECT project_id, actor_id, display_name, authority_state, default_lane, next_instruction_ordinal, created_at, updated_at FROM project_hands;`,
+			`DROP TABLE project_hands;`,
+			`ALTER TABLE project_hands_grok_mig RENAME TO project_hands;`,
+		},
+	}
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF;`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON;`)
+
+	for _, table := range []string{"hands_generation", "hands_instruction", "project_hands"} {
+		var tableSQL string
+		err := conn.QueryRowContext(context.Background(),
+			`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+		).Scan(&tableSQL)
+		if err != nil {
+			return err
+		}
+		if tableSQL == "" || strings.Contains(tableSQL, "'grok'") {
+			continue
+		}
+		for _, stmt := range rebuilds[table] {
+			if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
+				return fmt.Errorf("migrate %s for grok lane: %w", table, err)
+			}
+		}
+	}
+	return nil
 }
 
 func resolveFixerDBPath() string {

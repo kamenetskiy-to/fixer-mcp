@@ -115,6 +115,10 @@ func setupParallelWaveTestDB(t *testing.T, projectCWD string) *sql.DB {
 			repair_attempt_count INTEGER NOT NULL DEFAULT 0,
 			handoff_sha TEXT NOT NULL DEFAULT '',
 			acceptance_session_id INTEGER,
+			review_policy TEXT NOT NULL DEFAULT 'manual',
+			review_backend TEXT NOT NULL DEFAULT 'codex',
+			review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-pro',
+			review_reasoning TEXT NOT NULL DEFAULT 'high',
 			failure_reason TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -561,6 +565,12 @@ func TestCreateAndGetNetrunnerWavePersistsSnapshot(t *testing.T) {
 	if len(created.Workers) != 2 {
 		t.Fatalf("expected two workers, got %+v", created.Workers)
 	}
+	if created.Wave.ReviewPolicy != parallelWaveReviewPolicyManual ||
+		created.Wave.ReviewBackend != defaultParallelWaveReviewBackend ||
+		created.Wave.ReviewModel != defaultParallelWaveReviewModel ||
+		created.Wave.ReviewReasoning != defaultParallelWaveReviewReasoning {
+		t.Fatalf("unexpected default review config: %+v", created.Wave)
+	}
 	for _, worker := range created.Workers {
 		if worker.Status != parallelWaveWorkerStatusCreated {
 			t.Fatalf("unexpected worker status: %+v", worker)
@@ -595,8 +605,53 @@ func TestCreateAndGetNetrunnerWavePersistsSnapshot(t *testing.T) {
 	if got.Wave.Id != created.WaveId || got.Wave.Status != parallelWaveStatusCreated || len(got.Wave.Workers) != 2 {
 		t.Fatalf("unexpected get output: %+v", got)
 	}
+	if got.Wave.ReviewPolicy != parallelWaveReviewPolicyManual {
+		t.Fatalf("expected persisted manual review policy, got %+v", got.Wave)
+	}
 	if got.Wave.Workers[0].SessionId != 1 || got.Wave.Workers[1].SessionId != 2 {
 		t.Fatalf("expected project-scoped session ids in get output, got %+v", got.Wave.Workers)
+	}
+}
+
+func TestCreateNetrunnerWavePersistsAutomaticReviewConfig(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	if _, _, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds:   []int{1},
+		ReviewPolicy: parallelWaveReviewPolicyAutomatic,
+	}); err == nil || !strings.Contains(err.Error(), "one-worker wave") {
+		t.Fatalf("expected automatic monowave rejection, got %v", err)
+	}
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds:      []int{1, 2},
+		ReviewPolicy:    parallelWaveReviewPolicyAutomatic,
+		ReviewBackend:   "codex",
+		ReviewModel:     "custom-review-model",
+		ReviewReasoning: "medium",
+	})
+	if err != nil {
+		t.Fatalf("create automatic-review wave: %v", err)
+	}
+	if created.Wave.ReviewPolicy != parallelWaveReviewPolicyAutomatic ||
+		created.Wave.ReviewBackend != "codex" ||
+		created.Wave.ReviewModel != "custom-review-model" ||
+		created.Wave.ReviewReasoning != "medium" {
+		t.Fatalf("unexpected persisted automatic review config: %+v", created.Wave)
 	}
 }
 
@@ -1816,6 +1871,16 @@ func TestWaitNetrunnerWaveRequiresAllParentsBeforeDeferredLaunch(t *testing.T) {
 	if callResult != nil || out.Status != "success" {
 		t.Fatalf("unexpected multi-parent output: result=%+v out=%+v", callResult, out)
 	}
+	var reviewerCount int
+	if err := testDB.QueryRow(
+		"SELECT COUNT(*) FROM session WHERE project_id = 1 AND parallel_wave_id = ?",
+		parallelWaveReviewMarker(created.WaveId),
+	).Scan(&reviewerCount); err != nil {
+		t.Fatalf("count reviewer sessions: %v", err)
+	}
+	if reviewerCount != 0 {
+		t.Fatalf("manual review policy created %d reviewer sessions", reviewerCount)
+	}
 	if len(launchedArgs) != 3 {
 		t.Fatalf("expected child launch only after both parents resolved, got %+v", launchedArgs)
 	}
@@ -2193,6 +2258,58 @@ func TestWaitNetrunnerWaveRejectsMissingNonLaunchedAndUnsupportedReturnWhen(t *t
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestWaitNetrunnerWaveGateProfileEnvAuthSkipsAssumeRole(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	t.Setenv(fixerMcpDefaultRoleEnv, "fixer")
+	t.Setenv(fixerMcpDefaultCwdEnv, repoDir)
+	t.Setenv(fixerMcpLockedRoleEnv, "fixer")
+	t.Setenv(fixerMcpAutoAuthEnv, "1")
+	t.Setenv(fixerMcpToolProfileEnv, netrunnerGateProfile)
+
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 0
+
+	bootstrapDefaultRoleAuthFromEnv()
+	if authorizedRole != "fixer" || authorizedProjectId != 1 {
+		t.Fatalf("gate env auto-auth failed: role=%q project=%d", authorizedRole, authorizedProjectId)
+	}
+
+	// No explicit assume_role call: the wait handler must pass the fixer
+	// auth gate and reject the missing wave instead of returning
+	// "access denied: requires fixer role".
+	callResult, _, err := WaitForNetrunnerWave(context.Background(), nil, WaitForNetrunnerWaveInput{WaveId: 9999})
+	if err == nil {
+		t.Fatal("expected missing-wave rejection")
+	}
+	if strings.Contains(err.Error(), "requires fixer role") {
+		t.Fatalf("wait gate must be auto-authorized from env, got auth error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
 	}
 }
 
@@ -3054,6 +3171,16 @@ func TestWaitNetrunnerWaveAggregatesReportsOnAllTerminal(t *testing.T) {
 	if len(out.Reports) != 2 {
 		t.Fatalf("expected 2 reports, got %d", len(out.Reports))
 	}
+	var manualReviewerCount int
+	if err := testDB.QueryRow(
+		"SELECT COUNT(*) FROM session WHERE project_id = 1 AND parallel_wave_id = ?",
+		parallelWaveReviewMarker(created.WaveId),
+	).Scan(&manualReviewerCount); err != nil {
+		t.Fatalf("count manual-policy reviewer sessions: %v", err)
+	}
+	if manualReviewerCount != 0 {
+		t.Fatalf("manual review policy created %d reviewer sessions after all workers terminated", manualReviewerCount)
+	}
 
 	for _, w := range created.Workers {
 		reportName := "report_" + strconv.Itoa(w.SessionId)
@@ -3066,6 +3193,168 @@ func TestWaitNetrunnerWaveAggregatesReportsOnAllTerminal(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("missing report for session %d in reports: %v", w.SessionId, out.Reports)
+		}
+	}
+}
+
+func TestLaunchNetrunnerWaveAbandonsFailedAndUnlaunchedWorkers(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalExecCommand := execCommand
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		execCommand = originalExecCommand
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer func() {
+		_ = testDB.Close()
+	}()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	if _, err := testDB.Exec(
+		"INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task D', 'pending', '[\"docs/c\"]')",
+	); err != nil {
+		t.Fatalf("seed third worker session: %v", err)
+	}
+	callResult, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 2, 3},
+		BaseRef:    "HEAD",
+		Reason:     "launch abandonment test",
+	})
+	if err != nil || callResult != nil {
+		t.Fatalf("create abandonment wave: result=%+v err=%v", callResult, err)
+	}
+
+	installFakeWaveWorkerLauncher(t, "2", nil)
+	_, out, err := LaunchNetrunnerWave(context.Background(), nil, LaunchNetrunnerWaveInput{
+		WaveId:         created.WaveId,
+		TimeoutSeconds: 1,
+	})
+	if err == nil {
+		t.Fatal("expected launch failure")
+	}
+	if out.Status != parallelWaveStatusPartiallyFailed || !out.PartialFailure {
+		t.Fatalf("unexpected partial failure output: %+v err=%v", out, err)
+	}
+
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch abandonment wave: %v", err)
+	}
+	launched := testWaveWorkerBySession(t, wave, 1)
+	failed := testWaveWorkerBySession(t, wave, 2)
+	abandoned := testWaveWorkerBySession(t, wave, 3)
+	if launched.Status != parallelWaveWorkerStatusRunning {
+		t.Fatalf("expected launched worker to stay running, got %q", launched.Status)
+	}
+	if failed.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("expected failed worker status, got %q", failed.Status)
+	}
+	if abandoned.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("expected never-launched worker to be abandoned as failed, got %q", abandoned.Status)
+	}
+	if !strings.Contains(abandoned.FailureReason, "launch abandoned") {
+		t.Fatalf("expected abandonment reason, got %q", abandoned.FailureReason)
+	}
+
+	launchedPath, err := resolveParallelWaveWorktreePath(repoDir, launched.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve launched worktree: %v", err)
+	}
+	failedPath, err := resolveParallelWaveWorktreePath(repoDir, failed.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve failed worktree: %v", err)
+	}
+	abandonedPath, err := resolveParallelWaveWorktreePath(repoDir, abandoned.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve abandoned worktree: %v", err)
+	}
+	if info, statErr := os.Stat(launchedPath); statErr != nil || !info.IsDir() {
+		t.Fatalf("expected launched worktree to remain, stat=%v info=%+v", statErr, info)
+	}
+	for _, path := range []string{failedPath, abandonedPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("expected abandoned worktree %s to be removed, stat err=%v", path, statErr)
+		}
+	}
+
+	leaseActive := func(scopePath string) int {
+		t.Helper()
+		var count int
+		if err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND scope_path = ? AND active = 1",
+			created.WaveId,
+			scopePath,
+		).Scan(&count); err != nil {
+			t.Fatalf("query lease %q: %v", scopePath, err)
+		}
+		return count
+	}
+	if got := leaseActive("docs/a"); got != 1 {
+		t.Fatalf("expected launched worker lease held, got %d", got)
+	}
+	if got := leaseActive("docs/b"); got != 0 {
+		t.Fatalf("expected failed worker lease released, got %d", got)
+	}
+	if got := leaseActive("docs/c"); got != 0 {
+		t.Fatalf("expected abandoned worker lease released, got %d", got)
+	}
+}
+
+func TestCleanupNetrunnerWaveReconcilesStaleCompletedWorker(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	_, testDB, created, wave := setupRunningWaveTest(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+	_ = wave
+	// Sessions are completed but the workers are still recorded as running and
+	// their process rows no longer exist. Cleanup must reconcile them instead
+	// of refusing a non-terminal worker forever.
+	for _, worker := range created.Workers {
+		globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, 1)
+		if err != nil {
+			t.Fatalf("map worker session: %v", err)
+		}
+		if _, err := testDB.Exec("UPDATE session SET status = 'completed', report = 'done' WHERE id = ?", globalSessionID); err != nil {
+			t.Fatalf("complete worker session: %v", err)
+		}
+	}
+	if _, err := testDB.Exec("DELETE FROM worker_process WHERE parallel_wave_id = ?", created.WaveId); err != nil {
+		t.Fatalf("remove worker process rows: %v", err)
+	}
+
+	callResult, out, err := CleanupNetrunnerWave(context.Background(), nil, CleanupNetrunnerWaveInput{
+		WaveId:          created.WaveId,
+		RemoveWorktrees: true,
+	})
+	if err != nil {
+		t.Fatalf("cleanup should reconcile stale workers: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result, got %+v", callResult)
+	}
+	if out.Status != "success" || !out.Cleaned || out.WaveStatus != parallelWaveStatusCleaned {
+		t.Fatalf("unexpected reconciled cleanup output: %+v", out)
+	}
+	for _, result := range out.Workers {
+		if result.WorkerStatus != parallelWaveWorkerStatusCleaned || result.CleanupStatus != parallelWaveCleanupStatusCleaned {
+			t.Fatalf("expected reconciled worker cleaned, got %+v", result)
 		}
 	}
 }

@@ -31,6 +31,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("/internal/v1/projects/", s.handleInternalWorkroom)
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/home", s.handleHome)
 	s.mux.HandleFunc("/api/architect/orders", s.handleArchitectOrders)
@@ -44,6 +45,184 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/actions/sessions/", s.handleSessionActions)
 	s.mux.HandleFunc("/api/actions/proposals/", s.handleProposalActions)
 	s.mux.HandleFunc("/api/actions/overseer/launch", s.handleOverseerLaunch)
+}
+
+func (s *Server) handleInternalWorkroom(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/v1/projects/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		writeErrorMessage(w, http.StatusNotFound, "internal workroom route not found")
+		return
+	}
+	projectID, err := strconv.Atoi(parts[0])
+	if err != nil || projectID <= 0 {
+		writeErrorMessage(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	body, err := readBoundedBridgeBody(r)
+	if err != nil {
+		writeErrorMessage(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
+	principal, err := s.authorizeWorkroomBridge(r, projectID, body)
+	if err != nil {
+		writeErrorMessage(w, http.StatusUnauthorized, "invalid signed workroom bridge request")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+
+	switch {
+	case r.Method == http.MethodGet && len(parts) == 3 && parts[1] == "workroom" && parts[2] == "snapshot":
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		payload, err := s.repo.ProjectWorkroomSnapshot(ctx, projectID, principal)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "events":
+		afterSeq, err := strconv.ParseInt(r.URL.Query().Get("after_seq"), 10, 64)
+		if err != nil || afterSeq < 0 {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid after_seq")
+			return
+		}
+		limit := workroomMaxEventBatch
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			limit, err = strconv.Atoi(raw)
+			if err != nil || limit < 1 || limit > workroomMaxEventBatch {
+				writeErrorMessage(w, http.StatusBadRequest, "invalid event limit")
+				return
+			}
+		}
+		waitMS := 25000
+		if raw := strings.TrimSpace(r.URL.Query().Get("wait_ms")); raw != "" {
+			waitMS, err = strconv.Atoi(raw)
+			if err != nil || waitMS < 0 || waitMS > 25000 {
+				writeErrorMessage(w, http.StatusBadRequest, "invalid wait_ms")
+				return
+			}
+		}
+		payload, err := s.repo.WaitProjectUIEvents(r.Context(), projectID, afterSeq, limit, time.Duration(waitMS)*time.Millisecond)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[1] == "fixer" && parts[2] == "turns":
+		var input SendFixerTurnInput
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.SendFixerTurn(r.Context(), projectID, principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, payload)
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[1] == "genui" && parts[2] == "surfaces":
+		var input RequestGenuiSurfaceInput
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.RequestGenuiSurface(r.Context(), projectID, principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[1] == "genui" && parts[2] == "actions":
+		var input GenuiActionRequest
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.InvokeGenuiAction(r.Context(), projectID, principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "hands":
+		writeErrorMessage(w, http.StatusNotFound, "internal workroom route not found")
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[1] == "hands" && parts[2] == "instructions":
+		var input BridgeSubmitHandsInstructionInput
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.SubmitHandsInstruction(r.Context(), projectID, principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, payload)
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[1] == "hands" && parts[2] == "lane":
+		var input BridgeSelectHandsLaneInput
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.SelectHandsLane(r.Context(), projectID, principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[1] == "hands" && parts[2] == "instructions" && parts[4] == "cancel":
+		var input BridgeCancelHandsInstructionInput
+		if err := decodeStrictBridgeJSON(body, &input); err != nil {
+			writeErrorMessage(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		payload, err := s.repo.CancelHandsInstruction(r.Context(), projectID, parts[3], principal, input)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	default:
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		writeErrorMessage(w, http.StatusNotFound, "internal workroom route not found")
+	}
+}
+
+func readBoundedBridgeBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return []byte{}, nil
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, workroomMaxBridgeBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > workroomMaxBridgeBodyBytes {
+		return nil, errors.New("request body is too large")
+	}
+	return payload, nil
+}
+
+func decodeStrictBridgeJSON(payload []byte, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleArchitectOrders(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +451,17 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		payload, err := s.repo.FixerThreads(ctx, projectID)
+		if err != nil {
+			writeRepoError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case "hands-threads":
+		if len(parts) != 2 {
+			writeErrorMessage(w, http.StatusNotFound, "project route not found")
+			return
+		}
+		payload, err := s.repo.HandsThreads(ctx, projectID)
 		if err != nil {
 			writeRepoError(w, err)
 			return
@@ -767,6 +957,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeRepoError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrWorkroomAuthorization) {
+		writeErrorMessage(w, http.StatusForbidden, "workroom capability denied")
+		return
+	}
 	if errors.Is(err, ErrPlannedWaveInitializeUnavailable) {
 		writeErrorMessage(w, http.StatusServiceUnavailable, err.Error())
 		return

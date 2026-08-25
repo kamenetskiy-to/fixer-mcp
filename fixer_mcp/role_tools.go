@@ -1,6 +1,10 @@
 package main
 
-import "github.com/modelcontextprotocol/go-sdk/mcp"
+import (
+	"context"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
 
 const (
 	launchNetrunnerWaveToolName   = "launch_netrunner_wave"
@@ -12,9 +16,7 @@ const (
 var bootstrapToolNames = []string{"assume_role"}
 
 var netrunnerGateToolNames = []string{
-	launchNetrunnerWaveToolName,
 	waitForNetrunnerWaveToolName,
-	launchNetrunnerWavesToolName,
 	waitForNetrunnerWavesToolName,
 }
 
@@ -50,6 +52,10 @@ var overseerToolNames = []string{
 	"get_session",
 	"get_netrunner_transcript_path",
 	"submit_fixer_mcp_feedback",
+	"list_fixer_mcp_feedback",
+	"get_hands_state",
+	"list_hands_instructions",
+	"get_hands_instruction",
 }
 
 var fixerToolNames = []string{
@@ -96,12 +102,14 @@ var fixerToolNames = []string{
 	"record_fixer_spend",
 	"get_balance_ledger",
 	"get_session",
+	"list_project_sessions",
 	"get_netrunner_transcript_path",
 	"create_planned_netrunner_wave",
 	"get_planned_netrunner_wave",
 	"initialize_planned_netrunner_wave",
 	"create_netrunner_wave",
 	"get_netrunner_wave",
+	"list_netrunner_waves",
 	launchNetrunnerWaveToolName,
 	waitForNetrunnerWaveToolName,
 	launchNetrunnerWavesToolName,
@@ -118,6 +126,17 @@ var fixerToolNames = []string{
 	"wait_for_image_generation_job",
 	"copy_image_generation_job_output",
 	"submit_fixer_mcp_feedback",
+	"request_genui_surface",
+	"get_genui_surface",
+	"submit_genui_feedback",
+	"list_fixer_mcp_feedback",
+	"submit_hands_instruction",
+	"get_hands_state",
+	"list_hands_instructions",
+	"get_hands_instruction",
+	"wait_hands_instruction",
+	"cancel_hands_instruction",
+	"review_hands_instruction",
 }
 
 var netrunnerToolNames = []string{
@@ -135,6 +154,11 @@ var netrunnerToolNames = []string{
 	"send_operator_telegram_notification",
 	"get_session",
 	"wake_fixer_autonomous",
+	"get_genui_surface",
+	"get_hands_state",
+	"get_hands_instruction",
+	"list_hands_instructions",
+	"submit_hands_instruction",
 }
 
 var adminBackcompatToolNames = []string{
@@ -207,11 +231,23 @@ func registerWaitForNetrunnerWavesTool(server *mcp.Server) {
 	addMcpTool(server, waitForNetrunnerWavesToolName, "Wait on multiple existing waves in the current Fixer project and return isolated compact lifecycle/terminality summaries. Set detail_level=full for the legacy full per-wave outputs.", WaitForNetrunnerWaves)
 }
 
+func gateWaitForNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input WaitForNetrunnerWaveInput) (*mcp.CallToolResult, WaitForNetrunnerWaveOutput, error) {
+	if err := ensureNetrunnerGateProjectBinding(); err != nil {
+		return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, err
+	}
+	return WaitForNetrunnerWave(ctx, req, input)
+}
+
+func gateWaitForNetrunnerWaves(ctx context.Context, req *mcp.CallToolRequest, input WaitForNetrunnerWavesInput) (*mcp.CallToolResult, WaitForNetrunnerWavesOutput, error) {
+	if err := ensureNetrunnerGateProjectBinding(); err != nil {
+		return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWavesOutput{}, err
+	}
+	return WaitForNetrunnerWaves(ctx, req, input)
+}
+
 func registerNetrunnerGateTools(server *mcp.Server) {
-	registerLaunchNetrunnerWaveTool(server)
-	registerWaitForNetrunnerWaveTool(server)
-	registerLaunchNetrunnerWavesTool(server)
-	registerWaitForNetrunnerWavesTool(server)
+	addMcpTool(server, waitForNetrunnerWaveToolName, "Wait for a launched parallel Netrunner wave to yield a review-ready or terminal worker and capture worktree diff artifacts. Wait-only gate channel; binds to the project from env when startup auth was missed.", gateWaitForNetrunnerWave)
+	addMcpTool(server, waitForNetrunnerWavesToolName, "Wait on multiple existing waves in the current Fixer project and return isolated compact lifecycle/terminality summaries. Wait-only gate channel; binds to the project from env when startup auth was missed.", gateWaitForNetrunnerWaves)
 }
 
 func registerOverseerTools(server *mcp.Server) {
@@ -246,6 +282,10 @@ func registerOverseerTools(server *mcp.Server) {
 	addMcpTool(server, "get_session", "Read one session by ID. Fixer/netrunner are project-scoped, overseer can read any session.", GetSession)
 	addMcpTool(server, "get_netrunner_transcript_path", "Resolve local transcript path metadata for a project-scoped Netrunner session without reading transcript content. Fixer uses bound project; overseer must pass project_id.", GetNetrunnerTranscriptPath)
 	addMcpTool(server, "submit_fixer_mcp_feedback", "Submit cross-project feedback to Fixer MCP. Fixer uses bound project; overseer must pass project_id.", SubmitFixerMcpFeedback)
+	addMcpTool(server, "list_fixer_mcp_feedback", "List/search read-only cross-project Fixer MCP feedback reports with project/date/type filters, pagination, and full content. Overseer may filter by project_id or search all projects.", ListFixerMcpFeedback)
+	addMcpTool(server, "get_hands_state", "Read the permanent Hands identity, provider lanes, queue, active generation, lease summary, and journal head for an explicit project. Requires overseer role.", GetHandsState)
+	addMcpTool(server, "list_hands_instructions", "Read a cursor-paginated permanent Hands mailbox for an explicit project. Requires overseer role.", ListHandsInstructions)
+	addMcpTool(server, "get_hands_instruction", "Read one permanent Hands instruction with its immutable envelope, audit events, and generations. Requires overseer role.", GetHandsInstruction)
 }
 
 func registerFixerTools(server *mcp.Server) {
@@ -292,13 +332,16 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "record_fixer_spend", "Record a Fixer spend under granted authority, decrementing balance and allowance atomically. Requires fixer role.", RecordFixerSpend)
 	addMcpTool(server, "get_balance_ledger", "Read recent balance ledger rows for the current project. Requires fixer role.", GetBalanceLedger)
 	addMcpTool(server, "get_session", "Read one session by ID. Fixer/netrunner are project-scoped, overseer can read any session.", GetSession)
+	addMcpTool(server, "list_project_sessions", "List/search recent project-scoped Netrunner sessions with compact metadata (status, task summary, backend/model/reasoning, wave linkage, timestamps), bounded and paginated. Use this instead of direct SQLite/CLI archaeology to discover historical sessions. Requires fixer role.", ListProjectSessions)
 	addMcpTool(server, "get_netrunner_transcript_path", "Resolve local transcript path metadata for a project-scoped Netrunner session without reading transcript content. Fixer uses bound project; overseer must pass project_id.", GetNetrunnerTranscriptPath)
 	addMcpTool(server, "submit_fixer_mcp_feedback", "Submit cross-project feedback to Fixer MCP. Fixer uses bound project; overseer must pass project_id.", SubmitFixerMcpFeedback)
+	addMcpTool(server, "list_fixer_mcp_feedback", "List/search read-only Fixer MCP feedback reports. The Fixer MCP project Fixer can read cross-project reports; other Fixers remain scoped to their current project.", ListFixerMcpFeedback)
 	addMcpTool(server, "create_planned_netrunner_wave", "Persist future project-scoped wave work, including per-task backend/model/reasoning and project-allowed MCP assignments, without creating sessions, resolving Git, or reserving write scopes. Requires fixer role.", CreatePlannedNetrunnerWave)
 	addMcpTool(server, "get_planned_netrunner_wave", "Read one project-scoped planned-wave definition and its future tasks. Requires fixer role.", GetPlannedNetrunnerWave)
 	addMcpTool(server, "initialize_planned_netrunner_wave", "Materialize one planned wave into configured pending sessions with their MCP assignments and delegate to governed create_netrunner_wave admission. Requires fixer role.", InitializePlannedNetrunnerWave)
 	addMcpTool(server, "create_netrunner_wave", "Create a durable parallel Netrunner wave from pending sessions after strict Git and write-scope admission. Does not launch workers. Requires fixer role.", CreateNetrunnerWave)
 	addMcpTool(server, "get_netrunner_wave", "Read one durable parallel Netrunner wave and its worker rows for the current project. Requires fixer role.", GetNetrunnerWave)
+	addMcpTool(server, "list_netrunner_waves", "List/search recent project-scoped parallel Netrunner waves with compact metadata (status, phase, worker counts, session IDs, control/failure state, timestamps), bounded and paginated. Use this instead of direct SQLite/CLI archaeology to discover historical waves. Requires fixer role.", ListNetrunnerWaves)
 	registerLaunchNetrunnerWaveTool(server)
 	registerWaitForNetrunnerWaveTool(server)
 	registerLaunchNetrunnerWavesTool(server)
@@ -314,6 +357,16 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "launch_image_generation_job", "Launch a dedicated Codex image-generation or image-editing subprocess for the current project and return a durable job id. Optional local input images can be attached for edit flows. Requires fixer role.", LaunchImageGenerationJob)
 	addMcpTool(server, "wait_for_image_generation_job", "Wait for an image-generation job to finish and resolve the generated image path. Requires fixer role.", WaitForImageGenerationJob)
 	addMcpTool(server, "copy_image_generation_job_output", "Copy a completed image-generation job output into the current project workspace. Requires fixer role.", CopyImageGenerationJobOutput)
+	addMcpTool(server, "request_genui_surface", "Request a registered Project Workroom GenUI surface by type, version, and typed arguments. Unknown or invalid requests fail closed and create durable demand evidence. Requires fixer role.", RequestGenUISurface)
+	addMcpTool(server, "get_genui_surface", "Read one immutable project-owned GenUI surface revision. Requires fixer or scoped netrunner role.", GetGenUISurface)
+	addMcpTool(server, "submit_genui_feedback", "Record an idempotent thumbs-up or thumbs-down for one immutable GenUI surface revision. Requires fixer role.", SubmitGenUIFeedback)
+	addMcpTool(server, "submit_hands_instruction", "Submit an idempotent instruction to the current project's single permanent actor Руки. The actor and compatibility session are resolved internally. Requires fixer or authenticated Hands netrunner role.", SubmitHandsInstruction)
+	addMcpTool(server, "get_hands_state", "Read the permanent Hands identity, provider lanes, queue, active generation, lease summary, and journal head for the current project.", GetHandsState)
+	addMcpTool(server, "list_hands_instructions", "Read the current project's cursor-paginated permanent Hands mailbox. Requires fixer or authenticated Hands netrunner role.", ListHandsInstructions)
+	addMcpTool(server, "get_hands_instruction", "Read one permanent Hands instruction with its immutable envelope, audit events, and generations.", GetHandsInstruction)
+	addMcpTool(server, "wait_hands_instruction", "Wait on a durable instruction-event cursor with race-free register-and-requery semantics. Requires fixer role.", WaitHandsInstruction)
+	addMcpTool(server, "cancel_hands_instruction", "Apply an idempotent governed cancellation to a queued, waiting, starting, or running Hands instruction. Requires fixer role.", CancelHandsInstruction)
+	addMcpTool(server, "review_hands_instruction", "Accept or request changes for a Hands instruction awaiting review. Requires fixer role.", ReviewHandsInstruction)
 }
 
 func registerNetrunnerTools(server *mcp.Server) {
@@ -331,6 +384,11 @@ func registerNetrunnerTools(server *mcp.Server) {
 	addMcpTool(server, "send_operator_telegram_notification", "Send a compact Russian operator notification through Fixer MCP's native Telegram path. Requires configured FIXER_MCP_TELEGRAM_* env vars.", SendOperatorTelegramNotification)
 	addMcpTool(server, "get_session", "Read one session by ID. Fixer/netrunner are project-scoped, overseer can read any session.", GetSession)
 	addMcpTool(server, "wake_fixer_autonomous", "Resume the registered autonomous Fixer thread for the current project after a headless Netrunner finishes. Requires netrunner role.", WakeFixerAutonomous)
+	addMcpTool(server, "get_genui_surface", "Read one immutable project-owned GenUI surface revision. Requires fixer or scoped netrunner role.", GetGenUISurface)
+	addMcpTool(server, "get_hands_state", "Read the permanent Hands identity and current state for the authenticated project. Netrunner access is read-only.", GetHandsState)
+	addMcpTool(server, "get_hands_instruction", "Read the permanent Hands instruction assigned to this compatibility Netrunner session, including its immutable envelope and events.", GetHandsInstruction)
+	addMcpTool(server, "list_hands_instructions", "Read the current project's cursor-paginated permanent Hands mailbox. Requires authenticated Hands netrunner role.", ListHandsInstructions)
+	addMcpTool(server, "submit_hands_instruction", "Submit an idempotent instruction to the current project's single permanent actor Руки. Requires authenticated Hands netrunner role.", SubmitHandsInstruction)
 }
 
 func registerAdminBackcompatTools(server *mcp.Server) {

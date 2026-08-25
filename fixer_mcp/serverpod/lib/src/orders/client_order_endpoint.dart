@@ -1,6 +1,7 @@
 import 'package:fixer_dashboard_server/src/auth/client_auth_middleware.dart';
 import 'package:fixer_dashboard_server/src/generated/protocol.dart';
 import 'package:serverpod/serverpod.dart' hide Order;
+import 'package:serverpod/serverpod.dart' as sp;
 
 /// CRUD operations for client-owned orders and their revisions.
 class ClientOrderEndpoint extends ClientProtectedEndpoint {
@@ -34,8 +35,9 @@ class ClientOrderEndpoint extends ClientProtectedEndpoint {
     return Order.db.find(
       session,
       where: (t) => t.clientId.equals(clientId),
-      orderBy: (t) => t.updatedAt,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.updatedAt, orderDescending: true),
+      ],
     );
   }
 
@@ -83,8 +85,9 @@ class ClientOrderEndpoint extends ClientProtectedEndpoint {
     final latest = await Revision.db.findFirstRow(
       session,
       where: (t) => t.orderId.equals(order.id!),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
     final now = DateTime.now();
     final revision = await Revision.db.insertRow(
@@ -112,8 +115,9 @@ class ClientOrderEndpoint extends ClientProtectedEndpoint {
     return Revision.db.find(
       session,
       where: (t) => t.orderId.equals(orderId),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
   }
 

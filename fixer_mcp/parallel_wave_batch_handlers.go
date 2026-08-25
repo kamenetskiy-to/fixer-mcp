@@ -15,14 +15,18 @@ const (
 )
 
 type LaunchNetrunnerWavesInput struct {
-	WaveIds        []int                      `json:"wave_ids,omitempty" jsonschema:"Two or more existing project-scoped wave IDs. Uses the shared launch defaults below."`
-	Waves          []LaunchNetrunnerWaveInput `json:"waves,omitempty" jsonschema:"Optional per-wave launch inputs. Mutually exclusive with wave_ids."`
-	Backend        string                     `json:"backend,omitempty" jsonschema:"Shared backend used with wave_ids."`
-	Model          string                     `json:"model,omitempty" jsonschema:"Shared model used with wave_ids."`
-	Reasoning      string                     `json:"reasoning,omitempty" jsonschema:"Shared reasoning used with wave_ids."`
-	FixerSessionId string                     `json:"fixer_session_id,omitempty" jsonschema:"Shared Fixer session ID used with wave_ids."`
-	TimeoutSeconds int                        `json:"timeout_seconds,omitempty" jsonschema:"Shared launch startup timeout used with wave_ids."`
-	DetailLevel    string                     `json:"detail_level,omitempty" jsonschema:"Response detail: summary (default) or full. Full preserves the legacy per-wave output payload."`
+	WaveIds         []int                      `json:"wave_ids,omitempty" jsonschema:"One or more existing project-scoped wave IDs. Uses the shared launch defaults below."`
+	Waves           []LaunchNetrunnerWaveInput `json:"waves,omitempty" jsonschema:"Optional per-wave launch inputs. Mutually exclusive with wave_ids."`
+	Backend         string                     `json:"backend,omitempty" jsonschema:"Shared backend used with wave_ids."`
+	Model           string                     `json:"model,omitempty" jsonschema:"Shared model used with wave_ids."`
+	Reasoning       string                     `json:"reasoning,omitempty" jsonschema:"Shared reasoning used with wave_ids."`
+	ReviewPolicy    string                     `json:"review_policy,omitempty" jsonschema:"Shared review policy used with wave_ids: manual (default) or automatic."`
+	ReviewBackend   string                     `json:"review_backend,omitempty" jsonschema:"Shared automatic reviewer backend used with wave_ids."`
+	ReviewModel     string                     `json:"review_model,omitempty" jsonschema:"Shared automatic reviewer model used with wave_ids."`
+	ReviewReasoning string                     `json:"review_reasoning,omitempty" jsonschema:"Shared automatic reviewer reasoning used with wave_ids."`
+	FixerSessionId  string                     `json:"fixer_session_id,omitempty" jsonschema:"Shared Fixer session ID used with wave_ids."`
+	TimeoutSeconds  int                        `json:"timeout_seconds,omitempty" jsonschema:"Shared launch startup timeout used with wave_ids."`
+	DetailLevel     string                     `json:"detail_level,omitempty" jsonschema:"Response detail: summary (default) or full. Full preserves the legacy per-wave output payload."`
 }
 
 type LaunchNetrunnerWaveBatchResult struct {
@@ -40,7 +44,7 @@ type LaunchNetrunnerWavesOutput struct {
 }
 
 type WaitForNetrunnerWavesInput struct {
-	WaveIds             []int                       `json:"wave_ids,omitempty" jsonschema:"Two or more existing project-scoped wave IDs. Uses the shared wait settings below."`
+	WaveIds             []int                       `json:"wave_ids,omitempty" jsonschema:"One or more existing project-scoped wave IDs. Uses the shared wait settings below."`
 	Waves               []WaitForNetrunnerWaveInput `json:"waves,omitempty" jsonschema:"Optional per-wave wait inputs. Mutually exclusive with wave_ids."`
 	TimeoutSeconds      int                         `json:"timeout_seconds,omitempty" jsonschema:"Shared wait timeout used with wave_ids."`
 	PollIntervalSeconds int                         `json:"poll_interval_seconds,omitempty" jsonschema:"Shared poll interval used with wave_ids."`
@@ -128,8 +132,8 @@ func parallelWaveBatchWaitState(output WaitForNetrunnerWaveOutput, summary *Netr
 }
 
 func validateParallelWaveBatchIDs(waveIDs []int, projectID int) error {
-	if len(waveIDs) < 2 {
-		return fmt.Errorf("batch wave tools require at least two wave IDs")
+	if len(waveIDs) < 1 {
+		return fmt.Errorf("batch wave tools require at least one wave ID")
 	}
 	seen := make(map[int]struct{}, len(waveIDs))
 	for _, waveID := range waveIDs {
@@ -165,12 +169,16 @@ func launchParallelWaveBatchInputs(input LaunchNetrunnerWavesInput) ([]LaunchNet
 	waves := make([]LaunchNetrunnerWaveInput, 0, len(input.WaveIds))
 	for _, waveID := range input.WaveIds {
 		waves = append(waves, LaunchNetrunnerWaveInput{
-			WaveId:         waveID,
-			Backend:        input.Backend,
-			Model:          input.Model,
-			Reasoning:      input.Reasoning,
-			FixerSessionId: input.FixerSessionId,
-			TimeoutSeconds: input.TimeoutSeconds,
+			WaveId:          waveID,
+			Backend:         input.Backend,
+			Model:           input.Model,
+			Reasoning:       input.Reasoning,
+			ReviewPolicy:    input.ReviewPolicy,
+			ReviewBackend:   input.ReviewBackend,
+			ReviewModel:     input.ReviewModel,
+			ReviewReasoning: input.ReviewReasoning,
+			FixerSessionId:  input.FixerSessionId,
+			TimeoutSeconds:  input.TimeoutSeconds,
 		})
 	}
 	return waves, nil

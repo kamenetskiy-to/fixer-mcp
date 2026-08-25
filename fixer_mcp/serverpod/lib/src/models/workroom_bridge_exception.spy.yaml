@@ -1,0 +1,5 @@
+### Safe error surfaced by the authenticated Workroom transport.
+exception: WorkroomBridgeException
+fields:
+  reasonCode: String
+  message: String

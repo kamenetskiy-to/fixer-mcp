@@ -1,17 +1,48 @@
-"""Manual Netrunner launch workflow implementation for the Fixer wire launcher."""
+"""Project Hands channel and compatibility-generation launch workflows."""
 
 from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 from typing import Any, Callable, Sequence
 
-from client_wires.backends import normalize_backend_name
+from client_wires.backends import is_codex_backend, normalize_backend_name
 from client_wires.fixer_wire_db import SessionLaunchSelection, SessionRow
+
+
+HANDS_PROVIDER_BACKENDS = {
+    "codex": "codex",
+    "commandcode": "commandcode",
+    "claude": "claude",
+    "kimi": "kimi-code",
+    "antigravity": "antigravity",
+    "grok": "grok",
+}
+
+
+@dataclass(frozen=True)
+class ProjectHandsLane:
+    provider: str
+    model: str
+    reasoning: str
+
+    @property
+    def backend(self) -> str:
+        return HANDS_PROVIDER_BACKENDS[self.provider]
+
+
+@dataclass(frozen=True)
+class ProjectHandsState:
+    project_id: int
+    display_name: str
+    authority_state: str
+    default_lane: str
+    lanes: tuple[ProjectHandsLane, ...]
 
 
 @dataclass(frozen=True)
@@ -58,6 +89,130 @@ class NetrunnerLaunchCallbacks:
     forced_mcp_server: str
 
 
+def _canonical_hands_provider(raw_provider: str) -> str:
+    normalized = normalize_backend_name(raw_provider).strip().lower()
+    if normalized in {"kimi", "kimi-code"}:
+        return "kimi"
+    if normalized == "agy":
+        return "antigravity"
+    return normalized
+
+
+def _redacted_command_for_display(command: Sequence[str]) -> list[str]:
+    displayed: list[str] = []
+    for argument in command:
+        if ".env={" in argument:
+            displayed.append(argument.split(".env={", 1)[0] + ".env=<redacted>")
+        else:
+            displayed.append(argument)
+    return displayed
+
+
+def load_project_hands_state(
+    cwd: Path,
+    *,
+    callbacks: NetrunnerLaunchCallbacks,
+) -> ProjectHandsState:
+    db_path = callbacks.resolve_fixer_db_path(cwd)
+    with closing(sqlite3.connect(db_path)) as conn:
+        # The facade runs the configured Go binary's schema bootstrap before
+        # entering this reader. Keep Project Hands migrations under that one
+        # authority instead of teaching the Python wire an expanding schema.
+        project_id = callbacks.ensure_project_registered(conn, cwd)
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_hands'"
+        ).fetchone() is None:
+            raise RuntimeError(
+                "Permanent Project Hands backend is unavailable; missing durable table: "
+                "project_hands. The launcher will not fall back to ad-hoc manual Netrunner sessions."
+            )
+
+        actor_row = conn.execute(
+            """
+            SELECT display_name, authority_state, default_lane
+            FROM project_hands
+            WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        if actor_row is None:
+            raise RuntimeError(
+                "The current project has no durable `Руки` identity. Provision it through the "
+                "Fixer MCP control plane; the launcher will not create a disposable substitute."
+            )
+
+    lanes = (
+        ProjectHandsLane("codex", "gpt-5.6-luna", "high"),
+        ProjectHandsLane("commandcode", "commandcode/deepseek/deepseek-v4-flash", "high"),
+        ProjectHandsLane("claude", "kimi/k3", "high"),
+        ProjectHandsLane("kimi", "kimi-k3-256k", "default"),
+        ProjectHandsLane("antigravity", "Gemini 3.7 Flash", "medium"),
+    )
+    return ProjectHandsState(
+        project_id=project_id,
+        display_name=str(actor_row[0] or "Руки"),
+        authority_state=str(actor_row[1] or "disabled"),
+        default_lane=_canonical_hands_provider(str(actor_row[2] or "codex")),
+        lanes=lanes,
+    )
+
+
+def load_latest_project_hands_resume(
+    cwd: Path,
+    *,
+    callbacks: NetrunnerLaunchCallbacks,
+) -> tuple[str, str, str, str] | None:
+    db_path = callbacks.resolve_fixer_db_path(cwd)
+    with closing(sqlite3.connect(db_path)) as conn:
+        project_id = callbacks.ensure_project_registered(conn, cwd)
+        row = conn.execute(
+            """
+            SELECT provider, external_session_id, model, reasoning
+            FROM hands_generation
+            WHERE project_id = ?
+              AND TRIM(COALESCE(external_session_id, '')) != ''
+            ORDER BY updated_at DESC, generation DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return (
+        _canonical_hands_provider(str(row[0] or "")),
+        str(row[1]).strip(),
+        str(row[2] or "").strip(),
+        str(row[3] or "").strip(),
+    )
+
+
+def resolve_project_hands_lane(
+    state: ProjectHandsState,
+    *,
+    preset_backend: str | None,
+    Option: Any,
+    single_select_items: Any,
+    select_lane_interactive: Callable[..., ProjectHandsLane],
+) -> ProjectHandsLane:
+    if state.authority_state != "enabled":
+        raise RuntimeError(
+            f"Project `{state.display_name}` authority is {state.authority_state!r}; "
+            "instructions cannot be launched."
+        )
+    if preset_backend:
+        provider = _canonical_hands_provider(preset_backend)
+        lane = next((item for item in state.lanes if item.provider == provider), None)
+        if lane is None:
+            raise RuntimeError(f"Provider {preset_backend!r} is not a registered Project Hands lane.")
+        return lane
+    return select_lane_interactive(
+        state.lanes,
+        state.default_lane,
+        Option,
+        single_select_items,
+    )
+
+
 def launch_netrunner(
     passthrough_args: Sequence[str],
     *,
@@ -71,6 +226,7 @@ def launch_netrunner(
     single_select_items: Any,
     multi_select_items: Any,
     callbacks: NetrunnerLaunchCallbacks,
+    netrunner_kind: str | None = None,
 ) -> int:
     from client_wires.codex_compat.llm import (
         ExecutionPreferences,
@@ -81,6 +237,12 @@ def launch_netrunner(
     )
 
     cwd = Path.cwd()
+    if preset_session_id is None:
+        raise RuntimeError(
+            "Ad-hoc Netrunner session selection is retired. Open `Руки (Project Hands)` "
+            "without a session ID, or pass an internal compatibility session ID for a "
+            "governed execution/acceptance generation."
+        )
     db_path = callbacks.resolve_fixer_db_path(cwd)
     # Keep launcher DB access in short-lived windows so interactive selection
     # never leaves SQLite pinned open while the operator is thinking.
@@ -92,17 +254,10 @@ def launch_netrunner(
         raise RuntimeError("No sessions found for current project.")
 
     session_by_id = {row.session_id: row for row in sessions}
-    selected_via_interactive_picker = preset_session_id is None
-    if preset_session_id is not None:
-        if preset_session_id not in session_by_id:
-            raise RuntimeError(f"Session {preset_session_id} is not available for the current project.")
-        selected_session = session_by_id[preset_session_id]
-    else:
-        selected_session = callbacks.select_session_interactive(sessions, Option, single_select_items)
-
-    netrunner_kind = callbacks.netrunner_kind_manual
-    if selected_via_interactive_picker and selected_session.status == "pending" and not dry_run:
-        netrunner_kind = callbacks.select_manual_netrunner_kind_interactive(Option, single_select_items)
+    if preset_session_id not in session_by_id:
+        raise RuntimeError(f"Compatibility session {preset_session_id} is not available for the current project.")
+    selected_session = session_by_id[preset_session_id]
+    netrunner_kind = netrunner_kind or callbacks.netrunner_kind_manual
 
     launch_selection = callbacks.resolve_netrunner_launch_selection(
         selected_session,
@@ -157,19 +312,11 @@ def launch_netrunner(
                 "Preset MCP selection must be project-allowed and runtime-available. "
                 f"Invalid: {invalid_text}"
             )
-    elif dry_run:
-        selected_mcp_names = sorted(set(preselected_names))
     else:
-        selected_mcp_names = callbacks.select_mcp_interactive(
-            picker_pool_names,
-            preselected_names,
-            registry_meta,
-            available_servers,
-            Option,
-            multi_select_items,
-            show_all_registry_names=True,
-        )
-        selected_mcp_names = [name for name in selected_mcp_names if name != callbacks.computer_use_mcp_name]
+        # A compatibility envelope is already control-plane scoped. Its MCP
+        # assignment is durable session state, so launching it must never
+        # pause for a second interactive MCP decision.
+        selected_mcp_names = sorted(set(preselected_names))
 
     if callbacks.forced_mcp_server in available_servers:
         selected_mcp_names = callbacks.normalize_names([*selected_mcp_names, callbacks.forced_mcp_server])
@@ -270,6 +417,7 @@ def launch_netrunner(
 
     option_args = [*codex_args, *adapter.build_mcp_flags(selected_servers, available_servers)]
     resume_external_session_id: str | None = None
+    prompt = ""
     if selected_session.status != "pending":
         descriptor = callbacks.backend_descriptor(launch_selection.backend)
         if not descriptor.resume_supported:
@@ -316,6 +464,9 @@ def launch_netrunner(
                 netrunner_kind=netrunner_kind,
             )
         if prompt:
+            # Project Hands Kimi is interactive-only. Do not reintroduce the
+            # non-interactive -p/--print path here; use the same TUI flow as
+            # fixer -> fixer and let the operator submit the prompt manually.
             codex_cmd.extend(adapter.build_prompt_args(prompt))
 
     env = callbacks.build_backend_launch_env(
@@ -330,46 +481,40 @@ def launch_netrunner(
         if env_var:
             env[env_var] = str(config_path)
 
-    print(f"[fixer-wire] netrunner session: {selected_session.session_id}")
-    print(f"[fixer-wire] netrunner backend: {launch_selection.backend}")
-    print(f"[fixer-wire] netrunner model: {launch_selection.model}")
-    print(f"[fixer-wire] netrunner reasoning: {launch_selection.reasoning}")
-    print(f"[fixer-wire] netrunner manual mode: {netrunner_kind}")
+    print(f"[fixer-wire] compatibility execution session: {selected_session.session_id}")
+    print(f"[fixer-wire] disposable generation backend: {launch_selection.backend}")
+    print(f"[fixer-wire] disposable generation model: {launch_selection.model}")
+    print(f"[fixer-wire] disposable generation reasoning: {launch_selection.reasoning}")
+    print(f"[fixer-wire] governed execution mode: {netrunner_kind}")
     if resume_external_session_id:
         print(f"[fixer-wire] resuming {launch_selection.backend} session id: {resume_external_session_id}")
     print(f"[fixer-wire] netrunner MCP selection: {', '.join(selected_mcp_names) if selected_mcp_names else 'none'}")
-    print("[fixer-wire] command:", codex_cmd)
+    print("[fixer-wire] command:", _redacted_command_for_display(codex_cmd))
     if (
-        launch_selection.backend in ("kimi-code", "kimi-code-native")
+        launch_selection.backend in {"kimi-code", "commandcode"}
         and prompt
         and not resume_external_session_id
         and not dry_run
     ):
         print("[fixer-wire] kimi shell mode cannot auto-submit; paste the following into the Kimi TUI:")
         print(prompt)
-        try:
-            import subprocess as _subprocess
-            _subprocess.run(["pbcopy"], input=prompt.encode("utf-8"), check=False)
-            print("[fixer-wire] (bootstrap prompt copied to clipboard — paste with Cmd+V)")
-        except Exception:
-            pass
     if dry_run:
         return 0
     before_matches: set[str] = set()
-    if launch_selection.backend == "codex" and not resume_external_session_id:
+    if is_codex_backend(launch_selection.backend) and not resume_external_session_id:
         try:
             before_match = callbacks.latest_matching_netrunner_codex_session_id(cwd, selected_session.session_id)
             if before_match:
                 before_matches.add(before_match)
         except RuntimeError:
             before_matches = set()
-    before = callbacks.latest_codex_session_id_for_cwd(cwd) if launch_selection.backend == "codex" else None
+    before = callbacks.latest_codex_session_id_for_cwd(cwd) if is_codex_backend(launch_selection.backend) else None
     result = subprocess.call(codex_cmd, env=env, cwd=str(cwd))
     linked_session_id: str | None = None
     if resume_external_session_id:
         linked_session_id = resume_external_session_id
     else:
-        if launch_selection.backend == "codex":
+        if is_codex_backend(launch_selection.backend):
             try:
                 after_match = callbacks.latest_matching_netrunner_codex_session_id(cwd, selected_session.session_id)
             except RuntimeError:

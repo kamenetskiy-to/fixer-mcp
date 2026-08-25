@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import textwrap
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from client_wires.backends import (
@@ -12,9 +14,18 @@ from client_wires.backends import (
     normalize_backend_name,
     subscribed_backend_descriptors,
 )
+from client_wires.backends.codex_adapter import (
+    codex_default_model_for_family,
+    codex_model_display_label,
+    codex_model_family_for_model,
+    codex_model_family_label,
+    codex_model_options_for_family,
+)
+from client_wires.codex_compat.ui import BACK_VALUE, BackNavigation
 from client_wires import fixer_wire_db
 from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_prompts
+from client_wires import ai_limits
 
 SCAFFOLD_MVP_ACTION = "__scaffold_mvp__"
 UNATTACHED_FIXER_ACTION = "__unattached_fixer__"
@@ -23,6 +34,10 @@ FIXER_LAUNCH_NEW = "__fixer_launch_new__"
 FIXER_LAUNCH_RESUME = "__fixer_launch_resume__"
 OVERSEER_LAUNCH_NEW = "__overseer_launch_new__"
 OVERSEER_LAUNCH_RESUME = "__overseer_launch_resume__"
+HANDS_LAUNCH_NEW = "__hands_launch_new__"
+HANDS_LAUNCH_RESUME = "__hands_launch_resume__"
+HANDS_WORKSPACE_SAFE = "__hands_workspace_safe__"
+HANDS_WORKSPACE_HOTFIX = "__hands_workspace_hotfix__"
 RECENTLY_ACTIVE_STATUSES = {"in_progress"}
 MCP_CATEGORY_ORDER = ("DB", "Web-search", "Design", "Productivity", "Coding", "Other")
 MCP_FALLBACK_CATEGORY = "Other"
@@ -98,10 +113,9 @@ def _resume_session_label(summary: Any, *, preview_width: int = 42) -> str:
 
 def _select_role_interactive(Option: Any, single_select_items: Any) -> str:
     options = [
-        (UNATTACHED_FIXER_ACTION, "Unattached Fixer"),
-        ("fixer", "Fixer (Project)"),
-        ("overseer", "Overseer (Global)"),
-        ("netrunner", "Netrunner (Worker)"),
+        ("fixer", "Fixer (Оркестратор)"),
+        ("netrunner", "Hands (Исполнитель)"),
+        ("overseer", "Overseer (Глобальный Fixer-помощник)"),
     ]
     choice = single_select_items(
         [Option(label, value) for value, label in options],
@@ -109,6 +123,9 @@ def _select_role_interactive(Option: Any, single_select_items: Any) -> str:
         preselected_value="fixer",
     )
     if choice is None:
+        print("Cancelled.")
+        raise SystemExit(130)
+    if choice == BACK_VALUE:
         print("Cancelled.")
         raise SystemExit(130)
     return str(choice)
@@ -142,6 +159,8 @@ def _select_scaffold_execution_mode_interactive(Option: Any, single_select_items
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     selected_text = str(selected)
     if selected_text == "dry_run":
         return True
@@ -155,6 +174,7 @@ def _select_fixer_launch_action_interactive(Option: Any, single_select_items: An
         Option("Fixer global launch", is_header=True),
         Option("Start new Fixer", FIXER_LAUNCH_NEW),
         Option("Resume existing Fixer", FIXER_LAUNCH_RESUME),
+        Option("Start Unattached Fixer", UNATTACHED_FIXER_ACTION),
     ]
     selected = single_select_items(
         options,
@@ -164,8 +184,10 @@ def _select_fixer_launch_action_interactive(Option: Any, single_select_items: An
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        return FIXER_LAUNCH_NEW
     selected_text = str(selected)
-    if selected_text not in {FIXER_LAUNCH_NEW, FIXER_LAUNCH_RESUME}:
+    if selected_text not in {FIXER_LAUNCH_NEW, FIXER_LAUNCH_RESUME, UNATTACHED_FIXER_ACTION}:
         raise RuntimeError(f"Unexpected Fixer launch mode: {selected_text}")
     return selected_text
 
@@ -184,21 +206,182 @@ def _select_overseer_launch_action_interactive(Option: Any, single_select_items:
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     selected_text = str(selected)
     if selected_text not in {OVERSEER_LAUNCH_NEW, OVERSEER_LAUNCH_RESUME}:
         raise RuntimeError(f"Unexpected Overseer launch mode: {selected_text}")
     return selected_text
 
 
-def _select_manual_netrunner_kind_interactive(Option: Any, single_select_items: Any) -> str:
+def _select_hands_launch_action_interactive(Option: Any, single_select_items: Any, *, has_resume: bool) -> str:
+    options = [Option("Project Hands launch", is_header=True)]
+    if has_resume:
+        options.append(Option("Resume a saved Руки client", HANDS_LAUNCH_RESUME))
+    options.append(Option("Start a new Руки client", HANDS_LAUNCH_NEW))
+    selected = single_select_items(
+        options,
+        title="Project Hands session mode (enter confirm, q cancel)",
+        preselected_value=HANDS_LAUNCH_RESUME if has_resume else HANDS_LAUNCH_NEW,
+    )
+    if selected is None:
+        print("Cancelled.")
+        raise SystemExit(130)
+    selected_text = str(selected)
+    if selected_text not in {HANDS_LAUNCH_NEW, HANDS_LAUNCH_RESUME}:
+        raise RuntimeError(f"Unexpected Project Hands launch mode: {selected_text}")
+    return selected_text
+
+
+def _select_hands_workspace_mode_interactive(Option: Any, single_select_items: Any) -> str:
     options = [
-        Option("Manual Netrunner mode", is_header=True),
-        Option("Regular manual Netrunner [default]", NETRUNNER_KIND_MANUAL),
-        Option("Acceptance manual Netrunner", NETRUNNER_KIND_ACCEPTANCE),
+        Option("Project Hands workspace", is_header=True),
+        Option("Safe — isolated worktree", HANDS_WORKSPACE_SAFE),
+        Option("Hotfix — current live worktree", HANDS_WORKSPACE_HOTFIX),
     ]
     selected = single_select_items(
         options,
-        title="Select manual Netrunner type (enter confirm, q cancel)",
+        title="Project Hands workspace mode (enter confirm, q cancel)",
+        preselected_value=HANDS_WORKSPACE_SAFE,
+    )
+    if selected is None:
+        print("Cancelled.")
+        raise SystemExit(130)
+    selected_text = str(selected)
+    if selected_text not in {HANDS_WORKSPACE_SAFE, HANDS_WORKSPACE_HOTFIX}:
+        raise RuntimeError(f"Unexpected Project Hands workspace mode: {selected_text}")
+    return selected_text
+
+
+def _select_hands_docs_interactive(
+    doc_entries: Sequence[Any],
+    preselected_ids: Sequence[int],
+    Option: Any,
+    multi_select_items: Any,
+) -> list[int]:
+    if not doc_entries:
+        return []
+    by_id = {int(entry.doc_id): entry for entry in doc_entries}
+    children: dict[int, list[int]] = {}
+    for entry in doc_entries:
+        parent = int(getattr(entry, "parent_id", 0) or 0)
+        if parent not in by_id:
+            parent = 0
+        children.setdefault(parent, []).append(int(entry.doc_id))
+    roots = children.get(0, [])
+
+    def _subtree(doc_id: int) -> list[int]:
+        collected = [doc_id]
+        for child in children.get(doc_id, []):
+            collected.extend(_subtree(child))
+        return collected
+
+    selected = {int(doc_id) for doc_id in preselected_ids if int(doc_id) in by_id}
+    expanded: set[int] = set()
+    while True:
+        options = [Option("Project documentation tree", is_header=True)]
+        visible_doc_ids: list[int] = []
+
+        def _walk(doc_id: int, depth: int) -> None:
+            entry = by_id[doc_id]
+            kids = children.get(doc_id, [])
+            indent = "  " * depth
+            label = f"{indent}{entry.title}  ({entry.path or entry.slug or entry.status})"
+            options.append(Option(label, doc_id))
+            visible_doc_ids.append(doc_id)
+            if not kids:
+                return
+            branch_ids = _subtree(doc_id)
+            if doc_id in expanded:
+                options.append(Option(f"{indent}  ▸ collapse branch", f"collapse:{doc_id}", instant=True))
+                options.append(Option(
+                    f"{indent}  ▸ toggle whole branch ({len(branch_ids)} docs)",
+                    f"branch:{doc_id}",
+                    instant=True,
+                ))
+                for kid in kids:
+                    _walk(kid, depth + 1)
+            else:
+                options.append(Option(
+                    f"{indent}  ▸ expand branch ({len(branch_ids)} docs)",
+                    f"expand:{doc_id}",
+                    instant=True,
+                ))
+                options.append(Option(
+                    f"{indent}  ▸ toggle whole branch ({len(branch_ids)} docs)",
+                    f"branch:{doc_id}",
+                    instant=True,
+                ))
+
+        for root in roots:
+            _walk(root, 0)
+        result = multi_select_items(
+            options,
+            title="Attach project docs to Руки (space toggle, enter confirm, a toggle all, q cancel)",
+            preselected_values=sorted(selected),
+        )
+        if result is None:
+            print("Cancelled.")
+            raise SystemExit(130)
+        actions = [value for value in result if isinstance(value, str)]
+        chosen_docs = {int(value) for value in result if not isinstance(value, str)}
+        selected = (selected - set(visible_doc_ids)) | chosen_docs
+        if not actions:
+            return sorted(selected)
+        for action in actions:
+            verb, _, raw_id = action.partition(":")
+            doc_id = int(raw_id)
+            if verb == "expand":
+                expanded.add(doc_id)
+            elif verb == "collapse":
+                expanded.discard(doc_id)
+            elif verb == "branch":
+                branch_ids = set(_subtree(doc_id))
+                if branch_ids <= selected:
+                    selected -= branch_ids
+                else:
+                    selected |= branch_ids
+
+
+def _select_hands_resume_context_interactive(
+    contexts: Sequence[Any],
+    Option: Any,
+    single_select_items: Any,
+) -> Any:
+    if not contexts:
+        raise RuntimeError("No saved Руки launch contexts were found for this project.")
+    options = [Option("Руки launch contexts", is_header=True)]
+    for index, context in enumerate(contexts):
+        external = str(getattr(context, "external_session_id", "") or "").strip()
+        resume_mark = "resume" if external else "fresh"
+        docs_count = len(getattr(context, "doc_ids", ()) or ())
+        mcp_count = len(getattr(context, "mcp_names", ()) or ())
+        created = str(getattr(context, "created_at", "") or "")[:16]
+        label = (
+            f"{context.provider:<12} | {created} | {resume_mark} | "
+            f"docs={docs_count} mcp={mcp_count} | {Path(str(context.worktree_path)).name}"
+        )
+        options.append(Option(label, index))
+    selected = single_select_items(
+        options,
+        title="Select Руки client to resume (enter confirm, q cancel)",
+        preselected_value=0,
+    )
+    if selected is None:
+        print("Cancelled.")
+        raise SystemExit(130)
+    return contexts[int(selected)]
+
+
+def _select_manual_netrunner_kind_interactive(Option: Any, single_select_items: Any) -> str:
+    options = [
+        Option("Compatibility execution mode", is_header=True),
+        Option("Project Hands execution generation [default]", NETRUNNER_KIND_MANUAL),
+        Option("Governed acceptance generation", NETRUNNER_KIND_ACCEPTANCE),
+    ]
+    selected = single_select_items(
+        options,
+        title="Select compatibility execution type (enter confirm, q cancel)",
         preselected_value=NETRUNNER_KIND_MANUAL,
     )
     if selected is None:
@@ -207,7 +390,56 @@ def _select_manual_netrunner_kind_interactive(Option: Any, single_select_items: 
     selected_text = str(selected)
     if selected_text in {NETRUNNER_KIND_MANUAL, NETRUNNER_KIND_ACCEPTANCE}:
         return selected_text
-    raise RuntimeError(f"Unexpected manual Netrunner type: {selected_text}")
+    raise RuntimeError(f"Unexpected compatibility execution type: {selected_text}")
+
+
+def _select_project_hands_lane_interactive(
+    lanes: Sequence[Any],
+    default_lane: str,
+    Option: Any,
+    single_select_items: Any,
+    *,
+    select_backend_interactive: Callable[..., str] | None = None,
+    select_model_interactive: Callable[..., str] | None = None,
+) -> Any:
+    if not lanes:
+        raise RuntimeError("No provider lanes are registered for the current project's `Руки` actor.")
+
+    by_provider = {str(lane.provider): lane for lane in lanes}
+    backend_for_provider = {
+        "codex": "codex",
+        "commandcode": "commandcode",
+        "claude": "claude",
+        "kimi": "kimi-code",
+        "antigravity": "antigravity",
+        "grok": "grok",
+    }
+    provider_for_backend = {backend: provider for provider, backend in backend_for_provider.items()}
+
+    select_backend = select_backend_interactive or _select_backend_interactive
+    select_model = select_model_interactive or _select_model_interactive
+    preferred_provider = default_lane if default_lane in by_provider else str(lanes[0].provider)
+    selected_backend = normalize_backend_name(
+        select_backend(
+            backend_for_provider.get(preferred_provider, preferred_provider),
+            Option,
+            single_select_items,
+        )
+    )
+    selected_provider = provider_for_backend.get(selected_backend, selected_backend)
+    lane = by_provider.get(selected_provider)
+    if lane is None:
+        raise RuntimeError(f"Selected Project Hands lane {selected_backend!r} is unavailable.")
+
+    preferred_model = str(getattr(lane, "model", "") or "").strip()
+    selected_model = select_model(
+        selected_backend,
+        preferred_model,
+        Option,
+        single_select_items,
+        **({"require_codex_model_family": True} if selected_backend == "codex" else {}),
+    )
+    return replace(lane, model=selected_model)
 
 
 def _select_session_interactive(
@@ -233,7 +465,7 @@ def _select_session_interactive(
                 continue
             raise RuntimeError("No sessions available for selection.")
 
-        options = [Option("Netrunner sessions", is_header=True)]
+        options = [Option("Compatibility execution envelopes", is_header=True)]
         preselected: int | None = None
         for row in visible:
             external_suffix = ""
@@ -248,7 +480,7 @@ def _select_session_interactive(
         options.append(Option(toggle_label, TOGGLE_ARCHIVED_VALUE))
         selected = single_select_items(
             options,
-            title="Select netrunner session (enter confirm, q cancel)",
+            title="Select compatibility execution envelope (enter confirm, q cancel)",
             preselected_value=preselected if preselected is not None else visible[0].session_id,
         )
         if selected is None:
@@ -399,7 +631,7 @@ def _select_netrunner_resume_session_interactive(
     preferred_session_id: str | None = None,
 ) -> str:
     if not summaries:
-        raise RuntimeError(f"No matching Codex sessions were found for netrunner session {session_id}.")
+        raise RuntimeError(f"No matching provider generations were found for compatibility session {session_id}.")
 
     options = [Option("Matching Codex sessions", is_header=True)]
     available_ids = {str(summary.session_id) for summary in summaries}
@@ -416,7 +648,7 @@ def _select_netrunner_resume_session_interactive(
 
     selected = single_select_items(
         options,
-        title=f"Select Codex session to resume for netrunner session {session_id} (enter confirm, q cancel)",
+        title=f"Select disposable Codex generation for compatibility session {session_id} (enter confirm, q cancel)",
         preselected_value=preferred_session_id if preferred_session_id in available_ids else summaries[0].session_id,
     )
     if selected is None:
@@ -434,13 +666,18 @@ def _select_backend_interactive(
     Option: Any,
     single_select_items: Any,
 ) -> str:
-    descriptors = subscribed_backend_descriptors()
+    descriptors = {descriptor.name: descriptor for descriptor in subscribed_backend_descriptors()}
+    order = ("codex", "commandcode", "antigravity", "grok", "claude", "kimi-code")
+    ordered = [name for name in order if name in descriptors]
+    ordered += [name for name in descriptors if name not in order]
     options = [Option("CLI backends", is_header=True)]
-    for descriptor in descriptors:
+    for name in ordered:
+        descriptor = descriptors[name]
         label = descriptor.label
-        if descriptor.name == DEFAULT_BACKEND:
+        if name == DEFAULT_BACKEND:
             label = f"{label} [default]"
-        options.append(Option(f"{label} | {descriptor.description}", descriptor.name))
+        detail = ai_limits.backend_subscription_limits(name) or descriptor.description
+        options.append(Option(f"{label} | {detail}", name))
 
     selected = single_select_items(
         options,
@@ -450,6 +687,8 @@ def _select_backend_interactive(
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     return normalize_backend_name(str(selected))
 
 
@@ -460,11 +699,61 @@ def _select_model_interactive(
     single_select_items: Any,
     *,
     backend_descriptor: Callable[[str], Any] = fixer_wire_db._backend_descriptor,
+    require_codex_model_family: bool = False,
 ) -> str:
     descriptor = backend_descriptor(backend)
+    preferred_model = preferred_model.strip()
+    if backend == "codex" and require_codex_model_family:
+        preferred_family = codex_model_family_for_model(preferred_model or descriptor.default_model)
+        family_options = [Option("Codex subscriptions", is_header=True)]
+        for family in ("openai", "opencode-go", "commandcode"):
+            family_options.append(
+                Option(
+                    f"{codex_model_family_label(family)} "
+                    f"[default: {codex_default_model_for_family(family)}]",
+                    family,
+                )
+            )
+        family_choice = single_select_items(
+            family_options,
+            title="Select Codex subscription (enter confirm, q cancel)",
+            preselected_value=preferred_family,
+        )
+        if family_choice is None:
+            print("Cancelled.")
+            raise SystemExit(130)
+        if family_choice == BACK_VALUE:
+            raise BackNavigation()
+        family = str(family_choice).strip().lower()
+        family_model_options = codex_model_options_for_family(descriptor.model_options, family)
+        if not family_model_options:
+            raise RuntimeError(f"No Codex model options are registered for family {family!r}.")
+        if preferred_model not in family_model_options:
+            preferred_model = codex_default_model_for_family(family)
+        options = [Option(f"{codex_model_family_label(family)} models", is_header=True)]
+        for model in family_model_options:
+            label = codex_model_display_label(model)
+            if model == preferred_model:
+                label = f"{label} [default]"
+            options.append(Option(label, model))
+        selected = single_select_items(
+            options,
+            title=f"Select {codex_model_family_label(family)} model (enter confirm, q cancel)",
+            preselected_value=preferred_model,
+        )
+        if selected is None:
+            print("Cancelled.")
+            raise SystemExit(130)
+        if selected == BACK_VALUE:
+            raise BackNavigation()
+        selected_model = str(selected).strip()
+        if selected_model not in family_model_options:
+            raise RuntimeError(f"Selected Codex model {selected_model!r} is not part of family {family!r}.")
+        return selected_model
+
     options = [Option(f"{descriptor.label} models", is_header=True)]
     for model in descriptor.model_options:
-        label = model
+        label = codex_model_display_label(model) if backend == "commandcode" else model
         if model == descriptor.default_model:
             label = f"{label} [default]"
         options.append(Option(label, model))
@@ -472,11 +761,13 @@ def _select_model_interactive(
     selected = single_select_items(
         options,
         title=f"Select {descriptor.label} model (enter confirm, q cancel)",
-        preselected_value=preferred_model.strip() or descriptor.default_model,
+        preselected_value=preferred_model or descriptor.default_model,
     )
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     return str(selected).strip()
 
 
@@ -504,4 +795,6 @@ def _select_reasoning_interactive(
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     return str(selected).strip()

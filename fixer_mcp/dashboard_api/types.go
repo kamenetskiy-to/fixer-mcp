@@ -74,16 +74,20 @@ type ActiveWorkerSummary struct {
 }
 
 type ProjectCard struct {
-	Project              ProjectBinding    `json:"project"`
-	Counts               StatusCounts      `json:"counts"`
-	LatestActivityLabel  string            `json:"latest_activity_label"`
-	LastActivityAt       string            `json:"last_activity_at,omitempty"`
-	ActiveWaveCount      int               `json:"active_wave_count"`
-	LatestSessionID      int               `json:"latest_session_id,omitempty"`
-	LatestLocalSessionID int               `json:"latest_local_session_id,omitempty"`
-	Autonomous           *AutonomousStatus `json:"autonomous,omitempty"`
-	HasPendingReview     bool              `json:"has_pending_review"`
-	HasActiveWorkers     bool              `json:"has_active_workers"`
+	Project               ProjectBinding    `json:"project"`
+	Counts                StatusCounts      `json:"counts"`
+	LatestActivityLabel   string            `json:"latest_activity_label"`
+	LastActivityAt        string            `json:"last_activity_at,omitempty"`
+	PrimaryActivitySource string            `json:"primary_activity_source,omitempty"`
+	HasFixerActivity      bool              `json:"has_fixer_activity"`
+	HasHandsActivity      bool              `json:"has_hands_activity"`
+	HasAutonomousActivity bool              `json:"has_autonomous_activity"`
+	ActiveWaveCount       int               `json:"active_wave_count"`
+	LatestSessionID       int               `json:"latest_session_id,omitempty"`
+	LatestLocalSessionID  int               `json:"latest_local_session_id,omitempty"`
+	Autonomous            *AutonomousStatus `json:"autonomous,omitempty"`
+	HasPendingReview      bool              `json:"has_pending_review"`
+	HasActiveWorkers      bool              `json:"has_active_workers"`
 }
 
 type HomeSnapshotResponse struct {

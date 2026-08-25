@@ -1,16 +1,20 @@
 {
   "provider": "kimi-code",
-  "label": "Kimi Code CLI",
-  "description": "Moonshot Kimi Code CLI provider for the Fixer MCP provider-adapter abstraction. Requires explicit --mcp-config-file to surface project-local MCP servers in headless mode.",
+  "label": "Kimi Code",
+  "description": "Moonshot's native Kimi Code binary (~/.kimi-code/bin/kimi).",
   "models": {
     "options": [
       "kimi-k2.7-code",
-      "kimi-k3"
+      "kimi-k2.7-code-highspeed",
+      "kimi-k3",
+      "kimi-k3-256k"
     ],
-    "default": "kimi-k2.7-code",
+    "default": "kimi-k3-256k",
     "internal_id_map": {
       "kimi-k2.7-code": "kimi-code/kimi-for-coding",
-      "kimi-k3": "kimi-code/k3"
+      "kimi-k2.7-code-highspeed": "kimi-code/kimi-for-coding-highspeed",
+      "kimi-k3": "kimi-code/k3",
+      "kimi-k3-256k": "kimi-code/k3-256k"
     },
     "byok": true,
     "auth": "byok"
@@ -23,36 +27,34 @@
     "pass_mechanism": "none"
   },
   "skills": {
-    "inject_dir": ".kimi/skills",
-    "scope_strategy": "none",
-    "scope_flags": []
+    "inject_dir": ".kimi-code/skills",
+    "scope_strategy": "location-flag",
+    "scope_flags": [
+      "--skills-dir"
+    ]
   },
   "mcp": {
-    "config_format": "mcp-config-file",
-    "scope_strategy": "mcp-config-file",
-    "scope_flags": [
-      "--mcp-config-file"
-    ]
+    "config_format": "kimi-code-mcp-json",
+    "scope_strategy": "project-config-file",
+    "scope_flags": []
   },
   "tool_registration": "native",
   "permissions": {
     "interactive_auto_approve_flags": [
       "--yolo"
     ],
-    "headless_auto_approve_flags": [
-      "--print"
-    ],
-    "headless_auto_approve_justification": "Kimi --print implies --afk, which auto-approves tool calls and auto-dismisses AskUserQuestion prompts."
+    "headless_auto_approve_flags": [],
+    "headless_auto_approve_justification": "Empirically verified against the real `kimi` binary (v0.29.0) that `--auto` and `--yolo` both hard-error when combined with `-p`/`--prompt` (\"Cannot combine --prompt with --auto.\" / \"...--yolo.\"). Plain `kimi -p \"...\"` with no approval flag at all already auto-approves ordinary tool calls (a headless -p run wrote a file via a tool call with zero approval flags passed, confirmed again live 2026-07-24 end-to-end including a real model response), so no approval flag is passed or valid for headless dispatch on this backend."
   },
   "operator_questions": {
     "supported": true,
-    "mechanism": "AskUserQuestion",
+    "mechanism": "kimi-code-question",
     "headless_auto_approve_dismisses": true
   },
   "launch": {
-    "interactive_cmd_template": "kimi-cli -m [model] --mcp-config-file [mcp_config_path] --yolo [prompt]",
-    "headless_cmd_template": "kimi-cli --print --yolo -m [model] --mcp-config-file [mcp_config_path] -p \"[prompt]\"",
-    "resume_interactive": "kimi-cli --session [external_session_id] -m [model] --mcp-config-file [mcp_config_path] --yolo [prompt]",
-    "resume_headless": "kimi-cli --print --yolo --session [external_session_id] -m [model] --mcp-config-file [mcp_config_path] -p \"[prompt]\""
+    "interactive_cmd_template": "kimi -m [model] --yolo [prompt]",
+    "headless_cmd_template": "kimi -m [model] --output-format text -p \"[prompt]\"",
+    "resume_interactive": "kimi -S [external_session_id] -m [model] --yolo [prompt]",
+    "resume_headless": "kimi -S [external_session_id] -m [model] --output-format text -p \"[prompt]\""
   }
 }

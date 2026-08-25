@@ -1,0 +1,15 @@
+### Active governed GenUI surface revision. The document stays opaque until the
+### Flutter schema validator accepts its versioned JSON payload.
+class: WorkroomSurface
+immutable: true
+fields:
+  surfaceId: String, jsonKey=id
+  threadId: String, jsonKey=thread_id
+  causedByTurnId: String, jsonKey=caused_by_turn_id
+  surfaceType: String, jsonKey=surface_type
+  surfaceVersion: int, jsonKey=surface_version
+  state: String
+  currentRevision: int, jsonKey=current_revision
+  sourceSeq: int, jsonKey=source_seq
+  documentJson: String, jsonKey=document
+  updatedAt: String, jsonKey=updated_at

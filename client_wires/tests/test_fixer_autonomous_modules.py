@@ -60,7 +60,7 @@ class FixerAutonomousModuleTests(unittest.TestCase):
         )
 
         self.assertNotIn("Autonomous fixer Codex session ID", prompt)
-        self.assertIn("Preselected session ID from fixer autonomous flow: `7`.", prompt)
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `7`.", prompt)
 
     def test_transcript_module_extracts_droid_session_id_from_plain_log_line(self) -> None:
         session_id = fixer_autonomous_transcripts._extract_droid_session_id_from_line(

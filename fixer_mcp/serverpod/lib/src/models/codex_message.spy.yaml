@@ -1,0 +1,12 @@
+### A durable user or assistant message projected from a Codex turn.
+class: CodexMessage
+table: codex_message
+fields:
+  codexThreadId: int, relation(parent=codex_thread, onDelete=Cascade)
+  role: String
+  text: String
+  turnId: String?
+  createdAt: DateTime, default=now
+indexes:
+  codex_message_thread_created_idx:
+    fields: codexThreadId, createdAt

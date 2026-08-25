@@ -14,7 +14,10 @@ import 'package:fixer_dashboard_app/src/mission_control/mission_control_models.d
 import 'package:fixer_dashboard_app/src/mission_control/mission_control_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+
+import 'workroom_test_fakes.dart';
 
 class FakeBacklogRepository implements BacklogRepository {
   @override
@@ -201,6 +204,14 @@ class FakeDashboardRepository implements DashboardRepository {
     streamId: 'stream-new',
     turnStatusEndpoint: '/turn/status/stream-new',
   );
+
+  @override
+  Future<ThreadSendResult> sendThreadMessageWithConfig(
+    String threadId,
+    String prompt, {
+    required String model,
+    required String reasoning,
+  }) => sendThreadMessage(threadId, prompt);
 
   @override
   Future<ThreadTurnStatusSnapshot> loadThreadTurnStatus(
@@ -837,21 +848,24 @@ final _missionControlPayload = <String, dynamic>{
   ],
 };
 
-Widget _testDashboard() => FixerDashboardApp(
-  repository: FakeDashboardRepository(),
-  backlogRepository: FakeBacklogRepository(),
-  netrunnerExplorerRepository: FakeNetrunnerExplorerRepository(),
-  fixerChatService: FakeFixerChatService(),
-  netrunnerThreadRepository: FakeNetrunnerThreadRepository(),
-  skillsRepository: FakeSkillsRepository(),
-  overseerRepository: FakeOverseerRepository(),
-  missionControlRepository: FakeMissionControlRepository(),
-);
+Widget _testDashboard({FakeProjectWorkroomRepository? workroomRepository}) =>
+    FixerDashboardApp(
+      repository: FakeDashboardRepository(),
+      backlogRepository: FakeBacklogRepository(),
+      netrunnerExplorerRepository: FakeNetrunnerExplorerRepository(),
+      fixerChatService: FakeFixerChatService(),
+      netrunnerThreadRepository: FakeNetrunnerThreadRepository(),
+      skillsRepository: FakeSkillsRepository(),
+      overseerRepository: FakeOverseerRepository(),
+      missionControlRepository: FakeMissionControlRepository(),
+      workroomRepository: workroomRepository ?? FakeProjectWorkroomRepository(),
+    );
 
 void main() {
   setUp(() {
     TestWidgetsFlutterBinding.ensureInitialized();
     VisibilityDetectorController.instance.updateInterval = Duration.zero;
+    SharedPreferences.setMockInitialValues(<String, Object>{});
   });
 
   testWidgets('wires provider-neutral home, Overseers, and Skills Manager', (
@@ -877,7 +891,7 @@ void main() {
     expect(find.text('init-fixer'), findsWidgets);
   });
 
-  testWidgets('wires backlog, document tree, waves, and Fixer chat routes', (
+  testWidgets('project workroom exposes exactly two tabs and typed surfaces', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1600, 1200);
@@ -890,38 +904,48 @@ void main() {
     await tester.tap(find.text('Fixer MCP'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Active waves'), findsWidgets);
-    expect(find.text('wave-145'), findsOneWidget);
-
-    await tester.tap(find.widgetWithText(Tab, 'Mission Control'));
-    await tester.pumpAndSettle();
-    expect(find.text('Wave #145'), findsWidgets);
-    expect(find.textContaining('gpt-5.6-sol'), findsOneWidget);
-
-    await tester.tap(find.widgetWithText(Tab, 'Backlog'));
-    await tester.pumpAndSettle();
-    expect(find.text('Integrate the hub'), findsOneWidget);
-
-    await tester.tap(find.widgetWithText(Tab, 'Docs'));
-    await tester.pumpAndSettle();
-    expect(find.text('Codex Hub Desktop Migration Brief'), findsWidgets);
-
-    await tester.tap(find.widgetWithText(Tab, 'Netrunners'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Wave 145'), findsWidgets);
+    expect(find.byType(Tab), findsNWidgets(2));
+    expect(find.widgetWithText(Tab, 'Fixer'), findsOneWidget);
+    expect(find.widgetWithText(Tab, 'Hands'), findsOneWidget);
+    for (final oldLabel in const [
+      'Overview',
+      'Mission Control',
+      'Backlog',
+      'Docs',
+      'Netrunners',
+      'Fixer Chat',
+      'Client Orders Sandbox',
+    ]) {
+      expect(find.widgetWithText(Tab, oldLabel), findsNothing);
+    }
     expect(
-      find.textContaining('Flutter App Shell for the Fixer MCP GUI.'),
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.text('/tmp/self_orchestration'),
+      ),
       findsOneWidget,
     );
+    expect(find.text('Project state is ready.'), findsWidgets);
 
-    await tester.tap(find.widgetWithText(Tab, 'Fixer Chat'));
-    await tester.pumpAndSettle();
-    expect(find.text('Create new Fixer chat'), findsOneWidget);
-    expect(find.text('Droid Fixer thread'), findsOneWidget);
-    expect(find.textContaining('kimi-k2.7-code'), findsOneWidget);
+    Future<void> openSurface(String key, String expected) async {
+      await tester.tap(find.byKey(const ValueKey('genui-surface-catalog')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(ValueKey('surface-request-$key')));
+      await tester.pumpAndSettle();
+      expect(find.text(expected), findsOneWidget);
+    }
+
+    await openSurface('wave.list.v1', 'Wave #145 · gpt-5.6-sol');
+    await openSurface('backlog.list.v1', 'Integrate the hub');
+    await openSurface('docs.tree.v1', 'Codex Hub Desktop Migration Brief');
+    await openSurface(
+      'execution.list.v1',
+      'Flutter App Shell for the Fixer MCP GUI.',
+    );
+    await openSurface('skills.catalog.v1', 'init-fixer');
   });
 
-  testWidgets('opens a wave-grouped Netrunner and mounts its provider thread', (
+  testWidgets('Fixer legal-research request opens the typed project surface', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1600, 1200);
@@ -929,30 +953,99 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
+    final workroomRepository = FakeProjectWorkroomRepository();
+    await tester.pumpWidget(
+      _testDashboard(workroomRepository: workroomRepository),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Fixer MCP'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('fixer-message-composer')),
+      'Покажи ресерч по юрке',
+    );
+    await tester.tap(find.byKey(const ValueKey('send-fixer-message')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Покажи ресерч по юрке'), findsOneWidget);
+    expect(find.text('Юридический ресерч'), findsWidgets);
+    expect(find.text('research/legal/legal_memo.md'), findsOneWidget);
+    expect(find.textContaining('Канонический ресерч проекта'), findsOneWidget);
+  });
+
+  testWidgets('Hands remains one permanent channel with governed mailbox', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final workroomRepository = FakeProjectWorkroomRepository();
+    await tester.pumpWidget(
+      _testDashboard(workroomRepository: workroomRepository),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Fixer MCP'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Hands'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Руки'), findsOneWidget);
+    expect(find.textContaining('hands-project-1'), findsOneWidget);
+    await tester.tap(find.text('Mailbox & history'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('hands-mailbox-list')), findsOneWidget);
+    expect(find.text('All focused checks passed.'), findsOneWidget);
+    expect(find.text('3 files changed'), findsOneWidget);
+    expect(find.byKey(const ValueKey('accept-hands-result')), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('hands-instruction-composer')),
+      'Run a deterministic accessibility audit.',
+    );
+    await tester.tap(find.byKey(const ValueKey('submit-hands-instruction')));
+    await tester.pumpAndSettle();
+    expect(
+      workroomRepository.submittedInstructions,
+      contains('Run a deterministic accessibility audit.'),
+    );
+  });
+
+  testWidgets('narrow workroom keeps two tabs and opens GenUI as a sheet', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final semantics = tester.ensureSemantics();
+
     await tester.pumpWidget(_testDashboard());
     await tester.pumpAndSettle();
     await tester.tap(find.text('Fixer MCP'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(Tab, 'Netrunners'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('netrunner-session-102')));
-    await tester.pumpAndSettle();
 
-    expect(find.text('Netrunner #3'), findsOneWidget);
+    expect(find.byType(Tab), findsNWidgets(2));
     expect(
-      find.byKey(const ValueKey('session-task-description')),
+      find.byKey(const ValueKey('open-genui-surface-sheet')),
       findsOneWidget,
     );
-    expect(find.text('Workspace rail'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('genui-surface-surface-overview')),
+      findsNothing,
+    );
 
-    await tester.tap(find.widgetWithText(Tab, 'Thread'));
+    await tester.tap(find.byKey(const ValueKey('open-genui-surface-sheet')));
     await tester.pumpAndSettle();
-    expect(find.text('Netrunner thread is connected.'), findsOneWidget);
-    expect(find.text('codex'), findsWidgets);
-
-    await tester.tap(find.widgetWithText(Tab, 'Report'));
-    await tester.pumpAndSettle();
-    expect(find.text('Files changed'), findsOneWidget);
-    expect(find.text('Residual risks'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('genui-surface-surface-overview')),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Helpful'), findsOneWidget);
+    expect(find.bySemanticsLabel('Not helpful'), findsOneWidget);
+    semantics.dispose();
   });
 }

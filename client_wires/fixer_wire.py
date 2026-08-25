@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -22,10 +24,12 @@ from client_wires.backends import (
     DEFAULT_BACKEND,
     available_backend_descriptors,
     get_backend_adapter,
+    is_codex_backend,
     normalize_backend_name,
 )
 from client_wires import launch_env
 from client_wires import fixer_wire_db
+from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_launch_support
 from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_netrunner_launch
@@ -62,23 +66,34 @@ OVERSEER_LAUNCH_RESUME = "__overseer_launch_resume__"
 COMPUTER_USE_MCP_NAME = "computer-use"
 NETRUNNER_KIND_MANUAL = fixer_wire_prompts.NETRUNNER_KIND_MANUAL
 NETRUNNER_KIND_ACCEPTANCE = fixer_wire_prompts.NETRUNNER_KIND_ACCEPTANCE
-FIXER_SKILL_MARKER = "Activate skill `$init-fixer` immediately."
+FIXER_SKILL_MARKER = "Activate skill $init-fixer immediately."
 NETRUNNER_MANUAL_SKILL_NAME = fixer_wire_prompts.NETRUNNER_MANUAL_SKILL_NAME
 NETRUNNER_ACCEPTANCE_SKILL_NAME = fixer_wire_prompts.NETRUNNER_ACCEPTANCE_SKILL_NAME
-NETRUNNER_SKILL_MARKER = f"Activate skill `${NETRUNNER_MANUAL_SKILL_NAME}` immediately."
-NETRUNNER_ACCEPTANCE_SKILL_MARKER = f"Activate skill `${NETRUNNER_ACCEPTANCE_SKILL_NAME}` immediately."
-OVERSEER_SKILL_MARKER = "Activate skill `$init-overseer` immediately."
+NETRUNNER_SKILL_MARKER = f"Activate skill ${NETRUNNER_MANUAL_SKILL_NAME} immediately."
+NETRUNNER_ACCEPTANCE_SKILL_MARKER = f"Activate skill ${NETRUNNER_ACCEPTANCE_SKILL_NAME} immediately."
+OVERSEER_SKILL_MARKER = "Activate skill $init-overseer immediately."
 FIXER_SKILL_MARKERS = (
     FIXER_SKILL_MARKER,
+    "Activate skill `$init-fixer` immediately.",
+    "Activate skill $start-fixer immediately.",
     "Activate skill `$start-fixer` immediately.",
 )
 NETRUNNER_SKILL_MARKERS = (
     NETRUNNER_SKILL_MARKER,
+    f"Activate skill `${NETRUNNER_MANUAL_SKILL_NAME}` immediately.",
     NETRUNNER_ACCEPTANCE_SKILL_MARKER,
+    f"Activate skill `${NETRUNNER_ACCEPTANCE_SKILL_NAME}` immediately.",
+    "Activate skill $run-manual-netrunner immediately.",
+    "Activate skill `$run-manual-netrunner` immediately.",
+    "Activate skill $run-manual-acceptance-netrunner immediately.",
+    "Activate skill `$run-manual-acceptance-netrunner` immediately.",
+    "Activate skill $start-netrunner immediately.",
     "Activate skill `$start-netrunner` immediately.",
 )
 OVERSEER_SKILL_MARKERS = (
     OVERSEER_SKILL_MARKER,
+    "Activate skill `$init-overseer` immediately.",
+    "Activate skill $start-overseer immediately.",
     "Activate skill `$start-overseer` immediately.",
 )
 FIXER_DB_PATH_ENV = fixer_wire_mcp.FIXER_DB_PATH_ENV
@@ -97,6 +112,9 @@ FIXER_WIRE_REASONING_EFFORT = "xhigh"
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC = fixer_wire_mcp.FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_MS = fixer_wire_mcp.FORCED_FIXER_MCP_TIMEOUT_FLOOR_MS
 _FIXER_MCP_BUILD_CHECKED = fixer_wire_mcp._FIXER_MCP_BUILD_CHECKED
+FIXER_MCP_SCHEMA_BOOTSTRAP_ARG = "--bootstrap-schema"
+FIXER_MCP_SCHEMA_BOOTSTRAP_NAME = "project-workroom-v1"
+FIXER_MCP_SCHEMA_BOOTSTRAP_TIMEOUT_SECONDS = 120
 
 SessionRow = fixer_wire_db.SessionRow
 SessionLaunchSelection = fixer_wire_db.SessionLaunchSelection
@@ -113,13 +131,18 @@ def _parse_wire_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]
     parser.add_argument("--netrunner-backend")
     parser.add_argument("--netrunner-model")
     parser.add_argument("--netrunner-reasoning")
+    parser.add_argument(
+        "--netrunner-acceptance",
+        action="store_true",
+        help="Run an explicitly preselected compatibility session as a governed acceptance generation.",
+    )
     parser.add_argument("--scaffold-mvp", "--scaffold", dest="scaffold_mvp")
     parser.add_argument("--scaffold-target-dir")
     parser.add_argument(
         "--netrunner-mcp",
         action="append",
         default=[],
-        help="Repeat or pass comma-separated MCP server names for netrunner overrides.",
+        help="Compatibility generation only: repeat or pass comma-separated MCP server names.",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_known_args(list(argv))
@@ -151,6 +174,22 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _ensure_architect_tool_path(env: dict[str, str]) -> None:
+    """Make user-installed helper executables visible to MCP child processes."""
+    home = Path.home()
+    preferred = [
+        home / "bin",
+        home / ".codex" / "fixer_unattached" / "bin",
+    ]
+    current = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    ordered: list[str] = []
+    for path in [*(str(item) for item in preferred if item.is_dir()), *current]:
+        if path not in ordered:
+            ordered.append(path)
+    if ordered:
+        env["PATH"] = os.pathsep.join(ordered)
+
+
 def _build_backend_launch_env(
     adapter: Any,
     llm_selection: Any,
@@ -160,15 +199,19 @@ def _build_backend_launch_env(
     merge_env_with_os: Any | None = None,
 ) -> dict[str, str]:
     normalized_backend = normalize_backend_name(getattr(adapter, "name", ""))
-    if normalized_backend == "codex":
+    if is_codex_backend(normalized_backend):
         if load_llm_env is None or merge_env_with_os is None:
             raise RuntimeError("Codex launches require LLM env helpers.")
         env = merge_env_with_os(load_llm_env())
+        # Match codex-pro: an explicitly exported shell key is authoritative.
+        if os.environ.get("OPENROUTER_API_KEY"):
+            env["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
     else:
         env = dict(os.environ)
     adapter.prepare_env(env, llm_selection)
     if cwd is not None:
         env.setdefault(FIXER_DB_PATH_ENV, str(_resolve_fixer_db_path(cwd)))
+    _ensure_architect_tool_path(env)
     launch_env.clear_proxy_env(env)
     return env
 
@@ -286,11 +329,144 @@ def _toml_literal(value: object) -> str:
 
 
 def _load_forced_fixer_spec() -> dict[str, object]:
-    return fixer_wire_mcp._load_forced_fixer_spec(
+    binary_override = os.environ.get(FIXER_MCP_BINARY_ENV, "").strip()
+    spec = fixer_wire_mcp._load_forced_fixer_spec(
         repo_root=_repo_root,
         maybe_rebuild_fixer_mcp_binary=_maybe_rebuild_fixer_mcp_binary,
         environ=os.environ,
     )
+    if binary_override:
+        # FIXER_MCP_BINARY replaces the configured launch command, so wrapper
+        # arguments belonging to the old command (for example `/usr/bin/env
+        # -u ...`) must not be forwarded to the replacement executable.
+        spec["args"] = []
+    return spec
+
+
+def _maybe_rebuild_wrapped_fixer_mcp_binary(spec: dict[str, object]) -> None:
+    """Apply the repo-local stale-source check through command wrappers.
+
+    The private launcher intentionally invokes Fixer MCP through `/usr/bin/env`
+    so role-specific variables can be removed.  The generic MCP resolver sees
+    only that wrapper; inspect its command tokens narrowly for the canonical
+    repo binary rather than trying to interpret arbitrary shell commands.
+    """
+
+    repo_binary = (_repo_root() / "fixer_mcp" / "fixer_mcp").resolve()
+    raw_cwd = spec.get("cwd")
+    command_cwd = (
+        Path(raw_cwd).expanduser().resolve()
+        if isinstance(raw_cwd, str) and raw_cwd.strip()
+        else (_repo_root() / "fixer_mcp").resolve()
+    )
+    raw_args = spec.get("args")
+    tokens: list[object] = [spec.get("command")]
+    if isinstance(raw_args, (list, tuple)):
+        tokens.extend(raw_args)
+
+    for raw_token in tokens:
+        if not isinstance(raw_token, str) or not raw_token.strip():
+            continue
+        token = raw_token.strip()
+        if token.startswith("-") or "=" in token:
+            continue
+        candidate = Path(token).expanduser()
+        if not candidate.is_absolute():
+            candidate = command_cwd / candidate
+        if candidate.resolve() == repo_binary:
+            _maybe_rebuild_fixer_mcp_binary(repo_binary)
+            return
+
+
+def _bootstrap_fixer_mcp_database(db_path: Path) -> None:
+    """Run the configured Go binary's deterministic schema preflight."""
+
+    resolved_db_path = db_path.expanduser().resolve()
+    resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    spec = _load_forced_fixer_spec()
+    _maybe_rebuild_wrapped_fixer_mcp_binary(spec)
+
+    raw_command = spec.get("command")
+    if not isinstance(raw_command, str) or not raw_command.strip():
+        raise RuntimeError("Configured fixer_mcp command is missing; cannot bootstrap its database schema.")
+    raw_args = spec.get("args", [])
+    if not isinstance(raw_args, (list, tuple)) or not all(isinstance(arg, str) for arg in raw_args):
+        raise RuntimeError("Configured fixer_mcp args must be a list of strings for schema bootstrap.")
+
+    command = [raw_command.strip(), *raw_args, FIXER_MCP_SCHEMA_BOOTSTRAP_ARG]
+    launch_env = dict(os.environ)
+    raw_env = spec.get("env")
+    if isinstance(raw_env, dict):
+        for name, value in raw_env.items():
+            if isinstance(name, str) and value is not None:
+                launch_env[name] = str(value)
+    # The launcher's resolved path is authoritative even if mcp_config.json
+    # contains an old or relative FIXER_DB_PATH value.
+    launch_env[FIXER_DB_PATH_ENV] = str(resolved_db_path)
+
+    raw_cwd = spec.get("cwd")
+    command_cwd = (
+        Path(raw_cwd).expanduser().resolve()
+        if isinstance(raw_cwd, str) and raw_cwd.strip()
+        else (_repo_root() / "fixer_mcp").resolve()
+    )
+    raw_timeout = spec.get("startup_timeout_sec")
+    timeout_seconds = (
+        max(FIXER_MCP_SCHEMA_BOOTSTRAP_TIMEOUT_SECONDS, raw_timeout)
+        if isinstance(raw_timeout, int)
+        else FIXER_MCP_SCHEMA_BOOTSTRAP_TIMEOUT_SECONDS
+    )
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(command_cwd),
+            env=launch_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as err:
+        raise RuntimeError(
+            "Could not run the configured fixer_mcp schema bootstrap. "
+            "Rebuild and verify it with `make install-verify`."
+        ) from err
+
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    payload: object = None
+    if output_lines:
+        try:
+            payload = json.loads(output_lines[-1])
+        except json.JSONDecodeError:
+            payload = None
+    project_count = payload.get("project_count") if isinstance(payload, dict) else None
+    project_hands_count = payload.get("project_hands_count") if isinstance(payload, dict) else None
+    valid_counts = (
+        all(
+            isinstance(count, int) and not isinstance(count, bool)
+            for count in (project_count, project_hands_count)
+        )
+        and project_count > 0
+        and project_hands_count == project_count
+    )
+    valid_payload = (
+        isinstance(payload, dict)
+        and payload.get("status") == "ready"
+        and payload.get("schema") == FIXER_MCP_SCHEMA_BOOTSTRAP_NAME
+        and valid_counts
+    )
+    if completed.returncode != 0 or not valid_payload:
+        detail = (completed.stderr.strip() or completed.stdout.strip())[-1200:]
+        detail_suffix = f" Bootstrap output: {detail}" if detail else ""
+        raise RuntimeError(
+            "Configured fixer_mcp is stale or incompatible with the Project Hands schema preflight; "
+            "refusing to inspect the database with a newer wire. Rebuild and migrate it with "
+            f"`make install-verify FIXER_DB_PATH={resolved_db_path}`.{detail_suffix}"
+        )
 
 
 def _with_forced_fixer_timeout_floor(spec: dict[str, object]) -> dict[str, object]:
@@ -493,6 +669,22 @@ def _select_manual_netrunner_kind_interactive(Option: Any, single_select_items: 
     return fixer_wire_selectors._select_manual_netrunner_kind_interactive(Option, single_select_items)
 
 
+def _select_project_hands_lane_interactive(
+    lanes: Sequence[Any],
+    default_lane: str,
+    Option: Any,
+    single_select_items: Any,
+) -> Any:
+    return fixer_wire_selectors._select_project_hands_lane_interactive(
+        lanes,
+        default_lane,
+        Option,
+        single_select_items,
+        select_backend_interactive=_select_backend_interactive,
+        select_model_interactive=_select_model_interactive,
+    )
+
+
 def _select_session_interactive(
     session_rows: Sequence[SessionRow],
     Option: Any,
@@ -560,6 +752,34 @@ def _load_session_external_id(conn: sqlite3.Connection, session_id: int, backend
 
 def _save_session_external_id(conn: sqlite3.Connection, session_id: int, backend: str, external_session_id: str) -> None:
     fixer_wire_db._save_session_external_id(conn, session_id, backend, external_session_id)
+    resolved_external_id = external_session_id.strip()
+    if not resolved_external_id:
+        return
+    try:
+        conn.execute(
+            """
+            UPDATE hands_generation
+            SET external_session_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE compat_session_id = ?
+              AND provider = ?
+              AND generation = (
+                  SELECT MAX(current.generation)
+                  FROM hands_generation current
+                  WHERE current.compat_session_id = ?
+              )
+            """,
+            (
+                resolved_external_id,
+                session_id,
+                normalize_backend_name(backend),
+                session_id,
+            ),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        # Legacy/test databases without the permanent Hands projection retain
+        # the ordinary session_external_link behavior.
+        return
 
 
 def _save_session_codex_id(conn: sqlite3.Connection, session_id: int, codex_session_id: str) -> None:
@@ -834,6 +1054,8 @@ def _select_model_interactive(
     preferred_model: str,
     Option: Any,
     single_select_items: Any,
+    *,
+    require_codex_model_family: bool = False,
 ) -> str:
     return fixer_wire_selectors._select_model_interactive(
         backend,
@@ -841,6 +1063,7 @@ def _select_model_interactive(
         Option,
         single_select_items,
         backend_descriptor=_backend_descriptor,
+        require_codex_model_family=require_codex_model_family,
     )
 
 
@@ -886,6 +1109,21 @@ def _build_droid_netrunner_prompt(
         session_id,
         mcp_names,
         netrunner_kind=netrunner_kind,
+    )
+
+
+def _build_project_hands_prompt(
+    *,
+    provider_lane: str,
+    worktree_path: str = "",
+    branch_name: str = "",
+    attached_doc_files: Sequence[str] = (),
+) -> str:
+    return fixer_wire_prompts._build_project_hands_prompt(
+        provider_lane=provider_lane,
+        worktree_path=worktree_path,
+        branch_name=branch_name,
+        attached_doc_files=attached_doc_files,
     )
 
 
@@ -1071,6 +1309,7 @@ def _role_launch_callbacks() -> fixer_wire_role_launch.RoleLaunchCallbacks:
         load_overseer_resume_summaries=_load_overseer_resume_summaries,
         select_overseer_resume_session_interactive=_select_overseer_resume_session_interactive,
         build_overseer_prompt=_build_overseer_prompt,
+        launch_unattached_fixer=_launch_unattached_fixer,
         forced_mcp_server=FORCED_MCP_SERVER,
         figma_console_mcp_name=FIGMA_CONSOLE_MCP_NAME,
         fixer_launch_new=FIXER_LAUNCH_NEW,
@@ -1222,6 +1461,7 @@ def _launch_netrunner(
     Option: Any,
     single_select_items: Any,
     multi_select_items: Any,
+    netrunner_kind: str | None = None,
 ) -> int:
     return fixer_wire_netrunner_launch.launch_netrunner(
         passthrough_args,
@@ -1235,7 +1475,341 @@ def _launch_netrunner(
         single_select_items=single_select_items,
         multi_select_items=multi_select_items,
         callbacks=_netrunner_launch_callbacks(),
+        netrunner_kind=netrunner_kind,
     )
+
+
+def _load_project_hands_state(cwd: Path) -> fixer_wire_netrunner_launch.ProjectHandsState:
+    _bootstrap_fixer_mcp_database(_resolve_fixer_db_path(cwd))
+    callbacks = _netrunner_launch_callbacks()
+    return fixer_wire_netrunner_launch.load_project_hands_state(
+        cwd,
+        callbacks=callbacks,
+    )
+
+
+def _capture_hands_external_session_id(
+    worktree_path: Path,
+    *,
+    backend: str,
+    before_session_id: str | None,
+    launch_result: int,
+    callbacks: Any,
+) -> str:
+    if is_codex_backend(backend):
+        try:
+            after = callbacks.latest_codex_session_id_for_cwd(worktree_path)
+        except RuntimeError:
+            return ""
+        if after and after != before_session_id:
+            return after
+        return ""
+    if launch_result != 0:
+        return ""
+    try:
+        raw = input(
+            f"[fixer-wire] Paste the {backend} session id to enable exact Руки resume later "
+            "(empty to skip): "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    return raw
+
+
+def _launch_project_hands(
+    passthrough_args: Sequence[str],
+    *,
+    preset_backend: str | None,
+    preset_model: str | None,
+    preset_reasoning: str | None,
+    preset_mcp_names: Sequence[str],
+    acceptance: bool,
+    dry_run: bool,
+    Option: Any,
+    single_select_items: Any,
+    multi_select_items: Any,
+) -> int:
+    if acceptance:
+        raise RuntimeError(
+            "`--netrunner-acceptance` requires an explicit compatibility session ID. "
+            "Project Hands repository writes otherwise stay in `awaiting_review` for Fixer review."
+        )
+    if preset_model or preset_reasoning:
+        raise RuntimeError(
+            "Project Hands model/reasoning use the shared provider defaults; "
+            "they cannot be overridden for one disposable client process."
+        )
+    if _normalize_names(preset_mcp_names):
+        raise RuntimeError(
+            "Project Hands MCP assignment is control-plane managed; per-session MCP selection is retired."
+        )
+
+    cwd = Path.cwd().resolve()
+    state = _load_project_hands_state(cwd)
+    callbacks = _netrunner_launch_callbacks()
+    db_path = _resolve_fixer_db_path(cwd)
+    with closing(sqlite3.connect(db_path)) as conn:
+        _ensure_wire_schema(conn)
+        project_id = _ensure_project_registered(conn, cwd)
+        saved_contexts = fixer_wire_db._list_hands_launch_contexts(conn, project_id)
+        doc_tree = fixer_wire_hands_context.load_project_doc_tree(conn, project_id)
+
+    launch_mode = fixer_wire_selectors._select_hands_launch_action_interactive(
+        Option, single_select_items, has_resume=bool(saved_contexts)
+    )
+    if launch_mode == fixer_wire_selectors.HANDS_LAUNCH_RESUME and saved_contexts:
+        return _resume_project_hands_context(
+            passthrough_args,
+            state=state,
+            saved_contexts=saved_contexts,
+            doc_tree=doc_tree,
+            db_path=db_path,
+            project_id=project_id,
+            callbacks=callbacks,
+            dry_run=dry_run,
+            Option=Option,
+            single_select_items=single_select_items,
+        )
+
+    workspace_mode = fixer_wire_selectors._select_hands_workspace_mode_interactive(
+        Option, single_select_items
+    )
+    hotfix_mode = workspace_mode == fixer_wire_selectors.HANDS_WORKSPACE_HOTFIX
+
+    lane = fixer_wire_netrunner_launch.resolve_project_hands_lane(
+        state,
+        preset_backend=preset_backend,
+        Option=Option,
+        single_select_items=single_select_items,
+        select_lane_interactive=_select_project_hands_lane_interactive,
+    )
+    if not lane.model.strip() or not lane.reasoning.strip():
+        raise RuntimeError(
+            f"Project Hands lane {lane.provider!r} is marked ready without an explicit model/reasoning selection."
+        )
+
+    # Step 1: Architect-picked MCP servers for this Hands client (fixer_mcp is
+    # always forced on top; the picker covers the project-allowed pool).
+    available_servers, _config_env_vars, _adapter, _ensure_sqlite = callbacks.load_available_servers(
+        cwd,
+        backend=lane.backend,
+    )
+    with closing(sqlite3.connect(db_path)) as conn:
+        _ensure_wire_schema(conn)
+        callbacks.sync_registry_names(conn, list(available_servers.keys()))
+        registry_meta = callbacks.load_registry_mcp_metadata(conn)
+        allowed_names = callbacks.load_project_allowed_mcp_names(conn, project_id)
+    pool_names = callbacks.allowed_runtime_mcp_names(allowed_names, available_servers)
+    pool_names = [name for name in pool_names if name != callbacks.computer_use_mcp_name]
+    previous_mcp = (
+        [name for name in saved_contexts[0].mcp_names if name in pool_names]
+        if saved_contexts
+        else []
+    )
+    picked_mcp_names = _select_mcp_interactive(
+        pool_names,
+        previous_mcp,
+        registry_meta,
+        available_servers,
+        Option,
+        multi_select_items,
+    )
+    selected_mcp_names = list(picked_mcp_names)
+    if FORCED_MCP_SERVER in available_servers:
+        selected_mcp_names = _normalize_names([*selected_mcp_names, FORCED_MCP_SERVER])
+    else:
+        print(
+            f"[warning] {FORCED_MCP_SERVER} not found in launcher MCP set; continuing without forced attach",
+            file=sys.stderr,
+        )
+
+    # Step 2: Architect-picked project documentation (tree multi-select).
+    previous_doc_ids = saved_contexts[0].doc_ids if saved_contexts else ()
+    selected_doc_ids = fixer_wire_selectors._select_hands_docs_interactive(
+        doc_tree,
+        previous_doc_ids,
+        Option,
+        multi_select_items,
+    )
+    selected_docs = [entry for entry in doc_tree if entry.doc_id in set(selected_doc_ids)]
+
+    # Step 3: isolated Safe worktree or explicit live-worktree Hotfix mode.
+    if dry_run:
+        worktree_path = cwd
+        branch_name = ""
+        attached_doc_files: list[str] = []
+    elif hotfix_mode:
+        worktree_path = cwd
+        branch_name = ""
+        attached_doc_files = fixer_wire_hands_context.materialize_hands_docs(worktree_path, selected_docs)
+        print(f"[fixer-wire] Руки hotfix worktree: {worktree_path} (live)")
+        if attached_doc_files:
+            print(f"[fixer-wire] Руки attached docs: {len(attached_doc_files)} file(s) under .hands/project_docs/")
+    else:
+        worktree_path, branch_name = fixer_wire_hands_context.create_hands_worktree(cwd)
+        attached_doc_files = fixer_wire_hands_context.materialize_hands_docs(worktree_path, selected_docs)
+        with closing(sqlite3.connect(db_path)) as conn:
+            _ensure_wire_schema(conn)
+            fixer_wire_db._save_hands_launch_context(
+                conn,
+                project_id,
+                worktree_path=str(worktree_path),
+                branch_name=branch_name,
+                provider=lane.provider,
+                model=lane.model,
+                reasoning=lane.reasoning,
+                mcp_names=picked_mcp_names,
+                doc_ids=selected_doc_ids,
+            )
+        print(f"[fixer-wire] Руки worktree: {worktree_path} (branch {branch_name})")
+        if attached_doc_files:
+            print(f"[fixer-wire] Руки attached docs: {len(attached_doc_files)} file(s) under .hands/project_docs/")
+
+    prompt = _build_project_hands_prompt(
+        provider_lane=lane.provider,
+        worktree_path="" if dry_run or hotfix_mode else str(worktree_path),
+        branch_name=branch_name,
+        attached_doc_files=attached_doc_files,
+    )
+    if hotfix_mode:
+        prompt += "\n\n" + textwrap.dedent(
+            f"""
+            HOTFIX MODE: You are running in the canonical live project worktree: `{worktree_path}`.
+            You are explicitly authorized to edit product code directly in this current worktree.
+            Do not create, switch to, or use another worktree. Preserve unrelated existing changes.
+            """
+        ).strip()
+    before_session_id: str | None = None
+    if not dry_run and is_codex_backend(lane.backend):
+        try:
+            before_session_id = callbacks.latest_codex_session_id_for_cwd(worktree_path)
+        except RuntimeError:
+            before_session_id = None
+    result = fixer_wire_role_launch.launch_fresh_role_session(
+        "netrunner",
+        prompt,
+        passthrough_args,
+        launch_cwd=worktree_path,
+        selected_mcp_names=selected_mcp_names,
+        dry_run=dry_run,
+        preset_backend=lane.backend,
+        preset_model=lane.model,
+        preset_reasoning=lane.reasoning,
+        # Project Hands are the Architect's permanent fast execution lane.
+        # Every supported provider must start in its native YOLO/full-access
+        # mode; repository writes still remain behind Fixer review.
+        dangerous_sandbox=True,
+        Option=Option,
+        single_select_items=single_select_items,
+        callbacks=_role_launch_callbacks(),
+        launch_label=(
+            "hotfix Project Hands mailbox client"
+            if hotfix_mode
+            else "disposable Project Hands mailbox client"
+        ),
+    )
+    if not dry_run and not hotfix_mode:
+        external_session_id = _capture_hands_external_session_id(
+            worktree_path,
+            backend=lane.backend,
+            before_session_id=before_session_id,
+            launch_result=result,
+            callbacks=callbacks,
+        )
+        if external_session_id:
+            with closing(sqlite3.connect(db_path)) as conn:
+                _ensure_wire_schema(conn)
+                fixer_wire_db._save_hands_launch_external_id(
+                    conn,
+                    project_id,
+                    str(worktree_path),
+                    external_session_id,
+                )
+    return result
+
+
+def _resume_project_hands_context(
+    passthrough_args: Sequence[str],
+    *,
+    state: fixer_wire_netrunner_launch.ProjectHandsState,
+    saved_contexts: Sequence[fixer_wire_db.HandsLaunchContext],
+    doc_tree: Sequence[fixer_wire_hands_context.HandsDocEntry],
+    db_path: Path,
+    project_id: int,
+    callbacks: Any,
+    dry_run: bool,
+    Option: Any,
+    single_select_items: Any,
+) -> int:
+    context = fixer_wire_selectors._select_hands_resume_context_interactive(
+        saved_contexts, Option, single_select_items
+    )
+    worktree_path = Path(context.worktree_path)
+    if not dry_run and not worktree_path.is_dir():
+        raise RuntimeError(
+            f"Saved Руки worktree is missing: {worktree_path}. Start a new Руки client instead."
+        )
+    lane = next((item for item in state.lanes if item.provider == context.provider), None)
+    if lane is None:
+        raise RuntimeError(
+            f"The saved Руки context provider {context.provider!r} is no longer registered; start a new client instead."
+        )
+
+    # Refresh the attached docs snapshot inside the existing worktree so a
+    # resumed client sees current doc content for the same selection.
+    selected_docs = [entry for entry in doc_tree if entry.doc_id in set(context.doc_ids)]
+    attached_doc_files: list[str] = []
+    if not dry_run and selected_docs:
+        attached_doc_files = fixer_wire_hands_context.materialize_hands_docs(worktree_path, list(selected_docs))
+
+    selected_mcp_names = _normalize_names([*context.mcp_names, FORCED_MCP_SERVER])
+    resume_external_session_id = context.external_session_id.strip() or None
+    prompt = ""
+    if resume_external_session_id is None:
+        prompt = _build_project_hands_prompt(
+            provider_lane=lane.provider,
+            worktree_path=str(worktree_path),
+            branch_name=context.branch_name,
+            attached_doc_files=attached_doc_files,
+        )
+    else:
+        prompt = _build_project_hands_prompt(provider_lane=lane.provider)
+    print(f"[fixer-wire] Руки worktree: {worktree_path} (branch {context.branch_name})")
+    result = fixer_wire_role_launch.launch_fresh_role_session(
+        "netrunner",
+        prompt,
+        passthrough_args,
+        launch_cwd=worktree_path,
+        selected_mcp_names=selected_mcp_names,
+        resume_external_session_id=resume_external_session_id,
+        dry_run=dry_run,
+        preset_backend=lane.backend,
+        preset_model=context.model or lane.model,
+        preset_reasoning=context.reasoning or lane.reasoning,
+        dangerous_sandbox=True,
+        Option=Option,
+        single_select_items=single_select_items,
+        callbacks=_role_launch_callbacks(),
+        launch_label="resumed Project Hands mailbox client",
+    )
+    if not dry_run and resume_external_session_id is None:
+        external_session_id = _capture_hands_external_session_id(
+            worktree_path,
+            backend=lane.backend,
+            before_session_id=None,
+            launch_result=result,
+            callbacks=callbacks,
+        )
+        if external_session_id:
+            with closing(sqlite3.connect(db_path)) as conn:
+                _ensure_wire_schema(conn)
+                fixer_wire_db._save_hands_launch_external_id(
+                    conn,
+                    project_id,
+                    str(worktree_path),
+                    external_session_id,
+                )
+    return result
 
 
 def _launch_overseer(
@@ -1307,6 +1881,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if role == "netrunner":
         try:
+            if wire_args.netrunner_session_id is None:
+                return _launch_project_hands(
+                    passthrough_args,
+                    preset_backend=wire_args.netrunner_backend,
+                    preset_model=wire_args.netrunner_model,
+                    preset_reasoning=wire_args.netrunner_reasoning,
+                    preset_mcp_names=wire_args.netrunner_mcp,
+                    acceptance=wire_args.netrunner_acceptance,
+                    dry_run=wire_args.dry_run,
+                    Option=Option,
+                    single_select_items=single_select_items,
+                    multi_select_items=multi_select_items,
+                )
             return _launch_netrunner(
                 passthrough_args,
                 preset_session_id=wire_args.netrunner_session_id,
@@ -1318,6 +1905,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Option=Option,
                 single_select_items=single_select_items,
                 multi_select_items=multi_select_items,
+                netrunner_kind=(
+                    NETRUNNER_KIND_ACCEPTANCE
+                    if wire_args.netrunner_acceptance
+                    else NETRUNNER_KIND_MANUAL
+                ),
             )
         except RuntimeError as exc:
             print(f"[fixer-wire] {exc}", file=sys.stderr)

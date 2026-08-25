@@ -56,20 +56,26 @@ class FixerWireResumeTests(unittest.TestCase):
                 '\n'.join(
                     [
                         '{"type":"session_meta"}',
-                        '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Activate skill `$init-fixer` immediately."}]}}',
+                        '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Activate skill $init-fixer immediately."}]}}',
                     ]
                 ),
                 encoding="utf-8",
             )
             netrunner_log = Path(tmp) / "netrunner.jsonl"
             netrunner_log.write_text(
-                "Activate skill `$run-manual-netrunner` immediately.\nPreselected session ID from fixer wire: `34`.\n",
+                "Activate skill $hands-netrunner immediately.\nPreselected session ID from fixer wire: `34`.\n",
                 encoding="utf-8",
             )
             acceptance_log = Path(tmp) / "acceptance.jsonl"
             acceptance_log.write_text(
-                "Activate skill `$run-manual-acceptance-netrunner` immediately.\n"
+                "Activate skill $hands-netrunner immediately.\n"
                 "Preselected session ID from fixer wire: `34`.\n",
+                encoding="utf-8",
+            )
+            generation_log = Path(tmp) / "generation.jsonl"
+            generation_log.write_text(
+                "Activate skill $hands-netrunner immediately.\n"
+                "Preselected compatibility session ID from fixer wire: `34`.\n",
                 encoding="utf-8",
             )
 
@@ -93,12 +99,19 @@ class FixerWireResumeTests(unittest.TestCase):
                     netrunner_skill_markers=fixer_wire.NETRUNNER_SKILL_MARKERS,
                 )
             )
+            self.assertTrue(
+                fixer_wire_resume.session_log_has_netrunner_marker(
+                    generation_log,
+                    34,
+                    netrunner_skill_markers=fixer_wire.NETRUNNER_SKILL_MARKERS,
+                )
+            )
 
     def test_facade_marker_helpers_stay_callable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "canonical.jsonl"
             log_path.write_text(
-                "Activate skill `$run-manual-netrunner` immediately.\nPreselected session ID from fixer wire: `34`.\n",
+                "Activate skill $hands-netrunner immediately.\nPreselected session ID from fixer wire: `34`.\n",
                 encoding="utf-8",
             )
 
@@ -108,13 +121,13 @@ class FixerWireResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixer_log = Path(tmp) / "fixer.jsonl"
             fixer_log.write_text(
-                'Activate skill `$init-fixer` immediately.\n',
+                'Activate skill $init-fixer immediately.\n',
                 encoding="utf-8",
             )
             netrunner_log = Path(tmp) / "netrunner.jsonl"
             netrunner_log.write_text(
                 (
-                    'Activate skill `$run-manual-netrunner` immediately.\n'
+                    'Activate skill $hands-netrunner immediately.\n'
                     'Preselected session ID from fixer wire: `34`.\n'
                 ),
                 encoding="utf-8",
@@ -140,7 +153,7 @@ class FixerWireResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixer_log = Path(tmp) / "legacy-fixer.jsonl"
             fixer_log.write_text(
-                'Activate skill `$start-fixer` immediately.\n',
+                'Activate skill $start-fixer immediately.\n',
                 encoding="utf-8",
             )
             summary = _make_history_summary("legacy-fixer-123", preview="Legacy Fixer thread")
@@ -181,7 +194,7 @@ class FixerWireResumeTests(unittest.TestCase):
 
             overseer_log = Path(tmp) / "overseer.jsonl"
             overseer_log.write_text(
-                'Activate skill `$init-overseer` immediately.\n',
+                'Activate skill $init-overseer immediately.\n',
                 encoding="utf-8",
             )
             summary = _make_history_summary("overseer-aliased", preview="Overseer thread")
@@ -209,7 +222,7 @@ class FixerWireResumeTests(unittest.TestCase):
             slug = slug.replace("_", "-")
 
             codex_log = Path(tmp) / "codex.jsonl"
-            codex_log.write_text('Activate skill `$init-fixer` immediately.\n', encoding="utf-8")
+            codex_log.write_text('Activate skill $init-fixer immediately.\n', encoding="utf-8")
             codex_summary = _make_history_summary(
                 "codex-fixer",
                 preview="Codex Fixer",
@@ -224,7 +237,7 @@ class FixerWireResumeTests(unittest.TestCase):
                 "\n".join(
                     [
                         '{"type":"mode","sessionId":"claude-fixer"}',
-                        '{"type":"user","message":{"role":"user","content":"Activate skill `$init-fixer` immediately."},"timestamp":"2026-02-01T13:00:00Z","cwd":"'
+                        '{"type":"user","message":{"role":"user","content":"Activate skill $init-fixer immediately."},"timestamp":"2026-02-01T13:00:00Z","cwd":"'
                         + str(cwd.resolve())
                         + '","sessionId":"claude-fixer"}',
                     ]
@@ -241,7 +254,7 @@ class FixerWireResumeTests(unittest.TestCase):
                         '{"type":"session_start","id":"droid-fixer","title":"Droid Fixer","cwd":"'
                         + str(cwd.resolve())
                         + '"}',
-                        '{"type":"message","timestamp":"2026-02-01T14:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Activate skill `$init-fixer` immediately."}]}}',
+                        '{"type":"message","timestamp":"2026-02-01T14:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Activate skill $init-fixer immediately."}]}}',
                     ]
                 ),
                 encoding="utf-8",
@@ -258,7 +271,7 @@ class FixerWireResumeTests(unittest.TestCase):
             junie_dir = junie_root / "junie-fixer"
             junie_dir.mkdir()
             (junie_dir / "state.json").write_text(
-                '{"issue":{"description":"Activate skill `$init-fixer` immediately."}}\n',
+                '{"issue":{"description":"Activate skill $init-fixer immediately."}}\n',
                 encoding="utf-8",
             )
 
@@ -271,6 +284,10 @@ class FixerWireResumeTests(unittest.TestCase):
             )
             (agy_root / "conversations" / "agy-fixer.db").write_text(
                 "Use the `init-fixer` skill immediately.\nAntigravity Fixer thread\n",
+                encoding="utf-8",
+            )
+            (agy_root / "conversations" / "agy-unknown.db").write_text(
+                "Antigravity conversation without a Fixer role marker\n",
                 encoding="utf-8",
             )
 
@@ -289,6 +306,7 @@ class FixerWireResumeTests(unittest.TestCase):
         self.assertIn(("droid", "droid-fixer"), by_provider)
         self.assertIn(("junie", "junie-fixer"), by_provider)
         self.assertIn(("antigravity", "agy-fixer"), by_provider)
+        self.assertNotIn(("antigravity", "agy-unknown"), by_provider)
 
     def test_load_overseer_resume_summaries_discovers_every_supported_provider_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -305,7 +323,7 @@ class FixerWireResumeTests(unittest.TestCase):
                         + str(cwd.resolve())
                         + '"}}',
                         '{"timestamp":"2026-02-01T10:01:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high"}}',
-                        'Activate skill `$init-overseer` immediately.',
+                        'Activate skill $init-overseer immediately.',
                     ]
                 ),
                 encoding="utf-8",
@@ -321,7 +339,7 @@ class FixerWireResumeTests(unittest.TestCase):
             (claude_dir / "claude-overseer.jsonl").write_text(
                 '{"type":"user","sessionId":"claude-overseer","model":"opus",'
                 '"timestamp":"2026-02-01T11:00:00Z","message":{"role":"user",'
-                '"content":"Activate skill `$init-overseer` immediately."}}\n',
+                '"content":"Activate skill $init-overseer immediately."}}\n',
                 encoding="utf-8",
             )
 
@@ -331,7 +349,7 @@ class FixerWireResumeTests(unittest.TestCase):
                 '{"id":"droid-overseer","cwd":"'
                 + str(cwd.resolve())
                 + '","model":"glm-5.1","sessionTitle":"Droid Overseer"}\n'
-                + '{"message":{"role":"user","content":"Activate skill `$init-overseer` immediately."}}\n',
+                + '{"message":{"role":"user","content":"Activate skill $init-overseer immediately."}}\n',
                 encoding="utf-8",
             )
 
@@ -345,7 +363,7 @@ class FixerWireResumeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (junie_root / "junie-overseer" / "state.json").write_text(
-                '{"prompt":"Activate skill `$init-overseer` immediately."}',
+                '{"prompt":"Activate skill $init-overseer immediately."}',
                 encoding="utf-8",
             )
 
@@ -371,7 +389,7 @@ class FixerWireResumeTests(unittest.TestCase):
             kimi_session.mkdir(parents=True)
             (kimi_session / "context.jsonl").write_text(
                 '{"type":"user","model":"kimi-k2.7-code","message":{"role":"user",'
-                '"content":"Activate skill `$init-overseer` immediately."}}\n',
+                '"content":"Activate skill $init-overseer immediately."}}\n',
                 encoding="utf-8",
             )
             (kimi_session / "state.json").write_text(
@@ -400,7 +418,7 @@ class FixerWireResumeTests(unittest.TestCase):
             self.assertTrue(summary.reasoning)
             self.assertNotEqual(summary.origin, "provider_history")
 
-    def test_load_fixer_resume_summaries_discovers_both_kimi_stores_and_excludes_other_roles(self) -> None:
+    def test_load_fixer_resume_summaries_discovers_kimi_store_and_excludes_other_roles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             cwd = Path(tmp) / "workspace" / "kimi-project"
@@ -412,29 +430,14 @@ class FixerWireResumeTests(unittest.TestCase):
             legacy_fixer.mkdir(parents=True)
             (legacy_fixer / "context.jsonl").write_text(
                 '{"type":"user","model":"kimi-k2.7-code",'
-                '"message":{"role":"user","content":"Activate skill `$init-fixer` immediately."}}\n',
+                '"message":{"role":"user","content":"Activate skill $init-fixer immediately."}}\n',
                 encoding="utf-8",
             )
             (legacy_fixer / "state.json").write_text('{"title":"Kimi CLI Fixer"}', encoding="utf-8")
             legacy_other = legacy_root / "kimi-cli-netrunner"
             legacy_other.mkdir()
             (legacy_other / "context.jsonl").write_text(
-                "Activate skill `$run-manual-netrunner` immediately.\n",
-                encoding="utf-8",
-            )
-
-            native_root = home / ".kimi-code" / "sessions" / fixer_wire_resume._kimi_native_workdir_name(cwd)
-            native_fixer = native_root / "kimi-native-fixer"
-            native_fixer.mkdir(parents=True)
-            (native_fixer / "context.jsonl").write_text(
-                "Activate skill `$init-fixer` immediately.\n",
-                encoding="utf-8",
-            )
-            (native_fixer / "state.json").write_text('{"title":"Native Kimi Fixer"}', encoding="utf-8")
-            native_other = native_root / "kimi-native-overseer"
-            native_other.mkdir()
-            (native_other / "context.jsonl").write_text(
-                "Activate skill `$init-overseer` immediately.\n",
+                "Activate skill $hands-netrunner immediately.\n",
                 encoding="utf-8",
             )
 
@@ -446,9 +449,7 @@ class FixerWireResumeTests(unittest.TestCase):
 
         discovered = {(fixer_wire_resume.summary_provider(summary), summary.session_id) for summary in summaries}
         self.assertIn(("kimi-code", "kimi-cli-fixer"), discovered)
-        self.assertIn(("kimi-code-native", "kimi-native-fixer"), discovered)
         self.assertNotIn(("kimi-code", "kimi-cli-netrunner"), discovered)
-        self.assertNotIn(("kimi-code-native", "kimi-native-overseer"), discovered)
 
     def test_preview_from_records_reads_claude_message_content_not_role(self) -> None:
         preview = fixer_wire_resume._preview_from_records(
@@ -460,7 +461,7 @@ class FixerWireResumeTests(unittest.TestCase):
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Activate skill `$init-fixer` immediately.",
+                                "text": "Activate skill $init-fixer immediately.",
                             }
                         ],
                     },
@@ -469,7 +470,7 @@ class FixerWireResumeTests(unittest.TestCase):
             fallback="fallback",
         )
 
-        self.assertEqual(preview, "Activate skill `$init-fixer` immediately.")
+        self.assertEqual(preview, "Activate skill $init-fixer immediately.")
 
     def test_preview_from_records_skips_non_informative_leading_user_texts(self) -> None:
         preview = fixer_wire_resume._preview_from_records(
@@ -572,7 +573,7 @@ class FixerWireResumeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (agy_root / "conversations" / "agy-runner.db").write_text(
-                "/run-manual-netrunner\n",
+                "/hands-netrunner\n",
                 encoding="utf-8",
             )
             fixer_file = agy_root / "conversations" / "agy-fixer.db"
@@ -638,6 +639,50 @@ class FixerWireResumeTests(unittest.TestCase):
 
         self.assertEqual(resolved, "resume-139")
         patched.assert_called_once_with(Path("/tmp/project"), 139, limit=8)
+
+    def test_resolve_latest_fixer_resume_skips_active_codex_writer(self) -> None:
+        newest_active = fixer_wire_resume.ResumeSessionSummary(
+            session_id="active-fixer",
+            created=datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc),
+            updated=datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc),
+            preview="Active fixer",
+            log_path=Path("/tmp/active-fixer.jsonl"),
+        )
+        older_idle = fixer_wire_resume.ResumeSessionSummary(
+            session_id="idle-fixer",
+            created=datetime(2026, 2, 1, 9, 0, tzinfo=timezone.utc),
+            updated=datetime(2026, 2, 1, 11, 0, tzinfo=timezone.utc),
+            preview="Idle fixer",
+            log_path=Path("/tmp/idle-fixer.jsonl"),
+        )
+
+        with patch.object(
+            fixer_wire_resume,
+            "codex_session_log_has_active_writer",
+            side_effect=lambda log_path: log_path == newest_active.log_path,
+        ):
+            resolved = fixer_wire_resume.resolve_latest_fixer_resume_session_id(
+                Path("/tmp/project"),
+                load_fixer_resume_summaries=lambda _cwd, *, limit: [newest_active, older_idle],
+            )
+
+        self.assertEqual(resolved, "idle-fixer")
+
+    def test_resolve_latest_fixer_resume_errors_when_all_codex_candidates_are_active(self) -> None:
+        active = fixer_wire_resume.ResumeSessionSummary(
+            session_id="active-fixer",
+            created=datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc),
+            updated=datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc),
+            preview="Active fixer",
+            log_path=Path("/tmp/active-fixer.jsonl"),
+        )
+
+        with patch.object(fixer_wire_resume, "codex_session_log_has_active_writer", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "currently active"):
+                fixer_wire_resume.resolve_latest_fixer_resume_session_id(
+                    Path("/tmp/project"),
+                    load_fixer_resume_summaries=lambda _cwd, *, limit: [active],
+                )
 
 
 if __name__ == "__main__":

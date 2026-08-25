@@ -1,9 +1,44 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestResolveCheckMyLimitsCommandHonorsExplicitPath(t *testing.T) {
+	t.Setenv(checkMyLimitsPathEnv, "/custom/bin/check-my-limits")
+	resolved, err := resolveCheckMyLimitsCommand()
+	if err != nil {
+		t.Fatalf("resolveCheckMyLimitsCommand returned error: %v", err)
+	}
+	if resolved != "/custom/bin/check-my-limits" {
+		t.Fatalf("expected explicit path, got %q", resolved)
+	}
+}
+
+func TestResolveCheckMyLimitsCommandFindsArchitectHomeBin(t *testing.T) {
+	t.Setenv(checkMyLimitsPathEnv, "")
+	t.Setenv("PATH", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(binDir, "check-my-limits")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveCheckMyLimitsCommand()
+	if err != nil {
+		t.Fatalf("resolveCheckMyLimitsCommand returned error: %v", err)
+	}
+	if resolved != path {
+		t.Fatalf("expected %q, got %q", path, resolved)
+	}
+}
 
 func TestParseQuotaCell(t *testing.T) {
 	tests := []struct {

@@ -143,6 +143,24 @@ func (r *Repository) loadFixerResumeAliasNotes(ctx context.Context, projectID in
 }
 
 func loadCodexChatSessions(projectCWD string, activeFixerSessionID string, aliasNotes map[string]string) ([]codexChatSession, int) {
+	return loadCodexChatSessionsLimit(projectCWD, activeFixerSessionID, aliasNotes, maxCodexChatSessions)
+}
+
+// loadAllCodexChatSessions is used by the global Overseer list.  The Codex
+// transcript directory is shared by every project, so that list must walk and
+// parse it once, not once per project CWD.
+func loadAllCodexChatSessions() ([]codexChatSession, int) {
+	// Overseer history only needs the session header and role marker.  Reading
+	// entire multi-gigabyte Codex transcripts here made the global home page
+	// block for tens of seconds, so cap this path at the marker scan window.
+	return loadCodexChatSessionsLimitWithLines("", "", map[string]string{}, 0, maxRoleMarkerLines)
+}
+
+func loadCodexChatSessionsLimit(projectCWD string, activeFixerSessionID string, aliasNotes map[string]string, maxSessions int) ([]codexChatSession, int) {
+	return loadCodexChatSessionsLimitWithLines(projectCWD, activeFixerSessionID, aliasNotes, maxSessions, 0)
+}
+
+func loadCodexChatSessionsLimitWithLines(projectCWD string, activeFixerSessionID string, aliasNotes map[string]string, maxSessions int, maxLines int) ([]codexChatSession, int) {
 	sessionsRoot := filepath.Join(userHomeDir(), ".codex", "sessions")
 	info, err := os.Stat(sessionsRoot)
 	if err != nil || !info.IsDir() {
@@ -175,7 +193,7 @@ func loadCodexChatSessions(projectCWD string, activeFixerSessionID string, alias
 	ambiguousCount := 0
 	seenSessionIDs := map[string]bool{}
 	for _, path := range files {
-		session, ok := inspectCodexChatSession(path, projectCWD, activeFixerSessionID, aliasNotes)
+		session, ok := inspectCodexChatSessionLimit(path, projectCWD, activeFixerSessionID, aliasNotes, maxLines)
 		if !ok {
 			continue
 		}
@@ -191,7 +209,7 @@ func loadCodexChatSessions(projectCWD string, activeFixerSessionID string, alias
 		}
 		seenSessionIDs[session.SessionID] = true
 		sessions = append(sessions, session)
-		if len(sessions) >= maxCodexChatSessions {
+		if maxSessions > 0 && len(sessions) >= maxSessions {
 			break
 		}
 	}
@@ -200,6 +218,10 @@ func loadCodexChatSessions(projectCWD string, activeFixerSessionID string, alias
 }
 
 func inspectCodexChatSession(path string, projectCWD string, activeFixerSessionID string, aliasNotes map[string]string) (codexChatSession, bool) {
+	return inspectCodexChatSessionLimit(path, projectCWD, activeFixerSessionID, aliasNotes, 0)
+}
+
+func inspectCodexChatSessionLimit(path string, projectCWD string, activeFixerSessionID string, aliasNotes map[string]string, maxLines int) (codexChatSession, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return codexChatSession{}, false
@@ -247,15 +269,20 @@ func inspectCodexChatSession(path string, projectCWD string, activeFixerSessionI
 					CWD       string `json:"cwd"`
 				}
 				if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
-					session.SessionID = strings.TrimSpace(payload.ID)
-					session.CWD = filepath.Clean(strings.TrimSpace(payload.CWD))
-					if session.CWD != filepath.Clean(projectCWD) {
-						return codexChatSession{}, false
-					}
-					if payload.Timestamp != "" {
-						session.StartedAt = payload.Timestamp
-					} else if envelope.Timestamp != "" {
-						session.StartedAt = envelope.Timestamp
+					// Forked/resumed rollouts embed their ancestor history, including the
+					// ancestor session_meta. The first header identifies this file; later
+					// headers must not replace it with the parent thread id.
+					if session.SessionID == "" {
+						session.SessionID = strings.TrimSpace(payload.ID)
+						session.CWD = filepath.Clean(strings.TrimSpace(payload.CWD))
+						if projectCWD != "" && session.CWD != filepath.Clean(projectCWD) {
+							return codexChatSession{}, false
+						}
+						if payload.Timestamp != "" {
+							session.StartedAt = payload.Timestamp
+						} else if envelope.Timestamp != "" {
+							session.StartedAt = envelope.Timestamp
+						}
 					}
 				}
 			case "turn_context":
@@ -274,6 +301,9 @@ func inspectCodexChatSession(path string, projectCWD string, activeFixerSessionI
 			}
 		}
 		lineIndex++
+		if maxLines > 0 && lineIndex >= maxLines {
+			break
+		}
 	}
 
 	if session.SessionID == "" || session.CWD == "" {
@@ -292,18 +322,41 @@ func inspectCodexChatSession(path string, projectCWD string, activeFixerSessionI
 	}
 	session.Headline = headlineForSession(session.AgentRole, aliasNote, session.SessionID)
 	session.Transcript = session.SessionLog
+	if maxLines > 0 {
+		session.LastActivityAt = fileTimestamp(path)
+	}
 	return session, true
 }
 
 func rolesFromMarkers(text string) []string {
 	roles := []string{}
-	if strings.Contains(text, fixerSkillMarker) {
+	if strings.Contains(text, handsChannelMarker) ||
+		strings.Contains(text, "Project Hands Channel Mode") ||
+		strings.Contains(text, "disposable client of the one permanent project actor `Руки`") ||
+		strings.Contains(text, "disposable client of the one permanent project actor 'Руки'") {
+		roles = append(roles, "hands")
+	}
+	if strings.Contains(text, fixerSkillMarker) ||
+		strings.Contains(text, "`$init-fixer`") ||
+		strings.Contains(text, "$init-fixer") ||
+		strings.Contains(text, "`init-fixer`") ||
+		strings.Contains(text, "/init-fixer") ||
+		strings.Contains(text, "`start-fixer`") ||
+		strings.Contains(text, "/start-fixer") {
 		roles = append(roles, "fixer")
 	}
-	if strings.Contains(text, overseerSkillMarker) {
+	if strings.Contains(text, overseerSkillMarker) ||
+		strings.Contains(text, "`$init-overseer`") ||
+		strings.Contains(text, "$init-overseer") ||
+		strings.Contains(text, "`init-overseer`") ||
+		strings.Contains(text, "/init-overseer") ||
+		strings.Contains(text, "`start-overseer`") ||
+		strings.Contains(text, "/start-overseer") {
 		roles = append(roles, "overseer")
 	}
-	if strings.Contains(text, netrunnerSkillMarker) {
+	if strings.Contains(text, netrunnerSkillMarker) ||
+		strings.Contains(text, "Netrunner execution-envelope mode") ||
+		strings.Contains(text, "compatibility session `") {
 		roles = append(roles, "netrunner")
 	}
 	return roles
@@ -318,6 +371,10 @@ func classifyChatRole(sessionID string, activeFixerSessionID string, aliasNote s
 	}
 	if len(roleFirstLines) == 0 {
 		return ""
+	}
+
+	if _, ok := roleFirstLines["hands"]; ok {
+		return "hands"
 	}
 
 	selectedRole := ""
@@ -357,6 +414,8 @@ func headlineForSession(role string, aliasNote string, sessionID string) string 
 func fallbackHeadline(role string, sessionID string) string {
 	label := "Codex"
 	switch role {
+	case "hands":
+		label = "Руки"
 	case "fixer":
 		label = "Fixer"
 	case "overseer":
@@ -469,6 +528,9 @@ func (r *Repository) loadActiveAutonomousFixerSessionID(ctx context.Context, pro
 }
 
 func userHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

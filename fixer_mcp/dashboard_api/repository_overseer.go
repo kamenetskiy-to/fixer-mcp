@@ -78,8 +78,22 @@ func (r *Repository) OverseerHistory(ctx context.Context) (OverseerHistoryRespon
 	}
 
 	threads := make([]OverseerThreadSummary, 0)
+	projectCWDs := make(map[string]bool, len(cwds))
 	for _, cwd := range cwds {
-		threads = append(threads, discoverCodexOverseerThreads(cwd)...)
+		projectCWDs[cwd] = true
+	}
+	// Codex stores all projects under one transcript tree.  Parse that tree
+	// once and route sessions by the CWD recorded in session_meta; doing this
+	// inside the project loop made the home page rescan thousands of files for
+	// every registered project.
+	codexSessions, _ := loadAllCodexChatSessions()
+	for _, session := range codexSessions {
+		if session.AgentRole != "overseer" || !projectCWDs[session.CWD] {
+			continue
+		}
+		threads = append(threads, codexOverseerThread(session))
+	}
+	for _, cwd := range cwds {
 		threads = append(threads, discoverJSONLOverseerThreads(cwd, "claude")...)
 		threads = append(threads, discoverJSONLOverseerThreads(cwd, "droid")...)
 		threads = append(threads, discoverJunieOverseerThreads(cwd)...)
@@ -246,20 +260,26 @@ func discoverCodexOverseerThreads(cwd string) []OverseerThreadSummary {
 		if session.AgentRole != "overseer" {
 			continue
 		}
-		defaults := overseerBackends["codex"]
-		threads = append(threads, OverseerThreadSummary{
-			Backend:           "codex",
-			Model:             firstNonEmpty(session.Model, defaults.model),
-			Reasoning:         firstNonEmpty(session.Reasoning, defaults.reasoning),
-			SpawnCWD:          cwd,
-			Origin:            "codex_session_log",
-			StartedAt:         session.StartedAt,
-			LastActivityAt:    session.LastActivityAt,
-			ExternalSessionID: session.SessionID,
-			Preview:           session.Headline,
-		})
+		thread := codexOverseerThread(session)
+		thread.SpawnCWD = cwd
+		threads = append(threads, thread)
 	}
 	return threads
+}
+
+func codexOverseerThread(session codexChatSession) OverseerThreadSummary {
+	defaults := overseerBackends["codex"]
+	return OverseerThreadSummary{
+		Backend:           "codex",
+		Model:             firstNonEmpty(session.Model, defaults.model),
+		Reasoning:         firstNonEmpty(session.Reasoning, defaults.reasoning),
+		SpawnCWD:          session.CWD,
+		Origin:            "codex_session_log",
+		StartedAt:         session.StartedAt,
+		LastActivityAt:    session.LastActivityAt,
+		ExternalSessionID: session.SessionID,
+		Preview:           session.Headline,
+	}
 }
 
 func discoverJSONLOverseerThreads(cwd string, backend string) []OverseerThreadSummary {
@@ -272,6 +292,12 @@ func discoverJSONLOverseerThreads(cwd string, backend string) []OverseerThreadSu
 		root = filepath.Join(userHomeDir(), ".factory", "sessions", slug)
 	}
 	paths, _ := filepath.Glob(filepath.Join(root, "*.jsonl"))
+	sort.Slice(paths, func(i, j int) bool {
+		return fileTimestamp(paths[i]) > fileTimestamp(paths[j])
+	})
+	if len(paths) > maxCodexChatSessions {
+		paths = paths[:maxCodexChatSessions]
+	}
 	threads := []OverseerThreadSummary{}
 	for _, path := range paths {
 		metadata, ok := inspectOverseerJSONL(path)
@@ -354,8 +380,7 @@ func discoverAntigravityOverseerThreads(cwd string) []OverseerThreadSummary {
 		if _, err := os.Stat(path); err != nil {
 			path = filepath.Join(root, "conversations", sessionID+".pb")
 		}
-		raw, err := os.ReadFile(path)
-		if err != nil || !containsOverseerMarker(string(raw)) {
+		if !fileContainsOverseerMarker(path) {
 			continue
 		}
 		defaults := overseerBackends["antigravity"]
@@ -424,6 +449,7 @@ func inspectOverseerJSONL(path string) (overseerLogMetadata, bool) {
 	defer file.Close()
 	metadata := overseerLogMetadata{}
 	hasMarker := false
+	lineCount := 0
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
@@ -447,14 +473,35 @@ func inspectOverseerJSONL(path string) (overseerLogMetadata, bool) {
 			metadata.updatedAt = timestamp
 		}
 		metadata.preview = firstNonEmpty(metadata.preview, flat["sessionTitle"], flat["taskName"], flat["title"])
+		lineCount++
+		if lineCount >= maxRoleMarkerLines {
+			break
+		}
+	}
+	if metadata.updatedAt == "" {
+		metadata.updatedAt = fileTimestamp(path)
 	}
 	return metadata, hasMarker
+}
+
+func fileContainsOverseerMarker(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	buffer := make([]byte, 256*1024)
+	n, _ := file.Read(buffer)
+	return n > 0 && containsOverseerMarker(string(buffer[:n]))
 }
 
 func containsOverseerMarker(text string) bool {
 	return strings.Contains(text, overseerSkillMarker) ||
 		strings.Contains(text, "Use the `init-overseer` skill immediately.") ||
-		strings.Contains(text, "/init-overseer")
+		strings.Contains(text, "`$init-overseer`") ||
+		strings.Contains(text, "$init-overseer") ||
+		strings.Contains(text, "/init-overseer") ||
+		strings.Contains(text, "`init-overseer`")
 }
 
 func flattenJSONStrings(value any) map[string]string {

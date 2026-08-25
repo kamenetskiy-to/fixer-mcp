@@ -12,19 +12,19 @@
 // ignore_for_file: no_leading_underscores_for_library_prefixes
 import 'package:serverpod_client/serverpod_client.dart' as _i1;
 
-/// A client-owned order in the client cockpit.
+/// A client order submitted to the autonomous delivery pipeline.
 abstract class Order implements _i1.SerializableModel {
   Order._({
     this.id,
     required this.clientId,
     required this.projectDescription,
     required this.budgetCents,
-    this.assignedProjectId,
-    required this.title,
-    required this.description,
     required this.status,
+    this.assignedProjectId,
     required this.createdAt,
     required this.updatedAt,
+    required this.title,
+    required this.description,
   });
 
   factory Order({
@@ -32,12 +32,12 @@ abstract class Order implements _i1.SerializableModel {
     required _i1.UuidValue clientId,
     required String projectDescription,
     required int budgetCents,
-    int? assignedProjectId,
-    required String title,
-    required String description,
     required String status,
+    int? assignedProjectId,
     required DateTime createdAt,
     required DateTime updatedAt,
+    required String title,
+    required String description,
   }) = _OrderImpl;
 
   factory Order.fromJson(Map<String, dynamic> jsonSerialization) {
@@ -48,16 +48,16 @@ abstract class Order implements _i1.SerializableModel {
       ),
       projectDescription: jsonSerialization['projectDescription'] as String,
       budgetCents: jsonSerialization['budgetCents'] as int,
-      assignedProjectId: jsonSerialization['assignedProjectId'] as int?,
-      title: jsonSerialization['title'] as String,
-      description: jsonSerialization['description'] as String,
       status: jsonSerialization['status'] as String,
+      assignedProjectId: jsonSerialization['assignedProjectId'] as int?,
       createdAt: _i1.DateTimeJsonExtension.fromJson(
         jsonSerialization['createdAt'],
       ),
       updatedAt: _i1.DateTimeJsonExtension.fromJson(
         jsonSerialization['updatedAt'],
       ),
+      title: jsonSerialization['title'] as String,
+      description: jsonSerialization['description'] as String,
     );
   }
 
@@ -72,17 +72,17 @@ abstract class Order implements _i1.SerializableModel {
 
   int budgetCents;
 
-  int? assignedProjectId;
-
-  String title;
-
-  String description;
-
   String status;
+
+  int? assignedProjectId;
 
   DateTime createdAt;
 
   DateTime updatedAt;
+
+  String title;
+
+  String description;
 
   /// Returns a shallow copy of this [Order]
   /// with some or all fields replaced by the given arguments.
@@ -92,12 +92,12 @@ abstract class Order implements _i1.SerializableModel {
     _i1.UuidValue? clientId,
     String? projectDescription,
     int? budgetCents,
-    Object? assignedProjectId = _Undefined,
-    String? title,
-    String? description,
     String? status,
+    int? assignedProjectId,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? title,
+    String? description,
   });
   @override
   Map<String, dynamic> toJson() {
@@ -107,12 +107,12 @@ abstract class Order implements _i1.SerializableModel {
       'clientId': clientId.toJson(),
       'projectDescription': projectDescription,
       'budgetCents': budgetCents,
-      if (assignedProjectId != null) 'assignedProjectId': assignedProjectId,
-      'title': title,
-      'description': description,
       'status': status,
+      if (assignedProjectId != null) 'assignedProjectId': assignedProjectId,
       'createdAt': createdAt.toJson(),
       'updatedAt': updatedAt.toJson(),
+      'title': title,
+      'description': description,
     };
   }
 
@@ -130,23 +130,23 @@ class _OrderImpl extends Order {
     required _i1.UuidValue clientId,
     required String projectDescription,
     required int budgetCents,
-    int? assignedProjectId,
-    required String title,
-    required String description,
     required String status,
+    int? assignedProjectId,
     required DateTime createdAt,
     required DateTime updatedAt,
+    required String title,
+    required String description,
   }) : super._(
          id: id,
          clientId: clientId,
          projectDescription: projectDescription,
          budgetCents: budgetCents,
-         assignedProjectId: assignedProjectId,
-         title: title,
-         description: description,
          status: status,
+         assignedProjectId: assignedProjectId,
          createdAt: createdAt,
          updatedAt: updatedAt,
+         title: title,
+         description: description,
        );
 
   /// Returns a shallow copy of this [Order]
@@ -158,26 +158,26 @@ class _OrderImpl extends Order {
     _i1.UuidValue? clientId,
     String? projectDescription,
     int? budgetCents,
-    Object? assignedProjectId = _Undefined,
-    String? title,
-    String? description,
     String? status,
+    Object? assignedProjectId = _Undefined,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? title,
+    String? description,
   }) {
     return Order(
       id: id is int? ? id : this.id,
       clientId: clientId ?? this.clientId,
       projectDescription: projectDescription ?? this.projectDescription,
       budgetCents: budgetCents ?? this.budgetCents,
+      status: status ?? this.status,
       assignedProjectId: assignedProjectId is int?
           ? assignedProjectId
           : this.assignedProjectId,
-      title: title ?? this.title,
-      description: description ?? this.description,
-      status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      title: title ?? this.title,
+      description: description ?? this.description,
     );
   }
 }

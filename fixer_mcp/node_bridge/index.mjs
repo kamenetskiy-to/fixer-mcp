@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
@@ -37,6 +38,8 @@ const DEFAULT_CODEX_CWD =
   process.env.CODEX_APP_CWD?.trim() ||
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SELF_MCP_DIR = path.join(DEFAULT_CODEX_CWD, "self_mcp_servers");
+const CODEX_APP_SERVER_URL =
+  process.env.CODEX_APP_SERVER_URL?.trim() || "ws://127.0.0.1:14243";
 const STREAM_RETENTION_MS = 90_000;
 const MAX_RETAINED_STREAM_EVENTS = 500;
 
@@ -143,6 +146,7 @@ function sandboxPolicyForMode(mode, cwd) {
 
 class CodexAppServerClient {
   #proc;
+  #serverProc;
   #rl;
   #errRl;
   #nextId = 1;
@@ -155,41 +159,20 @@ class CodexAppServerClient {
     // can produce noisy `state db missing rollout path` logs due to index mismatches. The old
     // non-sqlite listing continues to work without log spam. Set
     // `CODEX_BRIDGE_DISABLE_CODEX_SQLITE=0` to opt back in.
-    const args = [];
-    if (DISABLE_CODEX_SQLITE) args.push("-c", "features.sqlite=false");
-    args.push("app-server");
-
-    const env = { ...process.env };
-    if (SILENCE_CODEX_ROLLOUT_LIST_LOGS) {
-      const extra = "codex_core::rollout::list=off";
-      const current = typeof env.RUST_LOG === "string" ? env.RUST_LOG.trim() : "";
-      env.RUST_LOG = current ? `${current},${extra}` : extra;
-    }
-
-    this.#proc = spawn(CODEX_BIN, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env,
+    const serverArgs = ["app-server"];
+    if (DISABLE_CODEX_SQLITE) serverArgs.push("-c", "features.sqlite=false");
+    serverArgs.push("--listen", CODEX_APP_SERVER_URL);
+    this.#serverProc = spawn(CODEX_BIN, serverArgs, {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env },
       cwd: DEFAULT_CODEX_CWD,
     });
-
-    if (!this.#proc.stdin || !this.#proc.stdout || !this.#proc.stderr) {
-      throw new Error("Failed to spawn codex app-server (missing stdio)");
-    }
-
-    this.#errRl = readline.createInterface({ input: this.#proc.stderr, crlfDelay: Infinity });
-    this.#errRl.on("line", (line) => {
-      if (
-        SILENCE_CODEX_ROLLOUT_LIST_LOGS &&
-        typeof line === "string" &&
-        line.includes("codex_core::rollout::list: state db missing rollout path for thread")
-      ) {
-        return;
-      }
-      process.stderr.write(`${line}\n`);
-    });
-
-    this.#proc.on("exit", (code, signal) => {
-      const err = new Error(`codex app-server exited (code=${code}, signal=${signal})`);
+    this.#serverProc.stderr?.on("data", (chunk) => process.stderr.write(chunk));
+    const socket = await connectCodexWebSocket(CODEX_APP_SERVER_URL);
+    const incoming = new PassThrough();
+    socket.addEventListener("message", (event) => incoming.write(`${event.data}\n`));
+    socket.addEventListener("close", () => {
+      const err = new Error("codex app-server socket closed");
       for (const { reject } of this.#pending.values()) reject(err);
       this.#pending.clear();
       for (const fn of this.#subscribers) {
@@ -200,8 +183,18 @@ class CodexAppServerClient {
         }
       }
     });
+    this.#proc = {
+      stdin: { write: (payload) => socket.send(payload.trim()) },
+      stdout: incoming,
+    };
+    const stopServer = () => {
+      this.#serverProc?.kill();
+      process.exit(0);
+    };
+    process.once("SIGINT", stopServer);
+    process.once("SIGTERM", stopServer);
 
-    this.#rl = readline.createInterface({ input: this.#proc.stdout, crlfDelay: Infinity });
+    this.#rl = readline.createInterface({ input: incoming, crlfDelay: Infinity });
     this.#rl.on("line", (line) => {
       let msg;
       try {
@@ -298,6 +291,27 @@ class CodexAppServerClient {
       this.#proc.stdin.write(`${payload}\n`);
     });
   }
+}
+
+async function connectCodexWebSocket(url) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      return await new Promise((resolve, reject) => {
+        const client = new WebSocket(url);
+        client.addEventListener("open", () => resolve(client), { once: true });
+        client.addEventListener(
+          "error",
+          (event) => reject(new Error(`Codex app-server websocket error: ${event.message ?? "unknown"}`)),
+          { once: true },
+        );
+      });
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError ?? new Error("Timed out waiting for Codex app-server websocket");
 }
 
 const codex = new CodexAppServerClient();
@@ -857,6 +871,12 @@ function isMissingRolloutError(error) {
   );
 }
 
+function isActiveWriterError(error) {
+  return String(error?.message ?? error)
+    .toLowerCase()
+    .includes("already has an active writer");
+}
+
 function isThreadNotFoundError(error) {
   const normalized = String(error?.message ?? error).toLowerCase();
   return (
@@ -960,6 +980,37 @@ const server = createServer(async (req, res) => {
         return badRequest(res, "threadId is required");
       }
       return sendJson(res, 200, threadMessagesResponse(threadId));
+    }
+
+    if (req.method === "POST" && url.pathname === "/thread/read") {
+      if (!(await ensureCodexReady(res))) return;
+      const body = await readJsonBody(req);
+      const threadId =
+        body.threadId ??
+        body.thread_id ??
+        body.sessionId ??
+        body.session_id ??
+        "";
+      if (typeof threadId !== "string" || !threadId.trim()) {
+        return badRequest(res, "threadId is required");
+      }
+      const result = await codex.request("thread/read", {
+        threadId: threadId.trim(),
+        includeTurns: true,
+      });
+      return sendJson(res, 200, result ?? {});
+    }
+
+    if (req.method === "POST" && url.pathname === "/thread/list") {
+      if (!(await ensureCodexReady(res))) return;
+      const body = await readJsonBody(req);
+      const params = {};
+      if (Number.isInteger(body.limit) && body.limit > 0) params.limit = body.limit;
+      if (typeof body.cursor === "string" && body.cursor.trim()) {
+        params.cursor = body.cursor.trim();
+      }
+      const result = await codex.request("thread/list", params);
+      return sendJson(res, 200, result ?? {});
     }
 
     if (req.method === "GET" && url.pathname === "/mcp/servers") {
@@ -1190,6 +1241,16 @@ const server = createServer(async (req, res) => {
 	          });
 	          return sendJson(res, 409, {
 	            error: "missing_thread_rollout",
+	            threadId,
+	            message,
+	          });
+	        }
+	        if (isActiveWriterError(e)) {
+	          const message =
+	            "This Codex thread is owned by an interactive client. Reconnect that client through the shared app-server before sending from the UI.";
+	          logLine("warn", "[turn/start] active writer", { threadId });
+	          return sendJson(res, 409, {
+	            error: "thread_active_writer",
 	            threadId,
 	            message,
 	          });

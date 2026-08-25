@@ -10,9 +10,20 @@ import subprocess
 import sys
 from typing import Any, Callable, Sequence
 
-from client_wires.backends import normalize_backend_name
+from client_wires.backends import is_codex_backend, normalize_backend_name
 from client_wires import fixer_wire_prompts
 from client_wires import fixer_wire_resume
+from client_wires import fixer_wire_selectors
+
+
+def _redacted_command_for_display(command: Sequence[str]) -> list[str]:
+    displayed: list[str] = []
+    for argument in command:
+        if ".env={" in argument:
+            displayed.append(argument.split(".env={", 1)[0] + ".env=<redacted>")
+        else:
+            displayed.append(argument)
+    return displayed
 
 @dataclass(frozen=True)
 class RoleLaunchCallbacks:
@@ -42,6 +53,7 @@ class RoleLaunchCallbacks:
     load_overseer_resume_summaries: Callable[[Path], list[Any]]
     select_overseer_resume_session_interactive: Callable[..., str]
     build_overseer_prompt: Callable[[], str]
+    launch_unattached_fixer: Callable[..., int]
     forced_mcp_server: str
     figma_console_mcp_name: str
     fixer_launch_new: str
@@ -131,9 +143,20 @@ def _adapter_resume_command(adapter: Any, option_args: Sequence[str], external_s
     build_resume_command = getattr(adapter, "build_resume_command", None)
     if callable(build_resume_command):
         return list(build_resume_command(option_args, external_session_id))
-    if normalize_backend_name(getattr(adapter, "name", "")) == "codex":
-        return [adapter.command, "fork", *list(option_args), external_session_id]
+    if is_codex_backend(getattr(adapter, "name", "")):
+        return [adapter.command, "resume", *list(option_args), external_session_id]
     return [adapter.command, "resume", *list(option_args), external_session_id]
+
+
+def _role_interactive_execution_args(adapter: Any, execution_prefs: Any, *, role: str) -> list[str]:
+    backend = normalize_backend_name(getattr(adapter, "name", getattr(adapter, "command", "")))
+    if role in {"fixer", "netrunner"} and is_codex_backend(backend):
+        # Project-bound Fixer and Hands/Netrunner clients must stay local so
+        # this launcher's per-process MCP selection is applied. A remote Codex
+        # TUI would inherit the managed app-server configuration and can fail
+        # when that app-server is not running.
+        return list(adapter.build_execution_args(execution_prefs))
+    return list(adapter.build_interactive_execution_args(execution_prefs))
 
 
 def _apply_selected_config_paths(
@@ -177,6 +200,8 @@ def launch_fresh_role_session(
     Option: Any,
     single_select_items: Any,
     callbacks: RoleLaunchCallbacks,
+    launch_label: str | None = None,
+    resume_external_session_id: str | None = None,
 ) -> int:
     from client_wires.codex_compat.llm import (
         ExecutionPreferences,
@@ -220,13 +245,18 @@ def launch_fresh_role_session(
     )
     execution_prefs = ExecutionPreferences(dangerous_sandbox=dangerous_sandbox, auto_approve=True)
     codex_args: list[str] = []
-    codex_args.extend(adapter.build_llm_args(llm_selection))
-    codex_args.extend(adapter.build_interactive_execution_args(execution_prefs))
+    if not resume_external_session_id:
+        codex_args.extend(adapter.build_llm_args(llm_selection))
+    codex_args.extend(_role_interactive_execution_args(adapter, execution_prefs, role=role))
     codex_args = callbacks.append_codex_apps_gate(codex_args, adapter, allow_computer_use=False)
     codex_args.extend(list(passthrough_args))
     option_args = [*codex_args, *adapter.build_mcp_flags(selected_servers, available_servers)]
-    command = [adapter.command, *option_args]
-    launch_prompt = callbacks.append_droid_mcp_tool_guidance(
+    command = (
+        adapter.build_resume_command(option_args, resume_external_session_id.strip())
+        if resume_external_session_id
+        else [adapter.command, *option_args]
+    )
+    launch_prompt = "" if resume_external_session_id else callbacks.append_droid_mcp_tool_guidance(
         fixer_wire_prompts.materialize_fixer_provider_prompt(prompt, launch_selection.backend)
         if role == "fixer"
         else prompt,
@@ -234,6 +264,9 @@ def launch_fresh_role_session(
         mcp_names=selected_mcp_names,
     )
     if launch_prompt:
+        # Kimi Code must stay interactive in every Project Hands launch. Never
+        # add -p/--print here: the Architect enters the prompt in the Kimi TUI,
+        # exactly like fixer -> fixer.
         command.extend(adapter.build_prompt_args(launch_prompt))
 
     env = callbacks.build_backend_launch_env(
@@ -249,21 +282,23 @@ def launch_fresh_role_session(
         config_env_vars=config_env_vars,
     )
 
-    print(f"[fixer-wire] starting new {role} session")
-    print(f"[fixer-wire] {role} backend: {launch_selection.backend}")
-    print(f"[fixer-wire] {role} model: {launch_selection.model}")
-    print(f"[fixer-wire] {role} reasoning: {launch_selection.reasoning}")
-    print(f"[fixer-wire] {role} MCP selection: {', '.join(sorted(selected_servers)) if selected_servers else 'none'}")
-    print("[fixer-wire] command:", command)
-    if launch_selection.backend in ("kimi-code", "kimi-code-native") and launch_prompt and not dry_run:
+    display_label = launch_label or f"{role} session"
+    print(f"[fixer-wire] {'resuming' if resume_external_session_id else 'starting new'} {display_label}")
+    print(f"[fixer-wire] {display_label} backend: {launch_selection.backend}")
+    print(f"[fixer-wire] {display_label} model: {launch_selection.model}")
+    print(f"[fixer-wire] {display_label} reasoning: {launch_selection.reasoning}")
+    print(
+        f"[fixer-wire] {display_label} MCP selection: "
+        f"{', '.join(sorted(selected_servers)) if selected_servers else 'none'}"
+    )
+    print("[fixer-wire] command:", _redacted_command_for_display(command))
+    if (
+        launch_selection.backend in {"kimi-code", "commandcode"}
+        and launch_prompt
+        and not dry_run
+    ):
         print("[fixer-wire] kimi shell mode cannot auto-submit; paste the following into the Kimi TUI:")
         print(launch_prompt)
-        try:
-            import subprocess as _subprocess
-            _subprocess.run(["pbcopy"], input=launch_prompt.encode("utf-8"), check=False)
-            print("[fixer-wire] (bootstrap prompt copied to clipboard — paste with Cmd+V)")
-        except Exception:
-            pass
     if dry_run:
         return 0
 
@@ -308,6 +343,8 @@ def launch_fixer(
         resume_session_id = resume_selection.session_id
     else:
         launch_mode = callbacks.select_fixer_launch_action_interactive(Option, single_select_items)
+        if launch_mode == fixer_wire_selectors.UNATTACHED_FIXER_ACTION:
+            return callbacks.launch_unattached_fixer(passthrough_args, dry_run=dry_run, Option=Option, single_select_items=single_select_items)
         if launch_mode == callbacks.fixer_launch_resume:
             fixer_summaries = callbacks.load_fixer_resume_summaries(cwd)
             raw_selection = callbacks.select_fixer_resume_session_interactive(
@@ -364,7 +401,7 @@ def launch_fixer(
     codex_args: list[str] = []
     if not resume_session_id:
         codex_args.extend(adapter.build_llm_args(llm_selection))
-    codex_args.extend(adapter.build_interactive_execution_args(execution_prefs))
+    codex_args.extend(_role_interactive_execution_args(adapter, execution_prefs, role="fixer"))
     codex_args = callbacks.append_codex_apps_gate(codex_args, adapter, allow_computer_use=False)
     codex_args.extend(list(passthrough_args))
 
@@ -395,7 +432,7 @@ def launch_fixer(
     else:
         print(f"[fixer-wire] starting new fixer {resume_provider} session")
     print(f"[fixer-wire] fixer MCP selection: {', '.join(selected_mcp_names) if selected_mcp_names else 'none'}")
-    print("[fixer-wire] command:", codex_cmd)
+    print("[fixer-wire] command:", _redacted_command_for_display(codex_cmd))
     if dry_run:
         return 0
 
@@ -618,7 +655,7 @@ def launch_overseer(
 
     print(f"[fixer-wire] resuming overseer {resume_provider} session id: {resume_session_id}")
     print(f"[fixer-wire] overseer MCP selection: {', '.join(sorted(selected_servers)) if selected_servers else 'none'}")
-    print("[fixer-wire] command:", command)
+    print("[fixer-wire] command:", _redacted_command_for_display(command))
     if dry_run:
         return 0
 

@@ -1,0 +1,18 @@
+### Durable mailbox item owned by the permanent Hands actor.
+class: WorkroomHandsInstruction
+immutable: true
+fields:
+  instructionId: String, jsonKey=id
+  ordinal: int
+  instructionText: String, jsonKey=instruction_text
+  declaredWriteScope: List<String>, jsonKey=declared_write_scope
+  requestedLane: String, jsonKey=requested_lane
+  riskClass: String, jsonKey=risk_class
+  reviewPolicy: String, jsonKey=review_policy
+  state: String
+  stateReasonCode: String?, jsonKey=state_reason_code
+  stateReasonText: String?, jsonKey=state_reason_text
+  revision: int
+  createdAt: String, jsonKey=created_at
+  updatedAt: String, jsonKey=updated_at
+  terminalAt: String?, jsonKey=terminal_at

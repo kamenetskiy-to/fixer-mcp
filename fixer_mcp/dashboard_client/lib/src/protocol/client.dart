@@ -13,13 +13,29 @@
 import 'package:serverpod_client/serverpod_client.dart' as _i1;
 import 'dart:async' as _i2;
 import 'package:fixer_dashboard_client/src/protocol/client_auth_response.dart'
+    as _i3;
+import 'package:fixer_dashboard_client/src/protocol/client_profile.dart' as _i4;
+import 'package:fixer_dashboard_client/src/protocol/project_workroom_snapshot.dart'
+    as _i5;
+import 'package:fixer_dashboard_client/src/protocol/project_ui_frame.dart'
     as _i6;
-import 'package:fixer_dashboard_client/src/protocol/client_profile.dart' as _i7;
-import 'package:fixer_dashboard_client/src/protocol/order.dart' as _i8;
-import 'package:fixer_dashboard_client/src/protocol/revision.dart' as _i9;
-import 'package:serverpod_auth_core_client/serverpod_auth_core_client.dart'
+import 'package:fixer_dashboard_client/src/protocol/fixer_turn_receipt.dart'
+    as _i7;
+import 'package:fixer_dashboard_client/src/protocol/genui_action_receipt.dart'
+    as _i8;
+import 'package:fixer_dashboard_client/src/protocol/genui_action_request.dart'
+    as _i9;
+import 'package:fixer_dashboard_client/src/protocol/hands_instruction_receipt.dart'
     as _i10;
-import 'protocol.dart' as _i11;
+import 'package:fixer_dashboard_client/src/protocol/hands_instruction_request.dart'
+    as _i11;
+import 'package:fixer_dashboard_client/src/protocol/command_receipt.dart'
+    as _i12;
+import 'package:fixer_dashboard_client/src/protocol/order.dart' as _i13;
+import 'package:fixer_dashboard_client/src/protocol/revision.dart' as _i14;
+import 'package:serverpod_auth_core_client/serverpod_auth_core_client.dart'
+    as _i15;
+import 'protocol.dart' as _i16;
 
 /// Registration, login, and current-client operations for client tenants.
 /// {@category Endpoint}
@@ -30,21 +46,21 @@ class EndpointClientAuth extends _i1.EndpointRef {
   String get name => 'clientAuth';
 
   /// Registers a client with an email and password and returns a session token.
-  _i2.Future<_i6.ClientAuthResponse> register({
+  _i2.Future<_i3.ClientAuthResponse> register({
     required String email,
     required String password,
     required String displayName,
-  }) => caller.callServerEndpoint<_i6.ClientAuthResponse>(
+  }) => caller.callServerEndpoint<_i3.ClientAuthResponse>(
     'clientAuth',
     'register',
     {'email': email, 'password': password, 'displayName': displayName},
   );
 
-  /// Logs a client in and returns a new session token.
-  _i2.Future<_i6.ClientAuthResponse> login({
+  /// Logs a client in and returns a new session token. Auto-registers new accounts.
+  _i2.Future<_i3.ClientAuthResponse> login({
     required String email,
     required String password,
-  }) => caller.callServerEndpoint<_i6.ClientAuthResponse>(
+  }) => caller.callServerEndpoint<_i3.ClientAuthResponse>(
     'clientAuth',
     'login',
     {'email': email, 'password': password},
@@ -66,12 +82,12 @@ class EndpointClientProfile extends EndpointClientProtected {
   String get name => 'clientProfile';
 
   /// Returns the profile represented by the validated client session token.
-  _i2.Future<_i7.ClientProfile> current() => caller
-      .callServerEndpoint<_i7.ClientProfile>('clientProfile', 'current', {});
+  _i2.Future<_i4.ClientProfile> current() => caller
+      .callServerEndpoint<_i4.ClientProfile>('clientProfile', 'current', {});
 }
 
 /// {@category Endpoint}
-class EndpointDashboardRuntime extends _i1.EndpointRef {
+class EndpointDashboardRuntime extends EndpointClientProtected {
   EndpointDashboardRuntime(_i1.EndpointCaller caller) : super(caller);
 
   @override
@@ -82,6 +98,130 @@ class EndpointDashboardRuntime extends _i1.EndpointRef {
 
   _i2.Future<List<String>> topology() => caller
       .callServerEndpoint<List<String>>('dashboardRuntime', 'topology', {});
+
+  /// Returns one SQLite-consistent read model and the exact journal watermark
+  /// from which the client starts its replay stream.
+  _i2.Future<_i5.ProjectWorkroomSnapshot> getProjectWorkroomSnapshot(
+    int projectId,
+  ) => caller.callServerEndpoint<_i5.ProjectWorkroomSnapshot>(
+    'dashboardRuntime',
+    'getProjectWorkroomSnapshot',
+    {'projectId': projectId},
+  );
+
+  /// Replays the authoritative journal after [afterSeq], then long-tails it.
+  /// The pump holds at most one bounded Go batch when the WebSocket listener
+  /// pauses and force-closes its active HTTP wait on cancellation.
+  _i2.Stream<_i6.ProjectUiFrame> watchProjectUi(
+    int projectId,
+    int afterSeq,
+    int protocolVersion,
+  ) =>
+      caller.callStreamingServerEndpoint<
+        _i2.Stream<_i6.ProjectUiFrame>,
+        _i6.ProjectUiFrame
+      >('dashboardRuntime', 'watchProjectUi', {
+        'projectId': projectId,
+        'afterSeq': afterSeq,
+        'protocolVersion': protocolVersion,
+      }, {});
+
+  _i2.Future<_i7.FixerTurnReceipt> sendFixerTurn(
+    int projectId,
+    String threadId,
+    String content,
+    String idempotencyKey,
+  ) => caller.callServerEndpoint<_i7.FixerTurnReceipt>(
+    'dashboardRuntime',
+    'sendFixerTurn',
+    {
+      'projectId': projectId,
+      'threadId': threadId,
+      'content': content,
+      'idempotencyKey': idempotencyKey,
+    },
+  );
+
+  _i2.Future<_i8.GenuiActionReceipt> requestGenuiSurface(
+    int projectId,
+    String threadId,
+    String surfaceType,
+    int surfaceVersion,
+    String argumentsJson,
+    String idempotencyKey,
+  ) => caller.callServerEndpoint<_i8.GenuiActionReceipt>(
+    'dashboardRuntime',
+    'requestGenuiSurface',
+    {
+      'projectId': projectId,
+      'threadId': threadId,
+      'surfaceType': surfaceType,
+      'surfaceVersion': surfaceVersion,
+      'argumentsJson': argumentsJson,
+      'idempotencyKey': idempotencyKey,
+    },
+  );
+
+  /// Bounded long-poll fallback for clients whose generated protocol artifact
+  /// does not yet include the typed Workroom stream. Journal sequence remains
+  /// authoritative, so reconnect resumes from the caller's committed cursor.
+  _i2.Future<Map<String, dynamic>> waitProjectUiEventsJson(
+    int projectId,
+    int afterSeq,
+    int protocolVersion,
+  ) => caller.callServerEndpoint<Map<String, dynamic>>(
+    'dashboardRuntime',
+    'waitProjectUiEventsJson',
+    {
+      'projectId': projectId,
+      'afterSeq': afterSeq,
+      'protocolVersion': protocolVersion,
+    },
+  );
+
+  _i2.Future<_i8.GenuiActionReceipt> invokeGenuiAction(
+    _i9.GenuiActionRequest request,
+  ) => caller.callServerEndpoint<_i8.GenuiActionReceipt>(
+    'dashboardRuntime',
+    'invokeGenuiAction',
+    {'request': request},
+  );
+
+  _i2.Future<_i10.HandsInstructionReceipt> submitHandsInstruction(
+    _i11.HandsInstructionRequest request,
+  ) => caller.callServerEndpoint<_i10.HandsInstructionReceipt>(
+    'dashboardRuntime',
+    'submitHandsInstruction',
+    {'request': request},
+  );
+
+  _i2.Future<_i8.GenuiActionReceipt> selectHandsLane(
+    int projectId,
+    String provider,
+    String idempotencyKey,
+  ) => caller.callServerEndpoint<_i8.GenuiActionReceipt>(
+    'dashboardRuntime',
+    'selectHandsLane',
+    {
+      'projectId': projectId,
+      'provider': provider,
+      'idempotencyKey': idempotencyKey,
+    },
+  );
+
+  _i2.Future<_i12.CommandReceipt> cancelHandsInstruction(
+    int projectId,
+    String instructionId,
+    String idempotencyKey,
+  ) => caller.callServerEndpoint<_i12.CommandReceipt>(
+    'dashboardRuntime',
+    'cancelHandsInstruction',
+    {
+      'projectId': projectId,
+      'instructionId': instructionId,
+      'idempotencyKey': idempotencyKey,
+    },
+  );
 
   _i2.Future<Map<String, dynamic>> homeSnapshot() =>
       caller.callServerEndpoint<Map<String, dynamic>>(
@@ -128,10 +268,17 @@ class EndpointDashboardRuntime extends _i1.EndpointRef {
   _i2.Future<Map<String, dynamic>> sendThreadMessage(
     String threadId,
     String prompt,
+    String model,
+    String reasoning,
   ) => caller.callServerEndpoint<Map<String, dynamic>>(
     'dashboardRuntime',
     'sendThreadMessage',
-    {'threadId': threadId, 'prompt': prompt},
+    {
+      'threadId': threadId,
+      'prompt': prompt,
+      'model': model,
+      'reasoning': reasoning,
+    },
   );
 
   _i2.Future<Map<String, dynamic>> threadTurnStatus(String streamId) =>
@@ -151,30 +298,30 @@ class EndpointClientOrder extends EndpointClientProtected {
   String get name => 'clientOrder';
 
   /// Creates a draft order for the authenticated client.
-  _i2.Future<_i8.Order> createOrder({
+  _i2.Future<_i13.Order> createOrder({
     required String title,
     required String description,
-  }) => caller.callServerEndpoint<_i8.Order>('clientOrder', 'createOrder', {
+  }) => caller.callServerEndpoint<_i13.Order>('clientOrder', 'createOrder', {
     'title': title,
     'description': description,
   });
 
   /// Lists the authenticated client's orders, newest updates first.
-  _i2.Future<List<_i8.Order>> listOrders() => caller
-      .callServerEndpoint<List<_i8.Order>>('clientOrder', 'listOrders', {});
+  _i2.Future<List<_i13.Order>> listOrders() => caller
+      .callServerEndpoint<List<_i13.Order>>('clientOrder', 'listOrders', {});
 
   /// Fetches one order only when it belongs to the authenticated client.
-  _i2.Future<_i8.Order?> getOrder(int orderId) =>
-      caller.callServerEndpoint<_i8.Order?>('clientOrder', 'getOrder', {
+  _i2.Future<_i13.Order?> getOrder(int orderId) =>
+      caller.callServerEndpoint<_i13.Order?>('clientOrder', 'getOrder', {
         'orderId': orderId,
       });
 
   /// Updates the editable client-facing fields of an order.
-  _i2.Future<_i8.Order> updateOrder({
+  _i2.Future<_i13.Order> updateOrder({
     required int orderId,
     required String title,
     required String description,
-  }) => caller.callServerEndpoint<_i8.Order>('clientOrder', 'updateOrder', {
+  }) => caller.callServerEndpoint<_i13.Order>('clientOrder', 'updateOrder', {
     'orderId': orderId,
     'title': title,
     'description': description,
@@ -188,34 +335,34 @@ class EndpointClientOrder extends EndpointClientProtected {
   );
 
   /// Creates the next draft revision for an order.
-  _i2.Future<_i9.Revision> createRevision({
+  _i2.Future<_i14.Revision> createRevision({
     required int orderId,
     required String description,
-  }) => caller.callServerEndpoint<_i9.Revision>(
+  }) => caller.callServerEndpoint<_i14.Revision>(
     'clientOrder',
     'createRevision',
     {'orderId': orderId, 'description': description},
   );
 
   /// Lists revisions belonging to an order owned by the authenticated client.
-  _i2.Future<List<_i9.Revision>> listRevisions(int orderId) =>
-      caller.callServerEndpoint<List<_i9.Revision>>(
+  _i2.Future<List<_i14.Revision>> listRevisions(int orderId) =>
+      caller.callServerEndpoint<List<_i14.Revision>>(
         'clientOrder',
         'listRevisions',
         {'orderId': orderId},
       );
 
   /// Fetches one revision only when its parent order is client-owned.
-  _i2.Future<_i9.Revision?> getRevision(int revisionId) =>
-      caller.callServerEndpoint<_i9.Revision?>('clientOrder', 'getRevision', {
+  _i2.Future<_i14.Revision?> getRevision(int revisionId) =>
+      caller.callServerEndpoint<_i14.Revision?>('clientOrder', 'getRevision', {
         'revisionId': revisionId,
       });
 
   /// Updates the editable description of a revision.
-  _i2.Future<_i9.Revision> updateRevision({
+  _i2.Future<_i14.Revision> updateRevision({
     required int revisionId,
     required String description,
-  }) => caller.callServerEndpoint<_i9.Revision>(
+  }) => caller.callServerEndpoint<_i14.Revision>(
     'clientOrder',
     'updateRevision',
     {'revisionId': revisionId, 'description': description},
@@ -228,7 +375,52 @@ class EndpointClientOrder extends EndpointClientProtected {
       });
 }
 
-/// Order intake and delivery-status operations for the client-facing flow.
+/// Architect actions that finalize a client order and deliver its result.
+///
+/// This endpoint intentionally has no client scope: the client-facing CRUD
+/// endpoint is protected by [ClientProtectedEndpoint], while consolidation is
+/// an Architect-side operation.
+/// {@category Endpoint}
+class EndpointOrderDelivery extends _i1.EndpointRef {
+  EndpointOrderDelivery(_i1.EndpointCaller caller) : super(caller);
+
+  @override
+  String get name => 'orderDelivery';
+
+  /// Merges the accepted result and makes it available to the client.
+  ///
+  /// The operation is idempotent. Re-merging an already completed order keeps
+  /// the completed state and republishes the client update.
+  _i2.Future<_i13.Order> mergeOrder(
+    int orderId, {
+    required String resultSummary,
+  }) => caller.callServerEndpoint<_i13.Order>('orderDelivery', 'mergeOrder', {
+    'orderId': orderId,
+    'resultSummary': resultSummary,
+  });
+
+  /// Approval is an explicit alias for the Architect UI's merge action.
+  _i2.Future<_i13.Order> approveOrder(
+    int orderId, {
+    required String resultSummary,
+  }) => caller.callServerEndpoint<_i13.Order>('orderDelivery', 'approveOrder', {
+    'orderId': orderId,
+    'resultSummary': resultSummary,
+  });
+
+  /// Rejects an order result and notifies the client cockpit.
+  _i2.Future<_i13.Order> rejectOrder(int orderId) =>
+      caller.callServerEndpoint<_i13.Order>('orderDelivery', 'rejectOrder', {
+        'orderId': orderId,
+      });
+}
+
+/// The client order-flow API used by the external client surface.
+///
+/// This endpoint deliberately returns the small JSON-shaped payloads used by
+/// the client API instead of exposing the persistence models directly. The
+/// existing [ClientOrderEndpoint] remains available for the current cockpit
+/// CRUD surface while clients migrate to this flow.
 /// {@category Endpoint}
 class EndpointOrder extends EndpointClientProtected {
   EndpointOrder(_i1.EndpointCaller caller) : super(caller);
@@ -236,7 +428,7 @@ class EndpointOrder extends EndpointClientProtected {
   @override
   String get name => 'order';
 
-  /// Creates an order in the autonomous delivery pipeline.
+  /// Creates an order and returns its database id.
   _i2.Future<int> createOrder({
     required String clientId,
     required String projectDescription,
@@ -247,7 +439,7 @@ class EndpointOrder extends EndpointClientProtected {
     'budgetCents': budgetCents,
   });
 
-  /// Lists the delivery status of a client's orders.
+  /// Lists the orders for a client in reverse creation order.
   _i2.Future<List<Map<String, dynamic>>> listOrders(String clientId) =>
       caller.callServerEndpoint<List<Map<String, dynamic>>>(
         'order',
@@ -255,7 +447,7 @@ class EndpointOrder extends EndpointClientProtected {
         {'clientId': clientId},
       );
 
-  /// Submits a client revision to the delivery pipeline.
+  /// Adds a revision to an order and returns its database id.
   _i2.Future<int> submitRevision({
     required int orderId,
     required String revisionText,
@@ -266,7 +458,7 @@ class EndpointOrder extends EndpointClientProtected {
     'attachmentUrls': attachmentUrls,
   });
 
-  /// Returns the current status, Architect result summary, and revisions.
+  /// Returns the current status and all revisions for an order.
   _i2.Future<Map<String, dynamic>> orderStatus(int orderId) =>
       caller.callServerEndpoint<Map<String, dynamic>>('order', 'orderStatus', {
         'orderId': orderId,
@@ -275,10 +467,10 @@ class EndpointOrder extends EndpointClientProtected {
 
 class Modules {
   Modules(Client client) {
-    serverpod_auth_core = _i10.Caller(client);
+    serverpod_auth_core = _i15.Caller(client);
   }
 
-  late final _i10.Caller serverpod_auth_core;
+  late final _i15.Caller serverpod_auth_core;
 }
 
 class Client extends _i1.ServerpodClientShared {
@@ -296,7 +488,7 @@ class Client extends _i1.ServerpodClientShared {
     bool? disconnectStreamsOnLostInternetConnection,
   }) : super(
          host,
-         _i11.Protocol(),
+         _i16.Protocol(),
          securityContext: securityContext,
          streamingConnectionTimeout: streamingConnectionTimeout,
          connectionTimeout: connectionTimeout,
@@ -309,6 +501,7 @@ class Client extends _i1.ServerpodClientShared {
     clientProfile = EndpointClientProfile(this);
     dashboardRuntime = EndpointDashboardRuntime(this);
     clientOrder = EndpointClientOrder(this);
+    orderDelivery = EndpointOrderDelivery(this);
     order = EndpointOrder(this);
     modules = Modules(this);
   }
@@ -321,6 +514,8 @@ class Client extends _i1.ServerpodClientShared {
 
   late final EndpointClientOrder clientOrder;
 
+  late final EndpointOrderDelivery orderDelivery;
+
   late final EndpointOrder order;
 
   late final Modules modules;
@@ -331,6 +526,7 @@ class Client extends _i1.ServerpodClientShared {
     'clientProfile': clientProfile,
     'dashboardRuntime': dashboardRuntime,
     'clientOrder': clientOrder,
+    'orderDelivery': orderDelivery,
     'order': order,
   };
 

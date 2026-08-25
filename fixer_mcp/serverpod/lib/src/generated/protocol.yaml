@@ -6,6 +6,15 @@ clientProfile:
 dashboardRuntime:
   - health:
   - topology:
+  - getProjectWorkroomSnapshot:
+  - watchProjectUi:
+  - sendFixerTurn:
+  - requestGenuiSurface:
+  - waitProjectUiEventsJson:
+  - invokeGenuiAction:
+  - submitHandsInstruction:
+  - selectHandsLane:
+  - cancelHandsInstruction:
   - homeSnapshot:
   - projectSnapshot:
   - projectDocs:

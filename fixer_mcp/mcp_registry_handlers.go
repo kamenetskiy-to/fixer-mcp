@@ -32,6 +32,7 @@ var curatedDefaultMcpServers = []curatedMcpServerSpec{
 	{Name: "nodejs_docs", Category: "Coding", HowTo: "Use for authoritative Node.js API lookup and runtime behavior guidance."},
 	{Name: "shadcn", Category: "Coding", HowTo: "Use for shadcn/ui component discovery and integration patterns in frontend tasks."},
 	{Name: "playwright", Category: "Coding", HowTo: "Use for deterministic browser automation and UI scenario checks across Next.js App Router flows."},
+	{Name: "edge", Category: "Coding", HowTo: "Use only when the Architect explicitly selects Edge. The local Edge MCP All Tabs extension attaches the official Playwright relay to every ordinary tab in the already-open default Edge profile; it must not launch a separate automation profile or window."},
 	{Name: "chrome-devtools", Category: "Coding", HowTo: "Use for deep Chrome runtime debugging across DOM/CSS, console, network, performance, Core Web Vitals, and Lighthouse traces."},
 	{Name: "eslint", Category: "Coding", HowTo: "Use for direct lint loops, rule-level fixes, and quality gates in strict TypeScript + eslint-config-next codebases."},
 	{Name: "mcp-language-server", Category: "Coding", HowTo: "Use for LSP-backed semantic code operations (definitions, references, hover, diagnostics, rename, and workspace edits)."},

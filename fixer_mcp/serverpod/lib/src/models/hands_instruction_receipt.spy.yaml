@@ -1,0 +1,12 @@
+class: HandsInstructionReceipt
+immutable: true
+fields:
+  status: String
+  instructionId: String, jsonKey=instruction_id
+  ordinal: int
+  state: String
+  lane: String
+  riskClass: String, jsonKey=risk_class
+  projectSeq: int, jsonKey=project_seq
+  reasonCode: String?, jsonKey=reason_code
+  reasonText: String?, jsonKey=reason_text

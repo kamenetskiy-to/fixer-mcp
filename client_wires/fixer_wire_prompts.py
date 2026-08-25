@@ -24,6 +24,7 @@ WEB_STACK_GUIDANCE_MCP_NAMES = {
     "playwright",
     "playwright-mcp",
     "playwright_mcp",
+    "edge",
     "chrome-devtools",
     "chrome-devtools-mcp",
     "chrome_devtools_mcp",
@@ -42,10 +43,12 @@ STANDARD_WEB_STACK_GUIDANCE = (
     "react-responsive",
     "eslint + eslint-config-next",
 )
-NETRUNNER_KIND_MANUAL = "manual"
+NETRUNNER_KIND_HANDS_GENERATION = "hands_generation"
+# Compatibility alias for callers that still import the historical symbol.
+NETRUNNER_KIND_MANUAL = NETRUNNER_KIND_HANDS_GENERATION
 NETRUNNER_KIND_ACCEPTANCE = "acceptance"
-NETRUNNER_MANUAL_SKILL_NAME = "run-manual-netrunner"
-NETRUNNER_ACCEPTANCE_SKILL_NAME = "run-manual-acceptance-netrunner"
+NETRUNNER_MANUAL_SKILL_NAME = "hands-netrunner"
+NETRUNNER_ACCEPTANCE_SKILL_NAME = "hands-netrunner"
 
 FIXER_PROVIDER_RULE_MARKER = "[FIXER_PROVIDER_ORCHESTRATION_RULE]"
 
@@ -60,11 +63,6 @@ _FIXER_PROVIDER_ORCHESTRATION_RULES = {
         "`Shell` tasks with `run_in_background=true`. For all work that would use "
         "those features, use Fixer MCP Netrunner waves."
     ),
-    "kimi-code-native": (
-        "CRITICAL: Do not use Kimi Code's built-in `Agent` tool or background "
-        "`Shell` tasks with `run_in_background=true`. For all work that would use "
-        "those features, use Fixer MCP Netrunner waves."
-    ),
     "claude": (
         "CRITICAL: Do not use Claude Code's built-in `Agent` tool, `claude agents`, "
         "or `--bg` background sessions. For all work that would use those features, "
@@ -74,6 +72,11 @@ _FIXER_PROVIDER_ORCHESTRATION_RULES = {
         "CRITICAL: Don't use Antigravity's built-in `subagents`, `schedule`, or "
         "`manage_task` features. For all work that would use those features, use "
         "Fixer MCP Netrunner waves."
+    ),
+    "grok": (
+        "CRITICAL: Do not use Grok Build's built-in subagent spawning (`--agents`, "
+        "the Agent tool) or background worktrees for delegation. For all work that "
+        "would use those features, use Fixer MCP Netrunner waves."
     ),
 }
 
@@ -117,11 +120,12 @@ def _build_netrunner_prompt(
         how_to_lines.append(f"- {name}: {guidance}")
     standard_web_stack_text = standard_web_stack_guidance_block(mcp_names)
     prompt_lines = [
-        f"Activate skill `${skill_name}` immediately.",
-        "Use its Netrunner separate-terminal mode for this launch.",
+        f"Activate skill ${skill_name} immediately.",
+        "Use its Netrunner execution-envelope mode for this disposable provider generation.",
         "Execute only its initialization checklist first, then stop and report status.",
         "",
-        f"Preselected session ID from fixer wire: `{session_id}`.",
+        f"Preselected compatibility session ID from fixer wire: `{session_id}`.",
+        "This session is an execution envelope, not the permanent project `Руки` identity or mailbox.",
         f"Assigned MCP selection from fixer wire: {mcp_text}.",
         "Attached MCP how-to guidance:",
         *(how_to_lines or ["- none"]),
@@ -129,7 +133,7 @@ def _build_netrunner_prompt(
     ]
     if standard_web_stack_text:
         prompt_lines.extend(["", *standard_web_stack_text.splitlines()])
-    prompt_lines.append("Use this session ID for checkout unless Architect explicitly overrides.")
+    prompt_lines.append("Use this compatibility session ID for checkout unless Architect explicitly overrides.")
     return "\n".join(prompt_lines)
 
 
@@ -147,13 +151,62 @@ def _build_droid_netrunner_prompt(
     mcp_text = ", ".join(mcp_names) if mcp_names else "none"
     return "\n".join(
         [
-            f"Activate skill `${skill_name}` immediately.",
-            "Use Netrunner separate-terminal mode.",
-            f"Run the initialization checklist for session `{session_id}`, then report status.",
+            f"Activate skill ${skill_name} immediately.",
+            "Use Netrunner execution-envelope mode for this disposable provider generation.",
+            f"Run the initialization checklist for compatibility session `{session_id}`, then report status.",
+            "The session is not the permanent project `Руки` identity or mailbox.",
             f"Assigned MCPs: {mcp_text}.",
             "After checkout, call `fixer_mcp.log_netrunner_progress` with `log_type=\"started\"`; use only `started`, `progress`, `blocked`, `workaround`, or `completed`.",
         ]
     )
+
+
+def _build_project_hands_prompt(
+    *,
+    provider_lane: str,
+    worktree_path: str = "",
+    branch_name: str = "",
+    attached_doc_files: Sequence[str] = (),
+) -> str:
+    prompt = textwrap.dedent(
+        f"""
+        Activate skill $hands-netrunner immediately.
+        Use its Project Hands Channel Mode for the current project.
+        {FIXER_PROVIDER_RULE_MARKER}
+        This provider process is a disposable client of the one permanent project actor `Руки`.
+        Selected execution lane: `{provider_lane}`.
+        Read the durable Hands state and mailbox from Fixer MCP; do not discover or resume provider transcripts as the source of history.
+        First call `fixer_mcp.assume_role` with `role="netrunner"` and the current project `cwd`.
+        Submit instructions to the current project without creating or asking for a Netrunner session ID.
+        Provider names select execution lanes for the same actor and mailbox; they never create another actor.
+        Repository-write results remain awaiting explicit Fixer review. Never simulate acceptance or weaken the review gate.
+        Execute only the channel initialization checklist first. Then answer in one short line: confirm that the channel is initialized, state the current Hands task, and ask whether to bring the app up through tmux-flow. Do not print actor IDs, lanes, queue counts, journal state, history, a checklist report, or any extra explanation.
+        """
+    ).strip()
+    extra_blocks: list[str] = []
+    if worktree_path.strip():
+        extra_blocks.append(
+            textwrap.dedent(
+                f"""
+                You are running inside a dedicated clean git worktree: `{worktree_path.strip()}` (branch `{branch_name.strip()}`).
+                Keep every repository read/write inside this worktree; never touch the main checkout or other worktrees.
+                """
+            ).strip()
+        )
+    if attached_doc_files:
+        doc_lines = "\n".join(f"- `{path}`" for path in attached_doc_files)
+        extra_blocks.append(
+            textwrap.dedent(
+                f"""
+                The Architect attached exactly this project documentation to your session; it is the ONLY project documentation available to you:
+                {doc_lines}
+                Read `.hands/project_docs/_index.md` first, then the listed files when relevant. Do not ask Fixer MCP for other project docs.
+                """
+            ).strip()
+        )
+    if extra_blocks:
+        prompt = prompt + "\n\n" + "\n\n".join(extra_blocks)
+    return materialize_fixer_provider_prompt(prompt, provider_lane)
 
 
 def _build_default_how_to(server_name: str) -> str:
@@ -238,7 +291,7 @@ def materialize_fixer_provider_prompt(prompt: str, backend: str | None) -> str:
 def _build_fixer_prompt() -> str:
     return textwrap.dedent(
         """
-        Activate skill `$init-fixer` immediately.
+        Activate skill $init-fixer immediately.
         Fixer is the project-scoped orchestrator role in the current Fixer MCP system.
         [FIXER_PROVIDER_ORCHESTRATION_RULE]
         Execute only its initialization checklist first, then stop and report status.
@@ -249,7 +302,7 @@ def _build_fixer_prompt() -> str:
 def _build_unattached_fixer_prompt(scratch_cwd: Path) -> str:
     return textwrap.dedent(
         f"""
-        Activate skill `$init-unattached-fixer` immediately.
+        Activate skill $init-unattached-fixer immediately.
         This is Unattached Fixer mode.
         You are bound to an internal scratch workspace, not to the operator's current product repository.
         Scratch workspace: `{scratch_cwd.resolve()}`.
@@ -265,7 +318,7 @@ def _build_unattached_fixer_prompt(scratch_cwd: Path) -> str:
 def _build_overseer_prompt() -> str:
     return textwrap.dedent(
         """
-        Activate skill `$init-overseer` immediately.
+        Activate skill $init-overseer immediately.
         Overseer is the global analysis and routing role in the current Fixer MCP system.
         Execute only its initialization checklist first, then stop and report status.
         """

@@ -7,6 +7,12 @@ import 'package:serverpod_auth_core_server/serverpod_auth_core_server.dart'
 import 'src/generated/endpoints.dart';
 import 'src/generated/protocol.dart';
 
+const fixerStudioBackendContractPath = '/fixer-studio/contract';
+const fixerStudioBackendContractToken = 'fixer-studio-serverpod-rpc-v1';
+const fixerStudioBackendContract = <String, String>{
+  'contract': fixerStudioBackendContractToken,
+};
+
 void run(List<String> args) async {
   final pod = Serverpod(args, Protocol(), Endpoints());
 
@@ -21,6 +27,10 @@ void run(List<String> args) async {
   );
 
   pod.webServer.addRoute(_DashboardHealthRoute(), '/health');
+  pod.webServer.addRoute(
+    _FixerStudioBackendContractRoute(),
+    fixerStudioBackendContractPath,
+  );
 
   final staticDir = Directory(Uri(path: 'web/static').toFilePath());
   if (staticDir.existsSync()) {
@@ -28,6 +38,16 @@ void run(List<String> args) async {
   }
 
   await pod.start();
+}
+
+/// Public, non-secret proof that this Serverpod exposes the RPC surface used
+/// by the installed Fixer Studio clients. The token changes only when that
+/// compatibility contract changes.
+class _FixerStudioBackendContractRoute extends WidgetRoute {
+  @override
+  Future<WebWidget> build(Session session, Request request) async {
+    return JsonWidget(object: fixerStudioBackendContract);
+  }
 }
 
 class _DashboardHealthRoute extends WidgetRoute {

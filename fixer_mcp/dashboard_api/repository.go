@@ -16,9 +16,10 @@ import (
 const defaultFixerDBFilename = "fixer.db"
 
 const (
-	fixerSkillMarker     = "Activate skill `$init-fixer` immediately."
-	overseerSkillMarker  = "Activate skill `$init-overseer` immediately."
-	netrunnerSkillMarker = "Activate skill `$run-manual-netrunner` immediately."
+	fixerSkillMarker     = "Activate skill $init-fixer immediately."
+	overseerSkillMarker  = "Activate skill $init-overseer immediately."
+	netrunnerSkillMarker = "Activate skill $hands-netrunner immediately."
+	handsChannelMarker   = "Use its Project Hands Channel Mode for the current project."
 	maxRoleMarkerLines   = 240
 	maxCodexChatSessions = 12
 	maxCodexSessionScan  = 160
@@ -33,6 +34,7 @@ type Repository struct {
 	now                             func() time.Time
 	plannedWaveInitializer          func(context.Context, projectRecord, int) (int, error)
 	plannedWaveInitializerAvailable func(projectRecord) bool
+	workroomEvents                  *projectEventNotifier
 }
 
 func OpenRepository(databasePath string, currentProjectCWD string) (*Repository, error) {
@@ -57,7 +59,7 @@ func OpenRepository(databasePath string, currentProjectCWD string) (*Repository,
 
 	writeDSN := resolvedDBPath
 	if !strings.Contains(writeDSN, "?") {
-		writeDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+		writeDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate"
 	}
 	dbWrite, err := sql.Open("sqlite", writeDSN)
 	if err != nil {
@@ -82,6 +84,7 @@ func OpenRepository(databasePath string, currentProjectCWD string) (*Repository,
 		currentProjectCWD: normalizedCWD,
 		fixerChatLauncher: launchFixerChatProcess,
 		now:               time.Now,
+		workroomEvents:    newProjectEventNotifier(),
 	}
 	repo.plannedWaveInitializer = repo.initializePlannedWaveThroughFixerMCP
 	repo.plannedWaveInitializerAvailable = repo.canInitializePlannedWaveThroughFixerMCP
@@ -153,15 +156,19 @@ func (r *Repository) HomeSnapshot(ctx context.Context) (HomeSnapshotResponse, er
 				Name: project.Name,
 				CWD:  project.CWD,
 			},
-			Counts:               countsByProject[projectID],
-			LatestActivityLabel:  latestLabel,
-			LastActivityAt:       activity.LastActivityAt,
-			ActiveWaveCount:      activity.ActiveWaveCount,
-			LatestSessionID:      latestID,
-			LatestLocalSessionID: latestLocalID,
-			Autonomous:           autonomousByProject[projectID],
-			HasPendingReview:     countsByProject[projectID].Review > 0,
-			HasActiveWorkers:     workerByProject[projectID].RunningCount > 0,
+			Counts:                countsByProject[projectID],
+			LatestActivityLabel:   latestLabel,
+			LastActivityAt:        activity.LastActivityAt,
+			PrimaryActivitySource: activity.PrimarySource,
+			HasFixerActivity:      activity.HasFixer,
+			HasHandsActivity:      activity.HasHands,
+			HasAutonomousActivity: activity.HasAutonomous,
+			ActiveWaveCount:       activity.ActiveWaveCount,
+			LatestSessionID:       latestID,
+			LatestLocalSessionID:  latestLocalID,
+			Autonomous:            autonomousByProject[projectID],
+			HasPendingReview:      countsByProject[projectID].Review > 0,
+			HasActiveWorkers:      workerByProject[projectID].RunningCount > 0,
 		}
 		cards = append(cards, card)
 	}
@@ -300,7 +307,7 @@ func (r *Repository) LaunchFixerChat(ctx context.Context, projectID int, input F
 		input.Backend = "antigravity"
 	}
 	switch input.Backend {
-	case "codex", "antigravity", "claude", "kimi-code", "droid", "junie":
+	case "codex", "commandcode", "antigravity", "claude", "kimi-code", "droid", "junie":
 	default:
 		return FixerChatLaunchResponse{}, fmt.Errorf("unsupported Fixer backend %q", input.Backend)
 	}

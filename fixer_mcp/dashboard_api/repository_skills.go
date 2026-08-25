@@ -19,8 +19,7 @@ var (
 
 	managedSkillNames = map[string]struct{}{
 		"init-fixer": {}, "init-unattached-fixer": {}, "init-overseer": {},
-		"maintain-project-docs": {}, "run-manual-acceptance-netrunner": {},
-		"run-manual-netrunner": {}, "run-netrunner-wave": {},
+		"maintain-project-docs": {}, "hands-netrunner": {}, "run-netrunner-wave": {},
 		"review-netrunner-session": {}, "complete-netrunner-session": {},
 		"inspect-netrunner-transcript": {}, "bridge-overseer-fixer": {},
 		"save-fixer-handoff": {}, "refresh-project-overview": {},
@@ -34,6 +33,7 @@ var (
 		{ID: "factory", RelativePath: ".factory/skills", Label: "Droid"},
 		{ID: "claude", RelativePath: ".claude/skills", Label: "Claude"},
 		{ID: "junie", RelativePath: ".junie/fixer-runtime/skills", Label: "Junie"},
+		{ID: "kimi-code", RelativePath: ".kimi-code/skills", Label: "Kimi Code"},
 	}
 	skillNamePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	skillReferencePattern = regexp.MustCompile("`?\\$([a-z0-9][a-z0-9-]*)`?")

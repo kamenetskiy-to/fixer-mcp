@@ -13,7 +13,8 @@ func TestLoadProjectsOrdersByLatestDurableActivity(t *testing.T) {
 	// activity below stays deterministic regardless of when the test runs.
 	if _, err := repo.dbWrite.Exec(`
 		UPDATE autonomous_run_status SET updated_at = '2026-07-23T07:00:00Z';
-		UPDATE worker_process SET started_at = '2026-07-23T07:00:00Z', updated_at = '2026-07-23T07:00:00Z'
+		UPDATE worker_process SET started_at = '2026-07-23T07:00:00Z', updated_at = '2026-07-23T07:00:00Z';
+		UPDATE fixer_resume_session_alias SET created_at = '2026-07-23T07:00:00Z'
 	`); err != nil {
 		t.Fatalf("normalize fixture activity timestamps: %v", err)
 	}
@@ -70,7 +71,8 @@ func TestLoadProjectActivityCountsOnlyActiveWaves(t *testing.T) {
 	// wave timestamps below stay deterministic regardless of when the test runs.
 	if _, err := repo.dbWrite.Exec(`
 		UPDATE autonomous_run_status SET updated_at = '2026-07-23T07:00:00Z';
-		UPDATE worker_process SET started_at = '2026-07-23T07:00:00Z', updated_at = '2026-07-23T07:00:00Z'
+		UPDATE worker_process SET started_at = '2026-07-23T07:00:00Z', updated_at = '2026-07-23T07:00:00Z';
+		UPDATE fixer_resume_session_alias SET created_at = '2026-07-23T07:00:00Z'
 	`); err != nil {
 		t.Fatalf("normalize fixture activity timestamps: %v", err)
 	}
@@ -106,5 +108,43 @@ func TestLoadProjectActivityCountsOnlyActiveWaves(t *testing.T) {
 	}
 	if activity[1].LastActivityAt != "2026-07-23T13:00:00Z" {
 		t.Fatalf("expected latest wave activity timestamp, got %q", activity[1].LastActivityAt)
+	}
+}
+
+func TestLoadProjectActivityIncludesDurableFixerSources(t *testing.T) {
+	repo := openFixtureRepository(t)
+	defer repo.Close()
+
+	if _, err := repo.dbWrite.Exec(`
+		CREATE TABLE project_handoff (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			content TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE overseer_fixer_message (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			sender_role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		INSERT INTO project_handoff (project_id, content, updated_at)
+		VALUES (2, 'handoff', '2026-07-23T14:00:00Z');
+		INSERT INTO overseer_fixer_message (project_id, sender_role, content, created_at)
+		VALUES (2, 'fixer', 'message', '2026-07-23T15:00:00Z');
+	`); err != nil {
+		t.Fatalf("seed durable fixer activity: %v", err)
+	}
+
+	activity, err := repo.loadProjectActivity(context.Background())
+	if err != nil {
+		t.Fatalf("load project activity: %v", err)
+	}
+	if !activity[2].HasFixer {
+		t.Fatalf("expected durable handoff/message to mark fixer activity, got %+v", activity[2])
+	}
+	if activity[2].LastActivityAt != "2026-07-23T15:00:00Z" {
+		t.Fatalf("expected latest durable fixer timestamp, got %q", activity[2].LastActivityAt)
 	}
 }

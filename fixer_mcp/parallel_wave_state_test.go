@@ -723,6 +723,84 @@ func TestReconcileParallelWaveFailureControlPausesOnlyTheWave(t *testing.T) {
 	}
 }
 
+func TestReconcileCatchesNewFailureAfterArchitectApprovedResume(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() {
+		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+	}()
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task D', 'pending', '[\"docs/c\"]')"); err != nil {
+		t.Fatalf("seed third session: %v", err)
+	}
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{1, 2, 3}})
+	if err != nil {
+		t.Fatalf("create post-resume wave: %v", err)
+	}
+	// Two workers fail while the third stays deferred ("created"), mirroring a
+	// dependency-gated worker that has not been scheduled yet.
+	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET status = ? WHERE id IN (?, ?)", parallelWaveWorkerStatusFailed, created.Workers[0].Id, created.Workers[1].Id); err != nil {
+		t.Fatalf("mark majority failed: %v", err)
+	}
+	if err := refreshParallelWaveAggregateStatus(created.WaveId, 1); err != nil {
+		t.Fatalf("refresh majority failure: %v", err)
+	}
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch paused wave: %v", err)
+	}
+	if wave.ControlState != parallelWaveControlPausedForArchitect {
+		t.Fatalf("expected wave paused before resume: %+v", wave)
+	}
+
+	callResult, resumed, err := SetNetrunnerWaveControlState(context.Background(), nil, SetNetrunnerWaveControlStateInput{
+		WaveId:            created.WaveId,
+		ControlState:      parallelWaveControlActive,
+		ArchitectApproved: true,
+		Reason:            "Architect approved, proceed with deferred worker",
+	})
+	if err != nil || callResult != nil {
+		t.Fatalf("resume architect-paused wave: result=%+v err=%v", callResult, err)
+	}
+	if resumed.Wave.FailurePolicyState != parallelWaveFailurePolicyPassed {
+		t.Fatalf("expected resumed wave to pass: %+v", resumed.Wave)
+	}
+
+	// Reconciling immediately after resume, with nothing new having happened,
+	// must not immediately re-pause on the same already-acknowledged failures.
+	unchanged, err := reconcileParallelWaveFailureControl(resumed.Wave)
+	if err != nil {
+		t.Fatalf("reconcile immediately after resume: %v", err)
+	}
+	if unchanged.ControlState != parallelWaveControlActive {
+		t.Fatalf("resume acknowledgment must not immediately re-pause: %+v", unchanged)
+	}
+
+	// The deferred worker is later scheduled and fails: a genuinely new
+	// failure the Architect never acknowledged. Canonical recovery must still
+	// trigger instead of being silently absorbed by the stale approval.
+	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET status = ? WHERE id = ?", parallelWaveWorkerStatusFailed, created.Workers[2].Id); err != nil {
+		t.Fatalf("fail deferred worker: %v", err)
+	}
+	postFailure, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch post-failure wave: %v", err)
+	}
+	recovered, err := reconcileParallelWaveFailureControl(postFailure)
+	if err != nil {
+		t.Fatalf("reconcile new post-resume failure: %v", err)
+	}
+	if recovered.FailurePolicyState == parallelWaveFailurePolicyPassed {
+		t.Fatalf("new post-resume failure must not be silently swallowed: %+v", recovered)
+	}
+	if recovered.ControlState != parallelWaveControlPausedForArchitect {
+		t.Fatalf("new post-resume majority failure must reach the Architect again: %+v", recovered)
+	}
+}
+
 func TestTransitionNetrunnerWavePhaseRequiresReviewedAcceptanceSession(t *testing.T) {
 	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
 	defer func() {
@@ -1038,5 +1116,179 @@ func TestParallelWaveFollowUpDecisionHonorsBinaryRestartMarker(t *testing.T) {
 	)
 	if allowed || reason != "mcp_binary_restart_required:5" {
 		t.Fatalf("expected binary restart follow-up block, allowed=%t reason=%q", allowed, reason)
+	}
+}
+
+func TestParallelWaveDeclaredWriteScopeContainsPath(t *testing.T) {
+	tests := []struct {
+		name  string
+		scope []string
+		path  string
+		want  bool
+	}{
+		{name: "exact file", scope: []string{"docs/a.md"}, path: "docs/a.md", want: true},
+		{name: "directory prefix", scope: []string{"docs"}, path: "docs/a/nested.md", want: true},
+		{name: "outside prefix", scope: []string{"docs"}, path: "docs2/a.md", want: false},
+		{name: "double star direct child", scope: []string{"deliverables/deploy/**"}, path: "deliverables/deploy/new.txt", want: true},
+		{name: "double star nested child", scope: []string{"deliverables/deploy/**"}, path: "deliverables/deploy/sub/deep/new.txt", want: true},
+		{name: "double star directory itself", scope: []string{"deliverables/deploy/**"}, path: "deliverables/deploy", want: true},
+		{name: "double star outside sibling", scope: []string{"deliverables/deploy/**"}, path: "deliverables/deploy_extra/new.txt", want: false},
+		{name: "broad scope", scope: []string{"."}, path: "anything/at/all.txt", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parallelWaveDeclaredWriteScopeContainsPath(test.scope, test.path); got != test.want {
+				t.Fatalf("parallelWaveDeclaredWriteScopeContainsPath(%v, %q) = %v, want %v", test.scope, test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func TestReleaseParallelWaveWorkerScopeLeases(t *testing.T) {
+	t.Run("disjoint scopes release independently", func(t *testing.T) {
+		originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+		defer func() {
+			db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+		}()
+		repoDir := setupCleanGitRepo(t)
+		testDB := setupParallelWaveTestDB(t, repoDir)
+		defer testDB.Close()
+		db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+		_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{1, 2}})
+		if err != nil {
+			t.Fatalf("create lease wave: %v", err)
+		}
+		wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+		if err != nil {
+			t.Fatalf("fetch lease wave: %v", err)
+		}
+		wave.Workers[0].Status = parallelWaveWorkerStatusCompleted
+		wave.Workers[1].Status = parallelWaveWorkerStatusRunning
+		if err := releaseParallelWaveWorkerScopeLeases(wave, wave.Workers[0]); err != nil {
+			t.Fatalf("release terminal worker leases: %v", err)
+		}
+
+		var released, held int
+		if err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND scope_path = 'docs/a' AND active = 1",
+			created.WaveId,
+		).Scan(&released); err != nil {
+			t.Fatalf("query released lease: %v", err)
+		}
+		if err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND scope_path = 'docs/b' AND active = 1",
+			created.WaveId,
+		).Scan(&held); err != nil {
+			t.Fatalf("query held lease: %v", err)
+		}
+		if released != 0 || held != 1 {
+			t.Fatalf("expected terminal worker lease released and sibling lease held: released=%d held=%d", released, held)
+		}
+	})
+
+	t.Run("shared scope stays held while sibling runs", func(t *testing.T) {
+		originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+		defer func() {
+			db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+		}()
+		repoDir := setupCleanGitRepo(t)
+		testDB := setupParallelWaveTestDB(t, repoDir)
+		defer testDB.Close()
+		db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+		_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{1}})
+		if err != nil {
+			t.Fatalf("create shared lease wave: %v", err)
+		}
+		wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+		if err != nil {
+			t.Fatalf("fetch shared lease wave: %v", err)
+		}
+		sharedScope := []string{"docs/a"}
+		wave.Workers = append(wave.Workers, NetrunnerWaveWorkerSnapshot{
+			Id:                 999,
+			WaveId:             wave.Id,
+			ProjectId:          wave.ProjectId,
+			SessionId:          2,
+			Status:             parallelWaveWorkerStatusRunning,
+			DeclaredWriteScope: sharedScope,
+		})
+		wave.Workers[0].Status = parallelWaveWorkerStatusCompleted
+		wave.Workers[0].DeclaredWriteScope = sharedScope
+		if err := releaseParallelWaveWorkerScopeLeases(wave, wave.Workers[0]); err != nil {
+			t.Fatalf("release shared terminal worker leases: %v", err)
+		}
+		var held int
+		if err := testDB.QueryRow(
+			"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND scope_path = 'docs/a' AND active = 1",
+			created.WaveId,
+		).Scan(&held); err != nil {
+			t.Fatalf("query shared lease: %v", err)
+		}
+		if held != 1 {
+			t.Fatalf("expected shared scope lease to remain held while sibling is running, got %d", held)
+		}
+	})
+}
+
+func TestTransitionNetrunnerWavePhaseReconcilesStaleCompletedWorker(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() {
+		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{1}})
+	if err != nil {
+		t.Fatalf("create stale-reconcile wave: %v", err)
+	}
+	markTestWaveRunningWithWorktrees(t, testDB, repoDir, created)
+	if _, err := testDB.Exec(
+		"UPDATE parallel_wave SET phase = ?, status = ? WHERE id = ?",
+		parallelWavePhaseImplementation,
+		parallelWaveStatusRunning,
+		created.WaveId,
+	); err != nil {
+		t.Fatalf("mark implementation phase: %v", err)
+	}
+	globalSessionID, err := globalSessionIDFromProjectScoped(1, 1)
+	if err != nil {
+		t.Fatalf("map worker session id: %v", err)
+	}
+	// The session is completed but the wave worker is still recorded as
+	// running and its process row is gone, exactly the stranded shape.
+	if _, err := testDB.Exec("UPDATE session SET status = 'completed', report = 'done' WHERE id = ?", globalSessionID); err != nil {
+		t.Fatalf("complete worker session: %v", err)
+	}
+	if _, err := testDB.Exec("DELETE FROM worker_process WHERE parallel_wave_id = ?", created.WaveId); err != nil {
+		t.Fatalf("remove worker process rows: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"INSERT INTO session (project_id, task_description, status, report, declared_write_scope, parallel_wave_id) VALUES (1, 'reviewer', 'completed', 'approved', '[\"fixer_mcp\"]', ?)",
+		parallelWaveReviewMarker(created.WaveId),
+	); err != nil {
+		t.Fatalf("seed completed reviewer: %v", err)
+	}
+
+	callResult, accepted, err := TransitionNetrunnerWavePhase(context.Background(), nil, TransitionNetrunnerWavePhaseInput{
+		WaveId:              created.WaveId,
+		TargetPhase:         parallelWavePhaseAcceptance,
+		AcceptanceSessionId: 2,
+		ReviewApproved:      true,
+	})
+	if err != nil || callResult != nil {
+		t.Fatalf("transition to acceptance should reconcile stale worker: result=%+v err=%v", callResult, err)
+	}
+	if accepted.Wave.Phase != parallelWavePhaseAcceptance || accepted.Wave.AcceptanceSessionId != 2 {
+		t.Fatalf("unexpected reconciled acceptance contract: %+v", accepted.Wave)
+	}
+	worker := testWaveWorkerBySession(t, accepted.Wave, 1)
+	if worker.Status != parallelWaveWorkerStatusCompleted {
+		t.Fatalf("expected stale running worker reconciled to completed, got %q", worker.Status)
 	}
 }

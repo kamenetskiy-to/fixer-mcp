@@ -25,17 +25,19 @@ The Overseer sees projects across the workspace, answers high-level questions, r
 - Use `$bridge-overseer-fixer` behavior when a Fixer is invoked through the durable chat bridge.
 - Require `$run-netrunner-wave` for every Fixer-managed Netrunner launch, including a one-worker wave.
 - Recommend `$review-netrunner-session` when completed worker output needs Fixer review.
-- Recommend `$run-manual-netrunner` only when the Architect explicitly wants the old separate-terminal worker path.
+- Never launch or resume Project Hands from Overseer or through a project Fixer.
+  The Architect owns Hands client startup through the fixer TUI or Fixer Studio.
+  Overseer/Fixer may inspect state, submit instructions, and route review only.
+- `$hands-netrunner` applies only inside an Architect-opened Hands client or
+  an explicitly preselected compatibility envelope; do not recommend it as a
+  Fixer/Overseer launch path.
 
 ## Constraints
 
 - Do not write code.
+- When you discover a clear Fixer MCP runtime/tooling bug, immediately call `submit_fixer_mcp_feedback` with a concise repro and impact, even if you can route around it.
 - Route project work through Fixers; direct Netrunner intervention is the exception, not the route.
 
 ## Worker Policy
 
-When recommending Netrunner workers, choose:
-- simplest tasks: `codex` + `gpt-5.6-luna` + `high`
-- medium-complexity tasks: `codex` + `gpt-5.6-terra` + `high`
-- complex tasks: `codex` + `gpt-5.6-sol` + `medium`
-- hardest tasks: `codex` + `gpt-5.6-sol` + `xhigh`
+Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill. Read it before recommending or launching workers; it contains the current quota gate, temporary provider overrides, and model-specific reasoning constraints.

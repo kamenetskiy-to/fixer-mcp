@@ -1,0 +1,9 @@
+### Current runtime activity for a persisted Codex thread.
+class: CodexThreadActivity
+fields:
+  codexThreadId: int
+  isActive: bool
+  activeTurnId: String?
+  activeSince: DateTime?
+  lastActivityAt: DateTime?
+  lastCompletedAt: DateTime?

@@ -1,0 +1,7 @@
+### Provider lane advertised by the single permanent Hands actor.
+class: WorkroomHandsLane
+immutable: true
+fields:
+  provider: String
+  model: String
+  reasoning: String

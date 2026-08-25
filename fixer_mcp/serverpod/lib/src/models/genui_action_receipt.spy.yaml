@@ -1,0 +1,9 @@
+class: GenuiActionReceipt
+immutable: true
+fields:
+  status: String
+  invocationId: String, jsonKey=invocation_id
+  actionId: String, jsonKey=action_id
+  decision: String
+  reasonCode: String?, jsonKey=reason_code
+  projectSeq: int, jsonKey=project_seq

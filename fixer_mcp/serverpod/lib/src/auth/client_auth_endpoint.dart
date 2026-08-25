@@ -32,11 +32,28 @@ class ClientAuthEndpoint extends Endpoint {
     required String password,
   }) async {
     try {
-      return await _authService.login(session, email: email, password: password);
-    } on ClientAuthException {
+      return await _authService.login(
+        session,
+        email: email,
+        password: password,
+      );
+    } on ClientAuthException catch (error) {
+      // Only an unknown email may take the convenience auto-registration
+      // path. Invalid credentials for an existing account must not fall
+      // through to register(), which would surface a duplicate-email 500.
+      if (!error.allowAutoRegister) {
+        throw NotAuthorizedException(
+          reason: AuthenticationFailureReason.unauthenticated,
+          message: error.message,
+        );
+      }
       final name = email.split('@').first;
-      final displayName = name.isNotEmpty ? name[0].toUpperCase() + name.substring(1) : 'User';
-      final safePassword = password.length >= 8 ? password : '${password}12345678';
+      final displayName = name.isNotEmpty
+          ? name[0].toUpperCase() + name.substring(1)
+          : 'User';
+      final safePassword = password.length >= 8
+          ? password
+          : '${password}12345678';
       return await _authService.register(
         session,
         email: email,

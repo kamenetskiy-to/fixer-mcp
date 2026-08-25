@@ -1,0 +1,5 @@
+class: ProjectUiEventBatchFrame
+extends: ProjectUiFrame
+immutable: true
+fields:
+  events: List<ProjectUiEvent>

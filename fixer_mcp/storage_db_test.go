@@ -65,6 +65,10 @@ func TestInitDBProjectActivityOverviewSchemaIdempotent(t *testing.T) {
 		"repair_attempt_count",
 		"handoff_sha",
 		"acceptance_session_id",
+		"review_policy",
+		"review_backend",
+		"review_model",
+		"review_reasoning",
 	} {
 		var columnCount int
 		if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('parallel_wave') WHERE name = ?", columnName).Scan(&columnCount); err != nil {
@@ -245,6 +249,151 @@ func TestInitDBProjectActivityOverviewSchemaIdempotent(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("expected %s after repeated initDB, got %d", indexName, count)
 		}
+	}
+}
+
+func TestInitDBProvisionsProjectWorkroomSchemaIdempotently(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	t.Setenv(fixerDBPathEnv, filepath.Join(t.TempDir(), "workroom-schema.db"))
+
+	initDB()
+	if _, err := db.Exec(`INSERT INTO project (name, cwd, active) VALUES ('Workroom', '/tmp/workroom-schema-project', 1)`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if err := initProjectWorkroomSchema(); err != nil {
+		t.Fatalf("repeat workroom schema migration: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	for _, tableName := range []string{
+		"project_ui_cursor", "project_ui_event", "command_dedup", "fixer_thread", "fixer_turn",
+		"genui_surface_instance", "genui_surface_revision", "genui_demand_example", "genui_surface_feedback", "genui_action_invocation",
+		"project_hands", "hands_instruction", "hands_instruction_event", "hands_generation",
+		"project_write_fence", "project_write_lease", "workroom_audit_event",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&count); err != nil {
+			t.Fatalf("inspect %s: %v", tableName, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one %s table, got %d", tableName, count)
+		}
+	}
+	for _, columnName := range []string{"session_kind", "created_at", "updated_at"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('session') WHERE name = ?`, columnName).Scan(&count); err != nil {
+			t.Fatalf("inspect session.%s: %v", columnName, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected session.%s once, got %d", columnName, count)
+		}
+	}
+	var identityCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM project_hands`).Scan(&identityCount); err != nil {
+		t.Fatalf("count Hands identities: %v", err)
+	}
+	if identityCount != 2 {
+		t.Fatalf("expected one identity per project: identities=%d", identityCount)
+	}
+	var laneTableCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hands_provider_lane'`).Scan(&laneTableCount); err != nil {
+		t.Fatalf("inspect removed Hands lane table: %v", err)
+	}
+	if laneTableCount != 0 {
+		t.Fatal("legacy Hands lane table still exists")
+	}
+	result, err := db.Exec(`INSERT INTO project (name, cwd, active) VALUES ('Disposable', '/tmp/workroom-schema-disposable', 0)`)
+	if err != nil {
+		t.Fatalf("seed disposable project: %v", err)
+	}
+	disposableID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("resolve disposable project: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM project WHERE id = ?`, disposableID); err != nil {
+		t.Fatalf("permanent Hands projection must preserve project deletion: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM project_hands WHERE project_id = ?`, disposableID).Scan(&identityCount); err != nil {
+		t.Fatalf("inspect cascaded Hands identity: %v", err)
+	}
+	if identityCount != 0 {
+		t.Fatalf("deleted project retained %d Hands identities", identityCount)
+	}
+}
+
+func TestInitDBPreservesUnknownLegacySessionTimestampsAndStampsNewRows(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	dbPath := filepath.Join(t.TempDir(), "legacy-session-timestamps.db")
+	t.Setenv(fixerDBPathEnv, dbPath)
+
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE project (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			cwd TEXT UNIQUE NOT NULL,
+			active INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE session (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER,
+			task_description TEXT NOT NULL,
+			status TEXT NOT NULL,
+			report TEXT,
+			cli_backend TEXT NOT NULL DEFAULT 'codex',
+			cli_model TEXT NOT NULL DEFAULT '',
+			cli_reasoning TEXT NOT NULL DEFAULT '',
+			declared_write_scope TEXT NOT NULL DEFAULT '["."]',
+			parallel_wave_id TEXT NOT NULL DEFAULT '',
+			epic_doc_id INTEGER,
+			repair_source_session_id INTEGER,
+			rework_count INTEGER NOT NULL DEFAULT 0,
+			forced_stop_count INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO project (id, name, cwd, active) VALUES (1, 'Legacy', '/tmp/legacy-session-timestamps', 1);
+		INSERT INTO session (id, project_id, task_description, status) VALUES (1, 1, 'Historical session', 'completed');
+	`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("seed legacy database: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	initDB()
+	if err := db.Close(); err != nil {
+		t.Fatalf("close first migrated database: %v", err)
+	}
+	initDB()
+	defer func() { _ = db.Close() }()
+
+	var legacyCreatedAt, legacyUpdatedAt sql.NullString
+	if err := db.QueryRow(`SELECT created_at, updated_at FROM session WHERE id = 1`).Scan(&legacyCreatedAt, &legacyUpdatedAt); err != nil {
+		t.Fatalf("read legacy timestamps: %v", err)
+	}
+	if legacyCreatedAt.Valid || legacyUpdatedAt.Valid {
+		t.Fatalf("migration invented legacy timestamps: created=%+v updated=%+v", legacyCreatedAt, legacyUpdatedAt)
+	}
+
+	result, err := db.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'New session', 'pending')`)
+	if err != nil {
+		t.Fatalf("insert new session: %v", err)
+	}
+	newSessionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("resolve new session id: %v", err)
+	}
+	var newCreatedAt, newUpdatedAt sql.NullString
+	if err := db.QueryRow(`SELECT created_at, updated_at FROM session WHERE id = ?`, newSessionID).Scan(&newCreatedAt, &newUpdatedAt); err != nil {
+		t.Fatalf("read new timestamps: %v", err)
+	}
+	if !newCreatedAt.Valid || newCreatedAt.String == "" || !newUpdatedAt.Valid || newUpdatedAt.String == "" {
+		t.Fatalf("new session was not timestamped: created=%+v updated=%+v", newCreatedAt, newUpdatedAt)
 	}
 }
 

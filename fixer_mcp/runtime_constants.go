@@ -21,13 +21,16 @@ const (
 	defaultWriteScopePath       = "."
 	defaultCliBackend           = "codex"
 	defaultCliModel             = "gpt-5.6-luna"
-	defaultCliReasoning         = "xhigh"
+	defaultCliReasoning         = "high"
+	defaultCommandCodeCliModel  = "commandcode/deepseek/deepseek-v4-flash"
 	defaultDroidCliModel        = "kimi-k2.6"
 	defaultDroidCliReasoning    = "high"
 	defaultAntigravityReasoning = "default"
-	defaultKimiCodeCliModel     = "kimi-k2.7-code"
+	defaultKimiCodeCliModel     = "kimi-k3-256k"
 	defaultKimiCodeReasoning    = "default"
 	defaultJunieCliReasoning    = "default"
+	defaultGrokCliModel         = "grok-4.6"
+	defaultGrokCliReasoning     = "default"
 	reworkRepairThreshold       = 2
 	workerStatusRunning         = "running"
 	workerStatusStopped         = "stopped"
@@ -35,17 +38,20 @@ const (
 )
 
 var supportedCliBackends = map[string]struct{}{
-	"antigravity":      {},
-	"claude":           {},
-	"codex":            {},
-	"droid":            {},
-	"junie":            {},
-	"kimi-code":        {},
-	"kimi-code-native": {},
+	"antigravity": {},
+	"claude":      {},
+	"codex":       {},
+	"commandcode": {},
+	"droid":       {},
+	"grok":        {},
+	"junie":       {},
+	"kimi-code":   {},
 }
 
 var cliBackendAliases = map[string]string{
-	"agy": "antigravity",
+	"agy":  "antigravity",
+	"cmd":  "commandcode",
+	"cmdc": "commandcode",
 }
 
 var droidLegacyModelAliases = map[string]string{
@@ -70,6 +76,32 @@ var supportedDroidCliModels = map[string]struct{}{
 }
 
 var supportedKimiCodeCliModels = map[string]struct{}{
-	defaultKimiCodeCliModel: {},
-	"kimi-k3":               {},
+	"kimi-k2.7-code":           {},
+	"kimi-k2.7-code-highspeed": {},
+	"kimi-k3":                  {},
+	defaultKimiCodeCliModel:    {},
+}
+
+var supportedGrokCliModels = map[string]struct{}{
+	defaultGrokCliModel: {},
+	"grok-4.5":          {},
+}
+
+func handsProviderConfig(provider string) (model string, reasoning string, ok bool) {
+	switch provider {
+	case "codex":
+		return "gpt-5.6-luna", "high", true
+	case "commandcode":
+		return defaultCommandCodeCliModel, "high", true
+	case "claude":
+		return "sonnet", "high", true
+	case "kimi-code":
+		return "kimi-k3-256k", "default", true
+	case "antigravity":
+		return "Gemini 3.7 Flash", "medium", true
+	case "grok":
+		return defaultGrokCliModel, defaultGrokCliReasoning, true
+	default:
+		return "", "", false
+	}
 }

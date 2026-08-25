@@ -79,6 +79,35 @@ func (r *Repository) FixerThreads(ctx context.Context, projectID int) (FixerThre
 	}, nil
 }
 
+func (r *Repository) HandsThreads(ctx context.Context, projectID int) (FixerThreadsResponse, error) {
+	project, err := r.requireProject(ctx, projectID)
+	if err != nil {
+		return FixerThreadsResponse{}, err
+	}
+
+	codexSessions, _ := loadCodexChatSessionsLimit(project.CWD, "", map[string]string{}, maxCodexSessionScan)
+	threads := make([]FixerThreadSummary, 0, len(codexSessions)+12)
+	for _, session := range codexSessions {
+		// Only real Hands channel threads must be shown in Hands threads selector.
+		if session.AgentRole != "hands" {
+			continue
+		}
+		thread := fixerThreadFromChatSession(session, project.CWD)
+		thread.AgentRole = "hands"
+		thread.Headline = fallbackHeadline("hands", thread.ExternalID)
+		threads = append(threads, thread)
+	}
+	threads = append(threads, loadHistoricalProviderThreads(userHomeDir(), project.CWD, "hands")...)
+	threads = dedupeAndSortFixerThreads(threads)
+
+	return FixerThreadsResponse{
+		ProjectID: project.ID, ProjectName: project.Name, CWD: project.CWD,
+		Supported: len(threads) > 0,
+		Providers: append([]string(nil), supportedFixerThreadProviders...),
+		Threads:   threads,
+	}, nil
+}
+
 func fixerThreadFromChatSession(session codexChatSession, cwd string) FixerThreadSummary {
 	return FixerThreadSummary{
 		ExternalID:     session.SessionID,
@@ -122,21 +151,25 @@ func loadNonCodexFixerChatSessions(homeDir string, projectCWD string) []codexCha
 }
 
 func loadHistoricalProviderFixerThreads(homeDir string, projectCWD string) []FixerThreadSummary {
+	return loadHistoricalProviderThreads(homeDir, projectCWD, "fixer")
+}
+
+func loadHistoricalProviderThreads(homeDir string, projectCWD string, role string) []FixerThreadSummary {
 	threads := []FixerThreadSummary{}
 	projectSlug := providerProjectStoreSlug(projectCWD)
-	threads = append(threads, loadFlatJSONLFixerThreads(
+	threads = append(threads, loadFlatJSONLThreads(
 		"claude",
 		filepath.Join(homeDir, ".claude", "projects", projectSlug),
-		projectCWD,
+		projectCWD, role,
 	)...)
-	threads = append(threads, loadFlatJSONLFixerThreads(
+	threads = append(threads, loadFlatJSONLThreads(
 		"droid",
 		filepath.Join(homeDir, ".factory", "sessions", projectSlug),
-		projectCWD,
+		projectCWD, role,
 	)...)
-	threads = append(threads, loadKimiFixerThreads(homeDir, projectCWD)...)
-	threads = append(threads, loadJunieFixerThreads(homeDir, projectCWD)...)
-	threads = append(threads, loadAntigravityFixerThreads(homeDir, projectCWD)...)
+	threads = append(threads, loadKimiThreads(homeDir, projectCWD, role)...)
+	threads = append(threads, loadJunieThreads(homeDir, projectCWD, role)...)
+	threads = append(threads, loadAntigravityThreads(homeDir, projectCWD, role)...)
 	return dedupeAndSortFixerThreads(threads)
 }
 
@@ -147,10 +180,14 @@ func providerProjectStoreSlug(cwd string) string {
 }
 
 func loadFlatJSONLFixerThreads(backend string, directory string, projectCWD string) []FixerThreadSummary {
+	return loadFlatJSONLThreads(backend, directory, projectCWD, "fixer")
+}
+
+func loadFlatJSONLThreads(backend string, directory string, projectCWD string, role string) []FixerThreadSummary {
 	paths, _ := filepath.Glob(filepath.Join(directory, "*.jsonl"))
 	threads := make([]FixerThreadSummary, 0, len(paths))
 	for _, path := range paths {
-		thread, ok := inspectProviderJSONL(path, backend, projectCWD, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		thread, ok := inspectProviderJSONL(path, backend, projectCWD, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), role)
 		if ok {
 			threads = append(threads, thread)
 		}
@@ -158,7 +195,7 @@ func loadFlatJSONLFixerThreads(backend string, directory string, projectCWD stri
 	return threads
 }
 
-func inspectProviderJSONL(path string, backend string, projectCWD string, fallbackID string) (FixerThreadSummary, bool) {
+func inspectProviderJSONL(path string, backend string, projectCWD string, fallbackID string, role string) (FixerThreadSummary, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return FixerThreadSummary{}, false
@@ -167,9 +204,9 @@ func inspectProviderJSONL(path string, backend string, projectCWD string, fallba
 
 	thread := FixerThreadSummary{
 		ExternalID:     fallbackID,
-		Headline:       fallbackHeadline("fixer", fallbackID),
+		Headline:       fallbackHeadline(role, fallbackID),
 		Status:         "history",
-		AgentRole:      "fixer",
+		AgentRole:      role,
 		Backend:        backend,
 		CWD:            filepath.Clean(projectCWD),
 		BindingSource:  backend + "_session_log",
@@ -178,35 +215,45 @@ func inspectProviderJSONL(path string, backend string, projectCWD string, fallba
 	}
 	info, _ := file.Stat()
 	if info != nil {
-		thread.StartedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
-		thread.LastActivityAt = thread.StartedAt
+		thread.LastActivityAt = info.ModTime().UTC().Format(time.RFC3339Nano)
 	}
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	roleLines := map[string]int{}
 	lineIndex := 0
+	lastActivityFromRecord := false
 	for scanner.Scan() {
 		raw := append([]byte(nil), scanner.Bytes()...)
 		if lineIndex < maxRoleMarkerLines {
 			collectProviderRoleMarkers(string(raw), lineIndex, roleLines)
 		}
-		if lineIndex < 500 {
-			var record map[string]any
-			if json.Unmarshal(raw, &record) == nil {
+		var record map[string]any
+		if json.Unmarshal(raw, &record) == nil {
+			if value := directString(record, "updatedAt", "lastUpdated", "timestamp"); value != "" {
+				thread.LastActivityAt = value
+				lastActivityFromRecord = true
+			}
+			if lineIndex < 500 {
 				populateThreadFromRecord(&thread, record, projectCWD)
 			}
 		}
 		lineIndex++
 	}
-	if classifyProviderRole(roleLines) != "fixer" {
+	if classifyProviderRole(roleLines) != role {
 		return FixerThreadSummary{}, false
+	}
+	if !lastActivityFromRecord && info != nil {
+		thread.LastActivityAt = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+	if thread.StartedAt == "" && info != nil {
+		thread.StartedAt = info.ModTime().UTC().Format(time.RFC3339Nano)
 	}
 	if strings.TrimSpace(thread.ExternalID) == "" {
 		thread.ExternalID = fallbackID
 	}
 	if thread.Headline == "" || strings.Contains(thread.Headline, fallbackID) {
-		thread.Headline = fallbackHeadline("fixer", thread.ExternalID)
+		thread.Headline = fallbackHeadline(role, thread.ExternalID)
 	}
 	return thread, true
 }
@@ -284,9 +331,37 @@ func recursiveString(value any, keys ...string) string {
 
 func collectProviderRoleMarkers(text string, line int, firstLines map[string]int) {
 	markers := map[string][]string{
-		"fixer":     {fixerSkillMarker, "`init-fixer`", "/init-fixer", "`start-fixer`", "/start-fixer"},
-		"overseer":  {overseerSkillMarker, "`init-overseer`", "/init-overseer", "`start-overseer`", "/start-overseer"},
-		"netrunner": {netrunnerSkillMarker, "`run-manual-netrunner`", "/run-manual-netrunner", "`start-netrunner`", "/start-netrunner"},
+		"hands": {
+			handsChannelMarker,
+			"Project Hands Channel Mode",
+			"disposable client of the one permanent project actor `Руки`",
+			"disposable client of the one permanent project actor 'Руки'",
+		},
+		"fixer": {
+			fixerSkillMarker,
+			"`$init-fixer`",
+			"$init-fixer",
+			"`init-fixer`",
+			"/init-fixer",
+			"`start-fixer`",
+			"/start-fixer",
+		},
+		"overseer": {
+			overseerSkillMarker,
+			"`$init-overseer`",
+			"$init-overseer",
+			"`init-overseer`",
+			"/init-overseer",
+			"`start-overseer`",
+			"/start-overseer",
+		},
+		"netrunner": {
+			netrunnerSkillMarker,
+			"`start-netrunner`",
+			"/start-netrunner",
+			"Netrunner execution-envelope mode",
+			"compatibility session `",
+		},
 	}
 	for role, variants := range markers {
 		if _, exists := firstLines[role]; exists {
@@ -302,6 +377,9 @@ func collectProviderRoleMarkers(text string, line int, firstLines map[string]int
 }
 
 func classifyProviderRole(firstLines map[string]int) string {
+	if _, ok := firstLines["hands"]; ok {
+		return "hands"
+	}
 	selected := ""
 	selectedLine := maxRoleMarkerLines + 1
 	for _, role := range []string{"fixer", "overseer", "netrunner"} {
@@ -314,6 +392,10 @@ func classifyProviderRole(firstLines map[string]int) string {
 }
 
 func loadKimiFixerThreads(homeDir string, projectCWD string) []FixerThreadSummary {
+	return loadKimiThreads(homeDir, projectCWD, "fixer")
+}
+
+func loadKimiThreads(homeDir string, projectCWD string, role string) []FixerThreadSummary {
 	hash := md5.Sum([]byte(filepath.Clean(projectCWD)))
 	projectRoot := filepath.Join(homeDir, ".kimi", "sessions", hex.EncodeToString(hash[:]))
 	sessionDirs, _ := filepath.Glob(filepath.Join(projectRoot, "*"))
@@ -326,7 +408,7 @@ func loadKimiFixerThreads(homeDir string, projectCWD string) []FixerThreadSummar
 		paths, _ := filepath.Glob(filepath.Join(sessionDir, "context*.jsonl"))
 		paths = append(paths, filepath.Join(sessionDir, "wire.jsonl"))
 		for _, path := range paths {
-			thread, ok := inspectProviderJSONL(path, "kimi-code", projectCWD, filepath.Base(sessionDir))
+			thread, ok := inspectProviderJSONL(path, "kimi-code", projectCWD, filepath.Base(sessionDir), role)
 			if ok {
 				thread.ExternalID = filepath.Base(sessionDir)
 				threads = append(threads, thread)
@@ -338,6 +420,10 @@ func loadKimiFixerThreads(homeDir string, projectCWD string) []FixerThreadSummar
 }
 
 func loadJunieFixerThreads(homeDir string, projectCWD string) []FixerThreadSummary {
+	return loadJunieThreads(homeDir, projectCWD, "fixer")
+}
+
+func loadJunieThreads(homeDir string, projectCWD string, role string) []FixerThreadSummary {
 	indexPath := filepath.Join(homeDir, ".junie", "sessions", "index.jsonl")
 	file, err := os.Open(indexPath)
 	if err != nil {
@@ -362,14 +448,14 @@ func loadJunieFixerThreads(homeDir string, projectCWD string) []FixerThreadSumma
 			markerPath = filepath.Join(sessionDir, "events.jsonl")
 		}
 		raw, err := os.ReadFile(markerPath)
-		if err != nil || roleFromRawProviderContent(raw) != "fixer" {
+		if err != nil || roleFromRawProviderContent(raw) != role {
 			continue
 		}
 		thread := FixerThreadSummary{
 			ExternalID:     sessionID,
-			Headline:       firstLineOrFallback(directString(record, "taskName", "title"), fallbackHeadline("fixer", sessionID)),
+			Headline:       firstLineOrFallback(directString(record, "taskName", "title"), fallbackHeadline(role, sessionID)),
 			Status:         "history",
-			AgentRole:      "fixer",
+			AgentRole:      role,
 			Backend:        "junie",
 			Model:          recursiveString(record, "model", "modelName"),
 			Reasoning:      recursiveString(record, "reasoning", "effort"),
@@ -386,6 +472,10 @@ func loadJunieFixerThreads(homeDir string, projectCWD string) []FixerThreadSumma
 }
 
 func loadAntigravityFixerThreads(homeDir string, projectCWD string) []FixerThreadSummary {
+	return loadAntigravityThreads(homeDir, projectCWD, "fixer")
+}
+
+func loadAntigravityThreads(homeDir string, projectCWD string, role string) []FixerThreadSummary {
 	root := filepath.Join(homeDir, ".gemini", "antigravity-cli")
 	historyPath := filepath.Join(root, "history.jsonl")
 	file, err := os.Open(historyPath)
@@ -408,36 +498,61 @@ func loadAntigravityFixerThreads(homeDir string, projectCWD string) []FixerThrea
 		}
 		seen[conversationID] = true
 		conversationPath := ""
-		for _, ext := range []string{".db", ".pb"} {
-			candidate := filepath.Join(root, "conversations", conversationID+ext)
-			if _, err := os.Stat(candidate); err == nil {
-				conversationPath = candidate
-				break
+		transcriptCandidate := filepath.Join(root, "brain", conversationID, ".system_generated", "logs", "transcript.jsonl")
+		if _, err := os.Stat(transcriptCandidate); err == nil {
+			conversationPath = transcriptCandidate
+		} else {
+			for _, ext := range []string{".db", ".pb"} {
+				candidate := filepath.Join(root, "conversations", conversationID+ext)
+				if _, err := os.Stat(candidate); err == nil {
+					conversationPath = candidate
+					break
+				}
 			}
 		}
 		if conversationPath == "" {
 			continue
 		}
 		raw, err := os.ReadFile(conversationPath)
-		if err != nil || roleFromRawProviderContent(raw) != "fixer" {
+		if err != nil || roleFromRawProviderContent(raw) != role {
 			continue
 		}
-		updated := directString(record, "updatedAt", "timestamp")
+		updated := directString(record, "updatedAt")
 		if updated == "" {
-			if info, err := os.Stat(conversationPath); err == nil {
+			if num, ok := record["timestamp"].(float64); ok && num > 0 {
+				updated = time.UnixMilli(int64(num)).UTC().Format(time.RFC3339Nano)
+			} else if str := directString(record, "timestamp"); str != "" {
+				updated = str
+			} else if info, err := os.Stat(conversationPath); err == nil {
 				updated = info.ModTime().UTC().Format(time.RFC3339Nano)
 			}
 		}
+		started := directString(record, "createdAt")
+		if started == "" {
+			if num, ok := record["timestamp"].(float64); ok && num > 0 {
+				started = time.UnixMilli(int64(num)).UTC().Format(time.RFC3339Nano)
+			} else {
+				started = directString(record, "timestamp")
+			}
+		}
+		model := recursiveString(record, "model", "modelName")
+		if model == "" {
+			model = "Gemini 3.7 Flash"
+		}
+		reasoning := recursiveString(record, "reasoning", "effort")
+		if reasoning == "" {
+			reasoning = "medium"
+		}
 		threads = append(threads, FixerThreadSummary{
 			ExternalID:     conversationID,
-			Headline:       firstLineOrFallback(directString(record, "display", "title"), fallbackHeadline("fixer", conversationID)),
+			Headline:       firstLineOrFallback(directString(record, "display", "title"), fallbackHeadline(role, conversationID)),
 			Status:         "history",
-			AgentRole:      "fixer",
+			AgentRole:      role,
 			Backend:        "antigravity",
-			Model:          recursiveString(record, "model", "modelName"),
-			Reasoning:      recursiveString(record, "reasoning", "effort"),
+			Model:          model,
+			Reasoning:      reasoning,
 			CWD:            filepath.Clean(projectCWD),
-			StartedAt:      directString(record, "createdAt", "timestamp"),
+			StartedAt:      started,
 			LastActivityAt: updated,
 			BindingSource:  "antigravity_conversation_store",
 			SessionLogPath: conversationPath,

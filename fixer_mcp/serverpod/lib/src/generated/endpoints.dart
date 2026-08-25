@@ -17,8 +17,14 @@ import '../endpoints/dashboard_runtime_endpoint.dart' as _i4;
 import '../orders/client_order_endpoint.dart' as _i5;
 import '../orders/order_delivery_endpoint.dart' as _i6;
 import '../orders/order_endpoint.dart' as _i7;
-import 'package:serverpod_auth_core_server/serverpod_auth_core_server.dart'
+import 'package:fixer_dashboard_server/src/generated/genui_action_request.dart'
     as _i8;
+import 'package:fixer_dashboard_server/src/generated/hands_instruction_request.dart'
+    as _i9;
+import 'package:serverpod_auth_core_server/serverpod_auth_core_server.dart'
+    as _i10;
+import 'package:fixer_dashboard_server/src/generated/future_calls.dart' as _i11;
+export 'future_calls.dart' show ServerpodFutureCallsGetter;
 
 class Endpoints extends _i1.EndpointDispatch {
   @override
@@ -122,6 +128,209 @@ class Endpoints extends _i1.EndpointDispatch {
               (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
                   .topology(session),
         ),
+        'getProjectWorkroomSnapshot': _i1.MethodConnector(
+          name: 'getProjectWorkroomSnapshot',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .getProjectWorkroomSnapshot(session, params['projectId']),
+        ),
+        'sendFixerTurn': _i1.MethodConnector(
+          name: 'sendFixerTurn',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'threadId': _i1.ParameterDescription(
+              name: 'threadId',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'content': _i1.ParameterDescription(
+              name: 'content',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'idempotencyKey': _i1.ParameterDescription(
+              name: 'idempotencyKey',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .sendFixerTurn(
+                    session,
+                    params['projectId'],
+                    params['threadId'],
+                    params['content'],
+                    params['idempotencyKey'],
+                  ),
+        ),
+        'requestGenuiSurface': _i1.MethodConnector(
+          name: 'requestGenuiSurface',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'threadId': _i1.ParameterDescription(
+              name: 'threadId',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'surfaceType': _i1.ParameterDescription(
+              name: 'surfaceType',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'surfaceVersion': _i1.ParameterDescription(
+              name: 'surfaceVersion',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'argumentsJson': _i1.ParameterDescription(
+              name: 'argumentsJson',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'idempotencyKey': _i1.ParameterDescription(
+              name: 'idempotencyKey',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .requestGenuiSurface(
+                    session,
+                    params['projectId'],
+                    params['threadId'],
+                    params['surfaceType'],
+                    params['surfaceVersion'],
+                    params['argumentsJson'],
+                    params['idempotencyKey'],
+                  ),
+        ),
+        'waitProjectUiEventsJson': _i1.MethodConnector(
+          name: 'waitProjectUiEventsJson',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'afterSeq': _i1.ParameterDescription(
+              name: 'afterSeq',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'protocolVersion': _i1.ParameterDescription(
+              name: 'protocolVersion',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .waitProjectUiEventsJson(
+                    session,
+                    params['projectId'],
+                    params['afterSeq'],
+                    params['protocolVersion'],
+                  ),
+        ),
+        'invokeGenuiAction': _i1.MethodConnector(
+          name: 'invokeGenuiAction',
+          params: {
+            'request': _i1.ParameterDescription(
+              name: 'request',
+              type: _i1.getType<_i8.GenuiActionRequest>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .invokeGenuiAction(session, params['request']),
+        ),
+        'submitHandsInstruction': _i1.MethodConnector(
+          name: 'submitHandsInstruction',
+          params: {
+            'request': _i1.ParameterDescription(
+              name: 'request',
+              type: _i1.getType<_i9.HandsInstructionRequest>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .submitHandsInstruction(session, params['request']),
+        ),
+        'selectHandsLane': _i1.MethodConnector(
+          name: 'selectHandsLane',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'provider': _i1.ParameterDescription(
+              name: 'provider',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'idempotencyKey': _i1.ParameterDescription(
+              name: 'idempotencyKey',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .selectHandsLane(
+                    session,
+                    params['projectId'],
+                    params['provider'],
+                    params['idempotencyKey'],
+                  ),
+        ),
+        'cancelHandsInstruction': _i1.MethodConnector(
+          name: 'cancelHandsInstruction',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'instructionId': _i1.ParameterDescription(
+              name: 'instructionId',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'idempotencyKey': _i1.ParameterDescription(
+              name: 'idempotencyKey',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+          },
+          call: (_i1.Session session, Map<String, dynamic> params) async =>
+              (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
+                  .cancelHandsInstruction(
+                    session,
+                    params['projectId'],
+                    params['instructionId'],
+                    params['idempotencyKey'],
+                  ),
+        ),
         'homeSnapshot': _i1.MethodConnector(
           name: 'homeSnapshot',
           params: {},
@@ -207,6 +416,16 @@ class Endpoints extends _i1.EndpointDispatch {
               type: _i1.getType<String>(),
               nullable: false,
             ),
+            'model': _i1.ParameterDescription(
+              name: 'model',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
+            'reasoning': _i1.ParameterDescription(
+              name: 'reasoning',
+              type: _i1.getType<String>(),
+              nullable: false,
+            ),
           },
           call: (_i1.Session session, Map<String, dynamic> params) async =>
               (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
@@ -214,6 +433,8 @@ class Endpoints extends _i1.EndpointDispatch {
                     session,
                     params['threadId'],
                     params['prompt'],
+                    params['model'],
+                    params['reasoning'],
                   ),
         ),
         'threadTurnStatus': _i1.MethodConnector(
@@ -228,6 +449,42 @@ class Endpoints extends _i1.EndpointDispatch {
           call: (_i1.Session session, Map<String, dynamic> params) async =>
               (endpoints['dashboardRuntime'] as _i4.DashboardRuntimeEndpoint)
                   .threadTurnStatus(session, params['streamId']),
+        ),
+        'watchProjectUi': _i1.MethodStreamConnector(
+          name: 'watchProjectUi',
+          params: {
+            'projectId': _i1.ParameterDescription(
+              name: 'projectId',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'afterSeq': _i1.ParameterDescription(
+              name: 'afterSeq',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+            'protocolVersion': _i1.ParameterDescription(
+              name: 'protocolVersion',
+              type: _i1.getType<int>(),
+              nullable: false,
+            ),
+          },
+          streamParams: {},
+          returnType: _i1.MethodStreamReturnType.streamType,
+          call:
+              (
+                _i1.Session session,
+                Map<String, dynamic> params,
+                Map<String, Stream> streamParams,
+              ) =>
+                  (endpoints['dashboardRuntime']
+                          as _i4.DashboardRuntimeEndpoint)
+                      .watchProjectUi(
+                        session,
+                        params['projectId'],
+                        params['afterSeq'],
+                        params['protocolVersion'],
+                      ),
         ),
       },
     );
@@ -561,7 +818,12 @@ class Endpoints extends _i1.EndpointDispatch {
         ),
       },
     );
-    modules['serverpod_auth_core'] = _i8.Endpoints()
+    modules['serverpod_auth_core'] = _i10.Endpoints()
       ..initializeEndpoints(server);
+  }
+
+  @override
+  _i1.FutureCallDispatch? get futureCalls {
+    return _i11.FutureCalls();
   }
 }

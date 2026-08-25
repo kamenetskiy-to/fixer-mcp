@@ -8,14 +8,10 @@ import 'architect_cockpit.dart';
 import 'app_localizations.dart';
 import 'dashboard_models.dart';
 import 'dashboard_repository.dart';
-import 'hub/backlog/backlog_panel.dart';
 import 'hub/backlog/backlog_repository.dart';
-import 'hub/docs/documents_explorer.dart';
-import 'hub/fixer_chat/fixer_chat_panel.dart';
 import 'hub/fixer_chat/fixer_chat_service.dart';
 import 'hub/netrunner_thread/netrunner_thread_panel.dart';
 import 'hub/netrunner_thread/netrunner_thread_repository.dart';
-import 'hub/netrunners/netrunner_explorer.dart';
 import 'hub/netrunners/netrunner_repository.dart';
 import 'hub/overseer/overseer_manager.dart';
 import 'hub/overseer/overseer_repository.dart';
@@ -23,7 +19,9 @@ import 'hub/project_cards/project_cards.dart';
 import 'hub/skills/skills_manager.dart';
 import 'hub/skills/skills_repository.dart';
 import 'mission_control/mission_control_repository.dart';
-import 'mission_control/mission_control_view.dart';
+import 'workroom/project_workroom.dart';
+import 'workroom/workroom_models.dart';
+import 'workroom/workroom_repository.dart';
 
 const _chromeBorder = Color(0xFFD9E0EC);
 const _sidebarFill = Color(0xFFF1F4F9);
@@ -40,6 +38,7 @@ class DashboardShell extends StatefulWidget {
     this.skillsRepository,
     this.overseerRepository,
     this.missionControlRepository,
+    this.workroomRepository,
   });
 
   final DashboardRepository repository;
@@ -51,6 +50,7 @@ class DashboardShell extends StatefulWidget {
   final SkillsRepository? skillsRepository;
   final OverseerManagerRepository? overseerRepository;
   final MissionControlRepository? missionControlRepository;
+  final ProjectWorkroomRepository? workroomRepository;
 
   @override
   State<DashboardShell> createState() => _DashboardShellState();
@@ -58,30 +58,19 @@ class DashboardShell extends StatefulWidget {
 
 class _DashboardShellState extends State<DashboardShell> {
   late Future<HomeSnapshot> _homeFuture;
-  late final BacklogRepository _backlogRepository;
-  late final NetrunnerExplorerRepository _netrunnerExplorerRepository;
-  late final FixerChatService _fixerChatService;
-  late final NetrunnerThreadRepository _netrunnerThreadRepository;
   late final SkillsRepository _skillsRepository;
   late final OverseerManagerRepository _overseerRepository;
-  late final MissionControlRepository _missionControlRepository;
+  late final ProjectWorkroomRepository _workroomRepository;
 
   @override
   void initState() {
     super.initState();
     _homeFuture = widget.repository.loadHomeSnapshot();
-    _backlogRepository = widget.backlogRepository ?? BridgeBacklogRepository();
-    _netrunnerExplorerRepository =
-        widget.netrunnerExplorerRepository ??
-        BridgeNetrunnerExplorerRepository();
-    _fixerChatService = widget.fixerChatService ?? BridgeFixerChatService();
-    _netrunnerThreadRepository =
-        widget.netrunnerThreadRepository ?? BridgeNetrunnerThreadRepository();
     _skillsRepository = widget.skillsRepository ?? BridgeSkillsRepository();
     _overseerRepository =
         widget.overseerRepository ?? DashboardOverseerManagerRepository();
-    _missionControlRepository =
-        widget.missionControlRepository ?? BridgeMissionControlRepository();
+    _workroomRepository =
+        widget.workroomRepository ?? ServerpodProjectWorkroomRepository();
   }
 
   void _reload() {
@@ -97,12 +86,8 @@ class _DashboardShellState extends State<DashboardShell> {
         builder: (_) => _ProjectRouteScreen(
           repository: widget.repository,
           projectId: projectId,
-          architectCockpitRepository: widget.architectCockpitRepository,
-          backlogRepository: _backlogRepository,
-          netrunnerExplorerRepository: _netrunnerExplorerRepository,
-          fixerChatService: _fixerChatService,
-          netrunnerThreadRepository: _netrunnerThreadRepository,
-          missionControlRepository: _missionControlRepository,
+          workroomRepository: _workroomRepository,
+          fixerChatService: widget.fixerChatService ?? BridgeFixerChatService(),
         ),
       ),
     );
@@ -241,22 +226,14 @@ class _ProjectRouteScreen extends StatefulWidget {
   const _ProjectRouteScreen({
     required this.repository,
     required this.projectId,
-    this.architectCockpitRepository,
-    required this.backlogRepository,
-    required this.netrunnerExplorerRepository,
+    required this.workroomRepository,
     required this.fixerChatService,
-    required this.netrunnerThreadRepository,
-    required this.missionControlRepository,
   });
 
   final DashboardRepository repository;
   final int projectId;
-  final ArchitectCockpitRepository? architectCockpitRepository;
-  final BacklogRepository backlogRepository;
-  final NetrunnerExplorerRepository netrunnerExplorerRepository;
+  final ProjectWorkroomRepository workroomRepository;
   final FixerChatService fixerChatService;
-  final NetrunnerThreadRepository netrunnerThreadRepository;
-  final MissionControlRepository missionControlRepository;
 
   @override
   State<_ProjectRouteScreen> createState() => _ProjectRouteScreenState();
@@ -277,103 +254,91 @@ class _ProjectRouteScreenState extends State<_ProjectRouteScreen> {
     });
   }
 
-  Future<void> _openSession(int sessionId) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        settings: RouteSettings(name: '/netrunner/$sessionId'),
-        builder: (_) => _NetrunnerRouteScreen(
-          repository: widget.repository,
-          sessionId: sessionId,
-          threadRepository: widget.netrunnerThreadRepository,
-        ),
-      ),
-    );
-    if (mounted) {
-      _reload();
-    }
-  }
-
-  Future<void> _createTask(ProjectWorkspaceSnapshot project) async {
-    final l10n = AppLocalizations.of(context);
-    final input = await showDialog<_TaskDraft>(
-      context: context,
-      builder: (context) => const _CreateTaskDialog(),
-    );
-    if (input == null || !mounted) {
-      return;
-    }
-    try {
-      final snapshot = await widget.repository.createTask(
-        project.project.id,
-        taskDescription: input.taskDescription,
-        declaredWriteScope: input.writeScope,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _projectFuture = Future.value(snapshot);
-      });
-      _showNotice(
-        l10n.isRussian
-            ? 'Новая ожидающая задача Netrunner создана.'
-            : 'Created a new pending Netrunner task.',
-      );
-    } catch (error) {
-      _showNotice(error.toString());
-    }
-  }
-
-  void _showNotice(String message) {
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(l10n.project),
-        actions: [
-          IconButton(
-            onPressed: _reload,
-            tooltip: l10n.refreshProject,
-            icon: const Icon(Icons.refresh),
+    return FutureBuilder<ProjectWorkspaceSnapshot>(
+      future: _projectFuture,
+      builder: (context, snapshot) {
+        final project = snapshot.data;
+        return Scaffold(
+          appBar: AppBar(
+            title: project == null
+                ? Text(l10n.project)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        project.project.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        project.project.cwd,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
           ),
-        ],
-      ),
-      body: FutureBuilder<ProjectWorkspaceSnapshot>(
-        future: _projectFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting &&
-              !snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return _ErrorState(
-              message: snapshot.error.toString(),
-              onRetry: _reload,
-            );
-          }
-          final project = snapshot.data!;
-          return _ProjectWorkspace(
-            project: project,
-            onOpenSession: _openSession,
-            onCreateTask: () => _createTask(project),
-            architectCockpitRepository: widget.architectCockpitRepository,
-            backlogRepository: widget.backlogRepository,
-            netrunnerExplorerRepository: widget.netrunnerExplorerRepository,
-            fixerChatService: widget.fixerChatService,
-            missionControlRepository: widget.missionControlRepository,
-          );
-        },
-      ),
+          body:
+              snapshot.connectionState == ConnectionState.waiting &&
+                  !snapshot.hasData
+              ? const Center(child: CircularProgressIndicator())
+              : snapshot.hasError
+              ? _ErrorState(
+                  message: snapshot.error.toString(),
+                  onRetry: _reload,
+                )
+              : ProjectWorkroom(
+                  legacySnapshot: project!,
+                  repository: widget.workroomRepository,
+                  fixerChatService: widget.fixerChatService,
+                  loadHistoricalTurns: _loadHistoricalTurns,
+                  sendThreadMessage: widget.repository.sendThreadMessage,
+                  sendThreadMessageWithConfig:
+                      widget.repository.sendThreadMessageWithConfig,
+                  loadThreadTurnStatus: widget.repository.loadThreadTurnStatus,
+                ),
+        );
+      },
     );
+  }
+
+  Future<List<WorkroomFixerTurn>> _loadHistoricalTurns(String threadId) async {
+    print('[HANDS_GUI_LOG] requesting transcript for threadId: $threadId');
+    final transcript = await widget.repository.loadThreadMessages(threadId);
+    print(
+      '[HANDS_GUI_LOG] transcript result: threadId=$threadId availability=${transcript.availability} '
+      'available=${transcript.transcriptAvailable} msgCount=${transcript.messages.length} '
+      'reason=${transcript.unsupportedReason}',
+    );
+    for (var i = 0; i < transcript.messages.length; i++) {
+      final msg = transcript.messages[i];
+      final clean = msg.text.replaceAll('\n', ' ');
+      final preview = clean.length > 60 ? clean.substring(0, 60) : clean;
+      print('[HANDS_GUI_LOG] msg[$i]: role=${msg.role} textLength=${msg.text.length} preview=$preview');
+    }
+    return transcript.messages
+        .asMap()
+        .entries
+        .map((entry) {
+          final message = entry.value;
+          return WorkroomFixerTurn(
+            id: 'history-${threadId}-${message.id}',
+            threadId: threadId,
+            ordinal: entry.key,
+            role: message.role,
+            content: message.text,
+            source: message.source,
+            status: 'complete',
+            createdAt: message.createdAt,
+          );
+        })
+        .toList(growable: false);
   }
 }
 
@@ -560,15 +525,66 @@ class _NetrunnerRouteScreenState extends State<_NetrunnerRouteScreen> {
   }
 }
 
-class _HomeProjectRail extends StatelessWidget {
+class _HomeProjectRail extends StatefulWidget {
   const _HomeProjectRail({required this.home, required this.onOpenProject});
 
   final HomeSnapshot home;
   final ValueChanged<int> onOpenProject;
 
   @override
+  State<_HomeProjectRail> createState() => _HomeProjectRailState();
+}
+
+class _HomeProjectRailState extends State<_HomeProjectRail> {
+  ProjectActivitySourceFilter _activitySourceFilter =
+      ProjectActivitySourceFilter.all;
+
+  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+
+    final projects = widget.home.projects
+        .map(
+          (project) => HubProjectCard(
+            projectId: project.project.id,
+            name: project.project.name,
+            cwd: project.project.cwd,
+            activeWaveCount: project.activeWaveCount,
+            lastActivityAt: project.lastActivityAt,
+            primaryActivitySource: project.primaryActivitySource,
+            hasFixerActivity: project.hasFixerActivity,
+            hasHandsActivity: project.hasHandsActivity,
+            hasAutonomousActivity: project.hasAutonomousActivity,
+          ),
+        )
+        .toList(growable: false);
+
+    final subtitle =
+        widget.home.currentProject?.cwd ??
+        (l10n.isRussian
+            ? 'Сортировка и фильтр по источнику активности проекта.'
+            : 'Sort and filter projects by activity source.');
+
+    final filterOptions = <MapEntry<ProjectActivitySourceFilter, String>>[
+      MapEntry(ProjectActivitySourceFilter.all, l10n.isRussian ? 'Все' : 'All'),
+      MapEntry(
+        ProjectActivitySourceFilter.fixer,
+        l10n.isRussian ? 'Fixer' : 'Fixer',
+      ),
+      MapEntry(
+        ProjectActivitySourceFilter.hands,
+        l10n.isRussian ? 'Руки' : 'Hands',
+      ),
+      MapEntry(
+        ProjectActivitySourceFilter.autonomous,
+        l10n.isRussian ? 'Автономные' : 'Autonomous',
+      ),
+      MapEntry(
+        ProjectActivitySourceFilter.project,
+        l10n.isRussian ? 'Прочие' : 'Project',
+      ),
+    ];
+
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _sidebarFill,
@@ -581,28 +597,37 @@ class _HomeProjectRail extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
             child: _SectionTitle(
               title: l10n.projectListTitle,
-              subtitle:
-                  home.currentProject?.cwd ??
-                  (l10n.isRussian
-                      ? 'Проекты отсортированы по последней активности.'
-                      : 'Projects ordered by latest activity.'),
+              subtitle: subtitle,
             ),
           ),
           const SizedBox(height: 4),
-          Expanded(
-            child: ProjectCards(
-              projects: home.projects
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: filterOptions
                   .map(
-                    (project) => HubProjectCard(
-                      projectId: project.project.id,
-                      name: project.project.name,
-                      cwd: project.project.cwd,
-                      activeWaveCount: project.activeWaveCount,
-                      lastActivityAt: project.lastActivityAt,
+                    (option) => ChoiceChip(
+                      selected: _activitySourceFilter == option.key,
+                      label: Text(option.value),
+                      onSelected: (selected) {
+                        if (!selected) return;
+                        setState(() {
+                          _activitySourceFilter = option.key;
+                        });
+                      },
                     ),
                   )
                   .toList(growable: false),
-              onProjectTap: onOpenProject,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ProjectCards(
+              projects: projects,
+              onProjectTap: widget.onOpenProject,
+              sourceFilter: _activitySourceFilter,
               emptyLabel: l10n.isRussian
                   ? 'Нет доступных проектов.'
                   : 'No projects available.',
@@ -689,123 +714,7 @@ class _HomeChatWorkspace extends StatelessWidget {
   }
 }
 
-class _ProjectWorkspace extends StatelessWidget {
-  const _ProjectWorkspace({
-    required this.project,
-    required this.onOpenSession,
-    required this.onCreateTask,
-    this.architectCockpitRepository,
-    required this.backlogRepository,
-    required this.netrunnerExplorerRepository,
-    required this.fixerChatService,
-    required this.missionControlRepository,
-  });
-
-  final ProjectWorkspaceSnapshot project;
-  final ValueChanged<int> onOpenSession;
-  final VoidCallback onCreateTask;
-  final ArchitectCockpitRepository? architectCockpitRepository;
-  final BacklogRepository backlogRepository;
-  final NetrunnerExplorerRepository netrunnerExplorerRepository;
-  final FixerChatService fixerChatService;
-  final MissionControlRepository missionControlRepository;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    return DefaultTabController(
-      length: 7,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        project.project.name,
-                        style: theme.textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      Text(
-                        project.project.cwd,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                FilledButton.icon(
-                  onPressed: onCreateTask,
-                  icon: const Icon(Icons.add_task),
-                  label: Text(l10n.createTask),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: l10n.overview),
-              Tab(text: l10n.missionControl),
-              Tab(text: l10n.backlog),
-              Tab(text: l10n.docs),
-              Tab(text: l10n.netrunners),
-              Tab(text: l10n.fixerChat),
-              Tab(text: l10n.clientOrdersSandbox),
-            ],
-          ),
-          Expanded(
-            child: TabBarView(
-              children: [
-                _ProjectOverviewTab(
-                  project: project,
-                  onOpenSession: onOpenSession,
-                ),
-                MissionControlWavesView(
-                  projectId: project.project.id,
-                  repository: missionControlRepository,
-                ),
-                BacklogPanel(
-                  repository: backlogRepository,
-                  projectId: project.project.id,
-                ),
-                DocumentsExplorer(snapshot: project.documentsTree),
-                NetrunnerExplorerScreen(
-                  projectId: project.project.id,
-                  repository: netrunnerExplorerRepository,
-                  onSessionSelected: (session) => onOpenSession(session.id),
-                ),
-                FixerChatPanel(
-                  projectId: project.project.id,
-                  projectCwd: project.project.cwd,
-                  service: fixerChatService,
-                ),
-                _LazyArchitectCockpitTab(
-                  tabIndex: 6,
-                  repository:
-                      architectCockpitRepository ??
-                      BridgeArchitectCockpitRepository(),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
+// ignore: unused_element
 class _LazyArchitectCockpitTab extends StatefulWidget {
   const _LazyArchitectCockpitTab({
     required this.tabIndex,
@@ -840,6 +749,7 @@ class _LazyArchitectCockpitTabState extends State<_LazyArchitectCockpitTab> {
   }
 }
 
+// ignore: unused_element
 class _ProjectOverviewTab extends StatelessWidget {
   const _ProjectOverviewTab({
     required this.project,
@@ -938,6 +848,7 @@ class _ProjectOverviewTab extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 bool _isActiveWaveStatus(String status) {
   return !const {
     'completed',

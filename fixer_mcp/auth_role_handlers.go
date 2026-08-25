@@ -34,7 +34,7 @@ func lockedRoleFromEnv() (string, error) {
 }
 
 var defaultRolePreprompts = map[string]string{
-	"fixer":     defaultRolePreprompt,
+	"fixer":     defaultFixerRolePreprompt,
 	"netrunner": defaultRolePreprompt,
 	"overseer":  defaultRolePreprompt,
 }
@@ -84,6 +84,27 @@ func bootstrapDefaultRoleAuthFromEnv() {
 	authorizedProjectId = projId
 	authorizedSessionId = 0
 	log.Printf("fixer_mcp env auth bootstrap applied for %s project_id=%d cwd=%s", defaultRole, projId, normalizedCWD)
+}
+
+// ensureNetrunnerGateProjectBinding lazily (re)binds the wait-only netrunner
+// gate to the project named by env when the one-time startup bootstrap did not
+// apply. A long-lived gate process can outlive a project registration or env
+// refresh, leaving the wait handlers without an auth context even though the
+// primary fixer_mcp process has already been authenticated via assume_role.
+// Binding only ever happens inside the locked netrunner_gate profile; every
+// other context keeps the original access-denied behavior.
+func ensureNetrunnerGateProjectBinding() error {
+	if authorizedRole == "fixer" && authorizedProjectId > 0 {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv(fixerMcpToolProfileEnv)) != netrunnerGateProfile {
+		return fmt.Errorf("access denied: requires project-bound fixer role")
+	}
+	bootstrapDefaultRoleAuthFromEnv()
+	if authorizedRole != "fixer" || authorizedProjectId <= 0 {
+		return fmt.Errorf("access denied: requires project-bound fixer role")
+	}
+	return nil
 }
 
 type AssumeRoleInput struct {

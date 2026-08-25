@@ -2,41 +2,42 @@
   "backends": {
     "antigravity": {
       "available": true,
-      "default_model": "default",
-      "default_reasoning": "default",
+      "default_model": "Gemini 3.7 Flash",
+      "default_reasoning": "medium",
       "description": "Google Antigravity CLI launcher flow using agy, workspace .agents MCP config, and workspace skills.",
       "fresh_launch_supported": true,
       "label": "Google Antigravity CLI",
       "model_options": [
-        "default",
-        "Gemini 3.5 Flash",
+        "Gemini 3.7 Flash",
         "Gemini 3.6 Flash",
         "Gemini 3.1 Pro",
-        "Claude Sonnet 4.6",
-        "Claude Opus 4.6",
-        "GPT-OSS 120B"
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)"
       ],
       "reasoning_options": [
         "default",
         "low",
         "medium",
-        "high",
-        "thinking"
+        "high"
       ],
       "resume_supported": true
     },
     "claude": {
       "available": true,
       "default_model": "sonnet",
-      "default_reasoning": "medium",
+      "default_reasoning": "high",
       "description": "Claude Code launcher flow with layered MCP config materialization.",
       "fresh_launch_supported": true,
       "label": "Claude Code",
       "model_options": [
         "sonnet",
         "opus",
-        "claude-opus-5",
-        "haiku"
+        "opencode-go/glm-5.2",
+        "opencode-go/qwen3.8-max",
+        "kimi/k3",
+        "kimi/k3-256k",
+        "kimi/kimi-for-coding",
+        "kimi/kimi-for-coding-highspeed"
       ],
       "reasoning_options": [
         "low",
@@ -50,10 +51,132 @@
     "codex": {
       "available": true,
       "default_model": "gpt-5.6-luna",
-      "default_reasoning": "xhigh",
+      "default_reasoning": "high",
       "description": "Explicit MCP flag injection for Codex-based launcher flows.",
       "fresh_launch_supported": true,
       "label": "Codex CLI",
+      "model_config_overrides": {
+        "commandcode/deepseek/deepseek-v4-flash": {
+          "model_auto_compact_token_limit": 850000,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/deepseek/deepseek-v4-pro": {
+          "model_auto_compact_token_limit": 850000,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/google/gemini-3.7-flash": {
+          "model_auto_compact_token_limit": 891290,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1048576,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/gpt-5.6-luna": {
+          "model_auto_compact_token_limit": 892500,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1050000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/xiaomi/mimo-v2.5-pro": {
+          "model_auto_compact_token_limit": 850000,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/zai-org/GLM-5.3": {
+          "model_auto_compact_token_limit": 850000,
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "deepseek/deepseek-v4-flash-0731": {
+          "model_auto_compact_token_limit": 425000,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 500000,
+          "model_provider": "openrouter",
+          "model_providers.openrouter.base_url": "https://openrouter.ai/api/v1",
+          "model_providers.openrouter.env_key": "OPENROUTER_API_KEY",
+          "model_providers.openrouter.name": "OpenRouter",
+          "model_providers.openrouter.wire_api": "responses"
+        },
+        "deepseek/deepseek-v4-pro-0813": {
+          "model_auto_compact_token_limit": 425000,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 500000,
+          "model_provider": "openrouter",
+          "model_providers.openrouter.base_url": "https://openrouter.ai/api/v1",
+          "model_providers.openrouter.env_key": "OPENROUTER_API_KEY",
+          "model_providers.openrouter.name": "OpenRouter",
+          "model_providers.openrouter.wire_api": "responses"
+        },
+        "opencode-go/deepseek-v4-flash": {
+          "model_auto_compact_token_limit": 425000,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 500000,
+          "model_provider": "opencode_go",
+          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
+          "model_providers.opencode_go.name": "OpenCode Go",
+          "model_providers.opencode_go.wire_api": "responses"
+        },
+        "opencode-go/gpt-5.6-luna": {
+          "model_auto_compact_token_limit": 231200,
+          "model_context_window": 272000,
+          "model_provider": "opencode_go",
+          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
+          "model_providers.opencode_go.name": "OpenCode Go",
+          "model_providers.opencode_go.wire_api": "responses"
+        },
+        "opencode-go/muse-spark-1.2": {
+          "model_auto_compact_token_limit": 891290,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 1048576,
+          "model_provider": "opencode_go",
+          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
+          "model_providers.opencode_go.name": "OpenCode Go",
+          "model_providers.opencode_go.wire_api": "responses"
+        },
+        "opencode-go/ox-alpha-free": {
+          "model_auto_compact_token_limit": 222822,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 262144,
+          "model_provider": "opencode_go",
+          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
+          "model_providers.opencode_go.name": "OpenCode Go",
+          "model_providers.opencode_go.wire_api": "responses",
+          "web_search": "disabled"
+        }
+      },
       "model_options": [
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -64,38 +187,49 @@
         "gpt-5.3-codex",
         "gpt-5.3-codex-spark",
         "gpt-5.2",
+        "opencode-go/gpt-5.6-luna",
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/muse-spark-1.2",
+        "opencode-go/ox-alpha-free",
+        "commandcode/deepseek/deepseek-v4-flash",
+        "commandcode/deepseek/deepseek-v4-pro",
+        "commandcode/zai-org/GLM-5.3",
+        "commandcode/gpt-5.6-luna",
+        "commandcode/google/gemini-3.7-flash",
+        "commandcode/xiaomi/mimo-v2.5-pro",
         "deepseek/deepseek-v4-flash-0731",
-        "opencode-go/deepseek-v4-flash"
+        "deepseek/deepseek-v4-pro-0813",
+        "commandcode/stealth/ox-alpha",
+        "commandcode/laguna-s-2.1-free"
       ],
-      "model_config_overrides": {
-        "deepseek/deepseek-v4-flash-0731": {
-          "model_provider": "openrouter",
-          "model_providers.openrouter.name": "OpenRouter",
-          "model_providers.openrouter.base_url": "https://openrouter.ai/api/v1",
-          "model_providers.openrouter.env_key": "OPENROUTER_API_KEY",
-          "model_providers.openrouter.wire_api": "responses",
-          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
-          "model_context_window": 500000,
-          "model_auto_compact_token_limit": 425000
-        },
-        "opencode-go/deepseek-v4-flash": {
-          "model_provider": "opencode_go",
-          "model_providers.opencode_go.name": "OpenCode Go",
-          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
-          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
-          "model_providers.opencode_go.wire_api": "responses",
-          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
-          "model_context_window": 500000,
-          "model_auto_compact_token_limit": 425000
-        }
-      },
       "reasoning_options": [
         "low",
         "medium",
         "high",
         "xhigh",
+        "max",
         "ultra"
       ],
+      "resume_supported": true
+    },
+    "commandcode": {
+      "available": true,
+      "default_model": "commandcode/deepseek/deepseek-v4-flash",
+      "default_reasoning": "high",
+      "description": "Native Command Code CLI backend using cmd/cmdc.",
+      "fresh_launch_supported": true,
+      "label": "Command Code",
+      "model_options": [
+        "commandcode/deepseek/deepseek-v4-flash",
+        "commandcode/deepseek/deepseek-v4-pro",
+        "commandcode/zai-org/GLM-5.3",
+        "commandcode/gpt-5.6-luna",
+        "commandcode/google/gemini-3.7-flash",
+        "commandcode/xiaomi/mimo-v2.5-pro",
+        "commandcode/stealth/ox-alpha",
+        "commandcode/laguna-s-2.1-free"
+      ],
+      "reasoning_options": ["high"],
       "resume_supported": true
     },
     "droid": {
@@ -118,6 +252,25 @@
       ],
       "resume_supported": true
     },
+    "grok": {
+      "available": true,
+      "default_model": "grok-4.6",
+      "default_reasoning": "default",
+      "description": "Native Grok Build CLI flow using the grok binary and project .grok/config.toml discovery.",
+      "fresh_launch_supported": true,
+      "label": "Grok Build",
+      "model_options": [
+        "grok-4.6",
+        "grok-4.5"
+      ],
+      "reasoning_options": [
+        "default",
+        "low",
+        "medium",
+        "high"
+      ],
+      "resume_supported": true
+    },
     "junie": {
       "available": false,
       "default_model": "kimi-k2.6",
@@ -128,7 +281,8 @@
       "model_options": [
         "kimi-k2.6",
         "kimi-k2.7-code",
-        "glm-5.1"
+        "glm-5.1",
+        "deepseek-v4-flash-0731"
       ],
       "reasoning_options": [
         "default"
@@ -137,34 +291,16 @@
     },
     "kimi-code": {
       "available": true,
-      "default_model": "kimi-k2.7-code",
+      "default_model": "kimi-k3-256k",
       "default_reasoning": "default",
-      "description": "Kimi Code CLI (kimi-cli) launcher flow: managed Kimi K2.7 Code, headless --print mode, project .mcp.json discovery.",
+      "description": "Native Kimi Code launcher flow using the kimi binary and project .kimi-code/mcp.json discovery.",
       "fresh_launch_supported": true,
-      "label": "Kimi Code CLI",
+      "label": "Kimi Code",
       "model_options": [
         "kimi-k2.7-code",
-        "kimi-k3"
-      ],
-      "reasoning_options": [
-        "default",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "resume_supported": true
-    },
-    "kimi-code-native": {
-      "available": true,
-      "default_model": "kimi-for-coding",
-      "default_reasoning": "default",
-      "description": "Prototype launcher flow for Moonshot's native Kimi Code binary (~/.kimi-code/bin/kimi, distinct from the uv-tool kimi-cli package that the existing 'kimi-code' backend drives). Not wired into SUPPORTED_BACKENDS; unreachable from the picker until explicitly activated.",
-      "fresh_launch_supported": true,
-      "label": "Kimi Code (native, prototype)",
-      "model_options": [
-        "kimi-for-coding",
-        "kimi-k3"
+        "kimi-k2.7-code-highspeed",
+        "kimi-k3",
+        "kimi-k3-256k"
       ],
       "reasoning_options": [
         "default"

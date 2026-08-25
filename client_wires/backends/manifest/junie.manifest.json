@@ -6,13 +6,15 @@
     "options": [
       "kimi-k2.6",
       "kimi-k2.7-code",
-      "glm-5.1"
+      "glm-5.1",
+      "deepseek-v4-flash-0731"
     ],
     "default": "kimi-k2.6",
     "internal_id_map": {
       "kimi-k2.6": "custom:kimi-k2.6",
       "kimi-k2.7-code": "custom:kimi-k2.7-code",
-      "glm-5.1": "custom:glm-5.1"
+      "glm-5.1": "custom:glm-5.1",
+      "deepseek-v4-flash-0731": "custom:deepseek-v4-flash-0731"
     },
     "byok": true,
     "auth": "byok"

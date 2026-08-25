@@ -65,6 +65,8 @@ class AntigravityBackendAdapter(BackendAdapter):
 
         if candidate in _ANTIGRAVITY_CLI_MODEL_OPTIONS:
             label = _antigravity_model_variant_label(candidate)
+            if label and label.lower() == "thinking" and requested_reasoning == "high":
+                return candidate
             if requested_reasoning and label and requested_reasoning != label.lower():
                 raise RuntimeError(
                     f"Antigravity model {candidate!r} already includes reasoning {label!r}, "
@@ -79,6 +81,9 @@ class AntigravityBackendAdapter(BackendAdapter):
             raise RuntimeError(
                 f"Unsupported model {candidate!r} for backend {self.name!r}. Supported models: {supported}"
             )
+
+        if base_key in {"claudesonnet46", "claudeopus46"} and requested_reasoning:
+            requested_reasoning = "thinking"
 
         if not requested_reasoning:
             if len(variants) == 1:
@@ -127,8 +132,33 @@ class AntigravityBackendAdapter(BackendAdapter):
             "--dangerously-skip-permissions",
             "--print-timeout",
             _antigravity_print_timeout(),
+            "--output-format",
+            "json",
         ]
         command.extend(self._build_model_args(model, reasoning))
+        trimmed = self._build_antigravity_prompt(prompt)
+        if trimmed:
+            command.extend(["--print", trimmed])
+        return command
+
+    def build_headless_resume_command(
+        self,
+        *,
+        external_session_id: str,
+        model: str,
+        reasoning: str,
+        selected: Mapping[str, Mapping[str, object]],
+        available: Mapping[str, Mapping[str, object]],
+        prompt: str,
+    ) -> list[str]:
+        command = self.build_headless_command(
+            model=model,
+            reasoning=reasoning,
+            selected=selected,
+            available=available,
+            prompt="",
+        )
+        command.extend(["--conversation", external_session_id.strip()])
         trimmed = self._build_antigravity_prompt(prompt)
         if trimmed:
             command.extend(["--print", trimmed])
@@ -177,12 +207,12 @@ class AntigravityBackendAdapter(BackendAdapter):
         return "\n".join(_antigravity_prompt_line(line) for line in lines).strip()
 
 
-_CODEX_SKILL_MARKER_RE = re.compile(r"^Activate skill `\$([a-z0-9][a-z0-9-]*)` immediately\.$")
+_CODEX_SKILL_MARKER_RE = re.compile(r"^Activate skill `?\$([a-z0-9][a-z0-9-]*)`? immediately\.$")
 _ANTIGRAVITY_MODEL_VARIANT_RE = re.compile(r"^(?P<base>.+?) \((?P<label>[^)]+)\)$")
 _ANTIGRAVITY_CLI_MODEL_OPTIONS = (
-    "Gemini 3.5 Flash (Medium)",
-    "Gemini 3.5 Flash (High)",
-    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.7 Flash (Medium)",
+    "Gemini 3.7 Flash (High)",
+    "Gemini 3.7 Flash (Low)",
     "Gemini 3.6 Flash (Medium)",
     "Gemini 3.6 Flash (High)",
     "Gemini 3.6 Flash (Low)",
@@ -190,7 +220,6 @@ _ANTIGRAVITY_CLI_MODEL_OPTIONS = (
     "Gemini 3.1 Pro (High)",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking)",
-    "GPT-OSS 120B (Medium)",
 )
 _ANTIGRAVITY_MCP_CONFIG_PATH_ENV = "FIXER_ANTIGRAVITY_MCP_CONFIG_PATH"
 

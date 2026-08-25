@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Callable, Sequence
 from client_wires.backends import (
     DEFAULT_BACKEND,
     available_backend_descriptors,
+    is_codex_backend,
     normalize_backend_name,
 )
 from client_wires.backends.antigravity_adapter import (
@@ -49,7 +51,7 @@ class SessionRow:
         resolved_external_session_id = self.external_session_id.strip() or self.codex_session_id.strip()
         object.__setattr__(self, "external_session_id", resolved_external_session_id)
         legacy_codex_session_id = self.codex_session_id.strip()
-        if not legacy_codex_session_id and normalized_backend == "codex":
+        if not legacy_codex_session_id and is_codex_backend(normalized_backend):
             legacy_codex_session_id = resolved_external_session_id
         object.__setattr__(self, "codex_session_id", legacy_codex_session_id)
 
@@ -146,6 +148,22 @@ def _ensure_wire_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(project_id, codex_session_id),
             FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
         );
+        CREATE TABLE IF NOT EXISTS hands_launch_context (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            worktree_path TEXT NOT NULL,
+            branch_name TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            reasoning TEXT NOT NULL DEFAULT '',
+            external_session_id TEXT NOT NULL DEFAULT '',
+            mcp_names_json TEXT NOT NULL DEFAULT '[]',
+            doc_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, worktree_path),
+            FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+        );
         """
     )
     has_session_table = conn.execute(
@@ -213,23 +231,22 @@ def _ensure_wire_schema(conn: sqlite3.Connection) -> None:
 
 
 def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
-    candidates: list[Path] = []
-
     from_env = os.environ.get(FIXER_DB_PATH_ENV)
-    if from_env:
-        env_path = Path(from_env).expanduser()
+    if from_env and from_env.strip():
+        env_path = Path(from_env.strip()).expanduser()
         if not env_path.is_absolute():
             env_path = repo_root / env_path
-        candidates.append(env_path)
+        # An explicit path is authoritative even before the database exists.
+        # The Go schema bootstrap creates the file; silently falling back to a
+        # different repo/cwd database would migrate and launch the wrong state.
+        return env_path.resolve()
 
-    candidates.extend(
-        [
-            repo_root / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
-            repo_root / PRIMARY_FIXER_DB_FILENAME,
-            cwd / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
-            cwd / PRIMARY_FIXER_DB_FILENAME,
-        ]
-    )
+    candidates = [
+        repo_root / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
+        repo_root / PRIMARY_FIXER_DB_FILENAME,
+        cwd / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
+        cwd / PRIMARY_FIXER_DB_FILENAME,
+    ]
 
     checked: list[Path] = []
     seen: set[Path] = set()
@@ -424,7 +441,7 @@ def _load_session_rows(conn: sqlite3.Connection, project_id: int) -> list[Sessio
             cli_model=str(row[6]),
             cli_reasoning=str(row[7]),
             external_session_id=str(row[4]),
-            codex_session_id=str(row[4]) if str(row[5]) == "codex" else "",
+            codex_session_id=str(row[4]) if is_codex_backend(str(row[5])) else "",
         )
         for row in rows
     ]
@@ -615,6 +632,8 @@ def _normalize_backend_model(descriptor: Any, model: str | None) -> str:
     if descriptor.name == "antigravity":
         candidate = normalize_antigravity_model_alias(candidate)
     if candidate not in descriptor.model_options:
+        if descriptor.name == "antigravity" and candidate in {"Claude Sonnet 4.6", "Claude Opus 4.6"}:
+            return candidate
         supported = ", ".join(descriptor.model_options)
         raise RuntimeError(
             f"Unsupported model {candidate!r} for backend {descriptor.name!r}. Supported models: {supported}"
@@ -628,6 +647,8 @@ def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None) -> str:
         candidate = "high"
     if descriptor.name == "antigravity":
         candidate = candidate.lower()
+        if candidate == "thinking":
+            candidate = "high"
     if candidate not in descriptor.reasoning_options:
         supported = ", ".join(descriptor.reasoning_options)
         raise RuntimeError(
@@ -650,7 +671,7 @@ def _load_session_external_id(conn: sqlite3.Connection, session_id: int, backend
     ).fetchone()
     if row and str(row[0]).strip():
         return str(row[0]).strip()
-    if normalized_backend != "codex":
+    if not is_codex_backend(normalized_backend):
         return ""
     row = conn.execute(
         """
@@ -683,7 +704,7 @@ def _save_session_external_id(conn: sqlite3.Connection, session_id: int, backend
             """,
             (session_id, normalized_backend, resolved_external_session_id),
         )
-        if normalized_backend == "codex":
+        if is_codex_backend(normalized_backend):
             conn.execute(
                 """
                 INSERT INTO session_codex_link (session_id, codex_session_id, updated_at)
@@ -698,6 +719,125 @@ def _save_session_external_id(conn: sqlite3.Connection, session_id: int, backend
 
 def _save_session_codex_id(conn: sqlite3.Connection, session_id: int, codex_session_id: str) -> None:
     _save_session_external_id(conn, session_id, "codex", codex_session_id)
+
+
+@dataclass(frozen=True)
+class HandsLaunchContext:
+    project_id: int
+    worktree_path: str
+    branch_name: str
+    provider: str
+    model: str
+    reasoning: str
+    external_session_id: str
+    mcp_names: tuple[str, ...]
+    doc_ids: tuple[int, ...]
+    created_at: str
+    updated_at: str
+
+
+def _decode_json_list(raw: str) -> list:
+    try:
+        value = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _hands_launch_context_from_row(row: tuple) -> HandsLaunchContext:
+    return HandsLaunchContext(
+        project_id=int(row[0]),
+        worktree_path=str(row[1]),
+        branch_name=str(row[2]),
+        provider=str(row[3]),
+        model=str(row[4]),
+        reasoning=str(row[5]),
+        external_session_id=str(row[6]),
+        mcp_names=tuple(str(name) for name in _decode_json_list(str(row[7]))),
+        doc_ids=tuple(int(doc_id) for doc_id in _decode_json_list(str(row[8]))),
+        created_at=str(row[9]),
+        updated_at=str(row[10]),
+    )
+
+
+_HANDS_LAUNCH_CONTEXT_COLUMNS = (
+    "project_id, worktree_path, branch_name, provider, model, reasoning, "
+    "external_session_id, mcp_names_json, doc_ids_json, created_at, updated_at"
+)
+
+
+def _save_hands_launch_context(
+    conn: sqlite3.Connection,
+    project_id: int,
+    *,
+    worktree_path: str,
+    branch_name: str,
+    provider: str,
+    model: str,
+    reasoning: str,
+    mcp_names: Sequence[str],
+    doc_ids: Sequence[int],
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO hands_launch_context (
+                project_id, worktree_path, branch_name, provider, model, reasoning,
+                external_session_id, mcp_names_json, doc_ids_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(project_id, worktree_path) DO UPDATE SET
+                branch_name = excluded.branch_name,
+                provider = excluded.provider,
+                model = excluded.model,
+                reasoning = excluded.reasoning,
+                mcp_names_json = excluded.mcp_names_json,
+                doc_ids_json = excluded.doc_ids_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                project_id,
+                worktree_path.strip(),
+                branch_name.strip(),
+                provider.strip(),
+                model.strip(),
+                reasoning.strip(),
+                json.dumps(list(mcp_names)),
+                json.dumps([int(doc_id) for doc_id in doc_ids]),
+            ),
+        )
+
+
+def _save_hands_launch_external_id(
+    conn: sqlite3.Connection,
+    project_id: int,
+    worktree_path: str,
+    external_session_id: str,
+) -> None:
+    resolved = external_session_id.strip()
+    if not resolved:
+        return
+    with conn:
+        conn.execute(
+            """
+            UPDATE hands_launch_context
+            SET external_session_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE project_id = ? AND worktree_path = ?
+            """,
+            (resolved, project_id, worktree_path.strip()),
+        )
+
+
+def _list_hands_launch_contexts(conn: sqlite3.Connection, project_id: int) -> list[HandsLaunchContext]:
+    rows = conn.execute(
+        f"""
+        SELECT {_HANDS_LAUNCH_CONTEXT_COLUMNS}
+        FROM hands_launch_context
+        WHERE project_id = ?
+        ORDER BY COALESCE(updated_at, '') DESC, id DESC
+        """,
+        (project_id,),
+    ).fetchall()
+    return [_hands_launch_context_from_row(row) for row in rows]
 
 
 def _persist_session_launch_selection(

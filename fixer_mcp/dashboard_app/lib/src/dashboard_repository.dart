@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'dashboard_models.dart';
 import 'dashboard_runtime_client.dart';
+import 'client_order_repository.dart';
 import 'hub/fixer_chat/fixer_chat_models.dart';
 import 'hub/fixer_chat/fixer_chat_service.dart';
 
@@ -13,6 +14,12 @@ abstract class DashboardRepository {
   Future<NetrunnerDetailSnapshot> loadNetrunnerDetail(int sessionId);
   Future<ThreadMessagesSnapshot> loadThreadMessages(String threadId);
   Future<ThreadSendResult> sendThreadMessage(String threadId, String prompt);
+  Future<ThreadSendResult> sendThreadMessageWithConfig(
+    String threadId,
+    String prompt, {
+    required String model,
+    required String reasoning,
+  });
   Future<ThreadTurnStatusSnapshot> loadThreadTurnStatus(String streamId);
   Future<ProjectWorkspaceSnapshot> createTask(
     int projectId, {
@@ -43,17 +50,26 @@ class BridgeDashboardRepository implements DashboardRepository {
     this.serverpodBaseUrl,
     HttpClient? httpClient,
     DashboardRuntimeClient? runtimeClient,
+    ClientSessionAuthProvider? authProvider,
   }) : _runtimeClient =
            runtimeClient ??
            DashboardRuntimeClient(
              dashboardBaseUrl: baseUrl,
              serverpodBaseUrl: serverpodBaseUrl,
              httpClient: httpClient,
-           );
+           ),
+       _authProvider =
+           authProvider ??
+           ClientSessionAuthProvider(
+             sessionStore: SharedPreferencesClientSessionStore(),
+           ) {
+    _runtimeClient.authHeaderProvider ??= () => _authProvider.authHeaderValue;
+  }
 
   final String? baseUrl;
   final String? serverpodBaseUrl;
   final DashboardRuntimeClient _runtimeClient;
+  final ClientSessionAuthProvider _authProvider;
 
   @override
   Future<HomeSnapshot> loadHomeSnapshot() async {
@@ -119,6 +135,26 @@ class BridgeDashboardRepository implements DashboardRepository {
       'dashboardRuntime',
       'sendThreadMessage',
       {'threadId': threadId, 'prompt': prompt},
+    );
+    return ThreadSendResult.fromJson(payload);
+  }
+
+  @override
+  Future<ThreadSendResult> sendThreadMessageWithConfig(
+    String threadId,
+    String prompt, {
+    required String model,
+    required String reasoning,
+  }) async {
+    final payload = await _runtimeClient.callServerpodEndpoint(
+      'dashboardRuntime',
+      'sendThreadMessage',
+      {
+        'threadId': threadId,
+        'prompt': prompt,
+        'model': model,
+        'reasoning': reasoning,
+      },
     );
     return ThreadSendResult.fromJson(payload);
   }
@@ -207,7 +243,7 @@ class BridgeDashboardRepository implements DashboardRepository {
   }
 }
 
-class BridgeFixerChatService implements FixerChatService {
+class BridgeFixerChatService implements FixerChatService, HandsChatService {
   BridgeFixerChatService({DashboardRuntimeClient? runtimeClient})
     : _runtimeClient = runtimeClient ?? DashboardRuntimeClient();
 
@@ -217,6 +253,21 @@ class BridgeFixerChatService implements FixerChatService {
   Future<List<FixerThreadRecord>> loadFixerThreads(int projectId) async {
     final payload = await _runtimeClient.readDashboardJson(
       '/api/projects/$projectId/fixer-threads',
+    );
+    final rawThreads = payload['threads'];
+    if (rawThreads is! List) return const <FixerThreadRecord>[];
+    return rawThreads
+        .whereType<Map>()
+        .map(
+          (item) => FixerThreadRecord.fromJson(Map<String, dynamic>.from(item)),
+        )
+        .toList(growable: false);
+  }
+
+  @override
+  Future<List<FixerThreadRecord>> loadHandsThreads(int projectId) async {
+    final payload = await _runtimeClient.readDashboardJson(
+      '/api/projects/$projectId/hands-threads',
     );
     final rawThreads = payload['threads'];
     if (rawThreads is! List) return const <FixerThreadRecord>[];

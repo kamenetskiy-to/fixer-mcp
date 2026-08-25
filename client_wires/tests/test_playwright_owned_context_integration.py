@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -107,6 +109,153 @@ class PlaywrightOwnedContextIntegrationTests(unittest.TestCase):
                     chrome.kill()
                     chrome.wait(timeout=5)
 
+    def test_managed_shared_chrome_survives_last_wrapper_and_reconnects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            first = _start_wrapper(profile, shared_context=True, headless=False)
+            second: subprocess.Popen[str] | None = None
+            try:
+                _initialize(first)
+                original_pids = _main_chrome_pids(profile)
+                self.assertEqual(len(original_pids), 1)
+                _call(first, 2, "browser_tabs", {"action": "list"})
+                _stop_wrapper(first)
+
+                self.assertEqual(
+                    _main_chrome_pids(profile),
+                    original_pids,
+                    "last shared wrapper closed the persistent headed Chrome",
+                )
+
+                second = _start_wrapper(profile, shared_context=True, headless=False)
+                _initialize(second)
+                self.assertEqual(
+                    _main_chrome_pids(profile),
+                    original_pids,
+                    "replacement shared wrapper launched a second Chrome",
+                )
+                _call(second, 3, "browser_tabs", {"action": "list"})
+                _stop_wrapper(second)
+                self.assertEqual(_main_chrome_pids(profile), original_pids)
+            finally:
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        _stop_wrapper(process)
+                _terminate_profile_chrome(profile)
+
+    def test_owned_chrome_survives_wrapper_handoff_and_last_wrapper_cleans_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            first = _start_wrapper(profile)
+            second: subprocess.Popen[str] | None = None
+            try:
+                _initialize(first)
+                original_pids = _main_chrome_pids(profile)
+                self.assertEqual(len(original_pids), 1)
+
+                os.killpg(first.pid, signal.SIGTERM)
+                second = _start_wrapper(profile)
+                _initialize(second)
+
+                first.wait(timeout=15)
+                self.assertIn(
+                    first.returncode,
+                    (0, 128 + signal.SIGTERM),
+                    first.stderr.read() if first.stderr else "",
+                )
+                self.assertEqual(
+                    _main_chrome_pids(profile),
+                    original_pids,
+                    "wrapper replacement killed and relaunched the managed Chrome",
+                )
+                _call(second, 2, "browser_tabs", {"action": "list"})
+            finally:
+                if first.poll() is None:
+                    _stop_wrapper(first)
+                else:
+                    for stream in (first.stdin, first.stdout, first.stderr):
+                        if stream:
+                            stream.close()
+                if second is not None and second.poll() is None:
+                    _stop_wrapper(second)
+
+            self.assertEqual(_main_chrome_pids(profile), [], "last wrapper left managed Chrome running")
+
+    def test_managed_chrome_disconnect_terminates_wrapper_and_clears_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            wrapper = _start_wrapper(profile)
+            try:
+                _initialize(wrapper)
+                chrome_pids = _main_chrome_pids(profile)
+                self.assertEqual(len(chrome_pids), 1)
+                os.kill(chrome_pids[0], signal.SIGTERM)
+                wrapper.wait(timeout=20)
+                self.assertEqual(wrapper.returncode, 1)
+            finally:
+                if wrapper.poll() is None:
+                    os.killpg(wrapper.pid, signal.SIGTERM)
+                    wrapper.wait(timeout=15)
+                for stream in (wrapper.stdin, wrapper.stdout, wrapper.stderr):
+                    if stream:
+                        stream.close()
+
+            self.assertEqual(_main_chrome_pids(profile), [], "browser crash left profile Chrome running")
+            self.assertFalse(
+                (profile / ".codex-playwright-runtime" / "managed-chrome.json").exists(),
+                "browser crash left managed Chrome state behind",
+            )
+
+    def test_shared_context_exposes_and_preserves_persistent_tabs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            port = _free_port()
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _CookieHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            origin = f"http://127.0.0.1:{server.server_address[1]}"
+            chrome = subprocess.Popen(
+                [
+                    str(CHROME),
+                    "--headless=new",
+                    "--remote-debugging-address=127.0.0.1",
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"{origin}/existing",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_cdp(port)
+                wrapper = _start_wrapper(profile, shared_context=True)
+                try:
+                    _initialize(wrapper)
+                    listed = _result_text(_call(wrapper, 2, "browser_tabs", {"action": "list"}))
+                    self.assertIn(f"{origin}/existing", listed)
+                    _call(wrapper, 3, "browser_tabs", {"action": "new", "url": f"{origin}/agent"})
+                    urls = {page["url"] for page in _page_targets(port)}
+                    self.assertIn(f"{origin}/existing", urls)
+                    self.assertIn(f"{origin}/agent", urls)
+                finally:
+                    _stop_wrapper(wrapper)
+
+                self.assertIsNone(chrome.poll(), "shared-context wrapper terminated external Chrome")
+                urls = {page["url"] for page in _page_targets(port)}
+                self.assertIn(f"{origin}/existing", urls)
+                self.assertIn(f"{origin}/agent", urls)
+            finally:
+                server.shutdown()
+                server.server_close()
+                chrome.terminate()
+                try:
+                    chrome.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    chrome.kill()
+                    chrome.wait(timeout=5)
+
 
 def _free_port() -> int:
     with socket.socket() as sock:
@@ -141,14 +290,45 @@ def _main_chrome_pids(profile: Path) -> list[int]:
     )
 
 
-def _start_wrapper(profile: Path) -> subprocess.Popen[str]:
+def _terminate_profile_chrome(profile: Path) -> None:
+    for pid in _main_chrome_pids(profile):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and _main_chrome_pids(profile):
+        time.sleep(0.1)
+    for pid in _main_chrome_pids(profile):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _start_wrapper(
+    profile: Path,
+    *,
+    shared_context: bool = False,
+    headless: bool = True,
+) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    env["CODEX_PRO_PLAYWRIGHT_HANDOFF_GRACE_SEC"] = "2"
+    env["CODEX_PRO_PLAYWRIGHT_LOG"] = str(profile.parent / "playwright-mcp-test.log")
+    command = [sys.executable, str(WRAPPER), "--user-data-dir", str(profile)]
+    if headless:
+        command.append("--headless")
+    if shared_context:
+        command.append("--shared-context")
     return subprocess.Popen(
-        [sys.executable, str(WRAPPER), "--user-data-dir", str(profile), "--headless"],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=env,
+        start_new_session=True,
     )
 
 

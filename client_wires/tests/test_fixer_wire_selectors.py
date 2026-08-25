@@ -10,7 +10,7 @@ from client_wires import fixer_wire_selectors
 
 
 class _DummyOption:
-    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False) -> None:
+    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False, **kwargs: object) -> None:
         self.label = label
         self.value = value
         self.disabled = disabled
@@ -27,11 +27,11 @@ class FixerWireSelectorExtractionTests(unittest.TestCase):
         self.assertTrue(hasattr(fixer_wire, "_select_session_interactive"))
         self.assertTrue(hasattr(fixer_wire_selectors, "_select_session_interactive"))
         self.assertIn(
-            "Select netrunner session",
+            "Select compatibility execution envelope",
             inspect.getsource(fixer_wire_selectors._select_session_interactive),
         )
         self.assertNotIn(
-            "Select netrunner session",
+            "Select compatibility execution envelope",
             inspect.getsource(fixer_wire._select_session_interactive),
         )
 
@@ -75,3 +75,44 @@ class FixerWireSelectorExtractionTests(unittest.TestCase):
 
         self.assertEqual(selected_model, "patched-model")
         patched_descriptor.assert_called_once_with("patched")
+
+    def test_codex_model_selection_requires_family_choice_before_model(self) -> None:
+        descriptor = types.SimpleNamespace(
+            label="Codex CLI",
+            model_options=[
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "opencode-go/deepseek-v4-flash",
+                "deepseek/deepseek-v4-flash-0731",
+            ],
+            default_model="gpt-5.6-luna",
+            reasoning_options=["high"],
+            default_reasoning="high",
+        )
+        captured: list[tuple[str, object]] = []
+
+        def choose(options: list[_DummyOption], **kwargs: object) -> str:
+            captured.append((kwargs["title"], kwargs["preselected_value"]))
+            if len(captured) == 1:
+                return "opencode-go"
+            return "opencode-go/deepseek-v4-flash"
+
+        with patch.object(fixer_wire, "_backend_descriptor", return_value=descriptor):
+            selected_model = fixer_wire._select_model_interactive(
+                "codex",
+                "",
+                _DummyOption,
+                choose,
+                require_codex_model_family=True,
+            )
+
+        self.assertEqual(selected_model, "opencode-go/deepseek-v4-flash")
+        self.assertEqual(
+            captured,
+            [
+                ("Select Codex subscription (enter confirm, q cancel)", "openai"),
+                ("Select OpenCode Go model (enter confirm, q cancel)", "opencode-go/deepseek-v4-flash"),
+            ],
+        )

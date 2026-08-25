@@ -18,6 +18,13 @@ void main() {
       'Кабинет архитектора',
     );
     expect(AppLocalizations(const Locale('ru')).projects, 'Codex Hub');
+    expect(AppLocalizations(const Locale('ru')).workroomFixerTab, 'Фиксер');
+    expect(AppLocalizations(const Locale('ru')).workroomHandsTab, 'Руки');
+    expect(
+      AppLocalizations(const Locale('ru')).surfaceLabel('execution.list.v1'),
+      'Netrunner-сессии',
+    );
+    expect(AppLocalizations(const Locale('en')).workroomHandsTab, 'Hands');
     expect((await delegate.load(const Locale('de'))).signIn, 'Sign in');
   });
 

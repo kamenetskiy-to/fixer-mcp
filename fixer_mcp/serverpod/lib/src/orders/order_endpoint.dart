@@ -1,6 +1,7 @@
 import 'package:fixer_dashboard_server/src/auth/client_auth_middleware.dart';
 import 'package:fixer_dashboard_server/src/generated/protocol.dart';
 import 'package:serverpod/serverpod.dart' hide Order;
+import 'package:serverpod/serverpod.dart' as sp;
 
 /// The client order-flow API used by the external client surface.
 ///
@@ -54,8 +55,9 @@ class OrderEndpoint extends ClientProtectedEndpoint {
     final orders = await Order.db.find(
       session,
       where: (t) => t.clientId.equals(normalizedClientId),
-      orderBy: (t) => t.createdAt,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.createdAt, orderDescending: true),
+      ],
     );
 
     return orders
@@ -82,8 +84,9 @@ class OrderEndpoint extends ClientProtectedEndpoint {
     final latest = await Revision.db.findFirstRow(
       session,
       where: (t) => t.orderId.equals(orderId),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
     final now = DateTime.now();
     final revision = await Revision.db.insertRow(
@@ -118,8 +121,9 @@ class OrderEndpoint extends ClientProtectedEndpoint {
     final revisions = await Revision.db.find(
       session,
       where: (t) => t.orderId.equals(orderId),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
     final latestResultSummary = _latestResultSummary(revisions);
 

@@ -1,9 +1,23 @@
 #!/usr/bin/env node
 "use strict";
 
+const fs = require("fs");
 const { createConnection } = require("@playwright/mcp");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { chromium } = require("playwright");
+
+function errorDetail(error) {
+  if (error && typeof error.stack === "string") return error.stack;
+  return String(error);
+}
+
+function log(message) {
+  const line = `${new Date().toISOString()} pid=${process.pid} ${message}\n`;
+  const path = process.env.CODEX_PRO_PLAYWRIGHT_LOG;
+  if (path) {
+    try { fs.appendFileSync(path, line, { encoding: "utf8" }); } catch (_) { /* best-effort diagnostics */ }
+  }
+}
 
 function parseArgs(argv) {
   const result = { endpoint: "", viewport: undefined };
@@ -27,6 +41,7 @@ function parseViewport(value) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  log(`owned-context connecting endpoint=${args.endpoint}`);
   const browser = await chromium.connectOverCDP(args.endpoint);
   const persistentContext = browser.contexts()[0];
   if (!persistentContext) throw new Error("Attached Chrome has no persistent default context");
@@ -52,9 +67,10 @@ async function main() {
   const transport = new StdioServerTransport();
 
   let stopping = false;
-  const shutdown = async (exitCode = 0) => {
+  const shutdown = async (exitCode = 0, reason = "requested") => {
     if (stopping) return;
     stopping = true;
+    log(`owned-context stopping reason=${reason} exit_code=${exitCode}`);
     try {
       await connection.close().catch(() => undefined);
       const state = await ownedContext.storageState({ indexedDB: true }).catch(() => null);
@@ -73,14 +89,18 @@ async function main() {
     }
   };
 
-  process.once("SIGINT", () => { void shutdown(130); });
-  process.once("SIGTERM", () => { void shutdown(0); });
-  process.stdin.once("end", () => { void shutdown(0); });
-  process.stdin.once("close", () => { void shutdown(0); });
+  browser.once("disconnected", () => { void shutdown(1, "browser-disconnected"); });
+  process.once("SIGINT", () => { void shutdown(130, "SIGINT"); });
+  process.once("SIGTERM", () => { void shutdown(0, "SIGTERM"); });
+  process.stdin.once("end", () => { void shutdown(0, "stdin-end"); });
+  process.stdin.once("close", () => { void shutdown(0, "stdin-close"); });
   await connection.connect(transport);
+  log(`owned-context ready endpoint=${args.endpoint}`);
 }
 
-main().catch(() => {
-  process.stderr.write("playwright owned-context MCP failed\n");
+main().catch((error) => {
+  const detail = errorDetail(error);
+  log(`owned-context failed\n${detail}`);
+  process.stderr.write(`playwright owned-context MCP failed: ${detail}\n`);
   process.exit(1);
 });

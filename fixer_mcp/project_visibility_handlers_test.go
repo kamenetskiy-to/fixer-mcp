@@ -60,7 +60,10 @@ func setupGetProjectsTestDB(t *testing.T) *sql.DB {
 				parallel_wave_id TEXT NOT NULL DEFAULT '',
 				repair_source_session_id INTEGER,
 				rework_count INTEGER NOT NULL DEFAULT 0,
-				forced_stop_count INTEGER NOT NULL DEFAULT 0
+				forced_stop_count INTEGER NOT NULL DEFAULT 0,
+				session_kind TEXT NOT NULL DEFAULT 'netrunner',
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 			);
 		CREATE TABLE project_doc (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,6 +278,207 @@ func TestGetProjects_DeniesFixerRole(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "access denied: requires overseer role") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func setupListNetrunnerWavesTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	testDB := setupParallelWaveTestDB(t, testProjectCWD)
+
+	// setupParallelWaveTestDB seeds:
+	//   session 1 (project 1, "Task A", pending)
+	//   session 2 (project 2, "Task B", pending)
+	//   session 3 (project 1, "Task C", pending)
+	_, err := testDB.Exec(`
+		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root, control_reason, failure_reason)
+			VALUES (1, 1, 'completed', 'completed', 'closed', 'active', 'passed', 'sha1', 'cwd1', 'wt1', '', '');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
+			VALUES
+				(1, 1, 1, 'completed', '["docs/a"]', 'fixer/wave-1/session-1', '/tmp/wt-1-1', 'sha1'),
+				(1, 1, 3, 'completed', '["docs/b"]', 'fixer/wave-1/session-3', '/tmp/wt-1-3', 'sha1');
+		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root)
+			VALUES (2, 1, 'running', 'implementation', 'none', 'active', 'none', 'sha2', 'cwd1', 'wt2');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
+			VALUES (2, 1, 1, 'running', '["docs/a"]', 'fixer/wave-2/session-1', '/tmp/wt-2-1', 'sha2');
+		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root, control_reason, failure_reason)
+			VALUES (3, 1, 'failed', 'implementation', 'implementation_repair', 'paused_for_architect', 'repair_required', 'sha3', 'cwd1', 'wt3', 'Architect must review the repair authorization', 'Tests failed on worker 2');
+		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root)
+			VALUES (4, 2, 'running', 'implementation', 'none', 'active', 'none', 'sha4', 'cwd2', 'wt4');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
+			VALUES (4, 2, 2, 'running', '["docs/x"]', 'fixer/wave-4/session-2', '/tmp/wt-4-2', 'sha4');
+	`)
+	if err != nil {
+		_ = testDB.Close()
+		t.Fatalf("seed list_netrunner_waves db: %v", err)
+	}
+
+	return testDB
+}
+
+func TestListNetrunnerWaves_FiltersAndPagination(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupListNetrunnerWavesTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	callResult, out, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{})
+	if err != nil {
+		t.Fatalf("list_netrunner_waves failed: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result on success, got: %+v", callResult)
+	}
+	if out.ProjectId != 1 {
+		t.Fatalf("expected project_id 1, got %d", out.ProjectId)
+	}
+	if len(out.Waves) != 3 {
+		t.Fatalf("expected 3 waves for project 1, got %d: %+v", len(out.Waves), out.Waves)
+	}
+	if out.Waves[0].Id != 3 || out.Waves[1].Id != 2 || out.Waves[2].Id != 1 {
+		t.Fatalf("expected newest-first wave ids [3,2,1], got %+v", out.Waves)
+	}
+	if out.Returned != 3 || out.HasMore {
+		t.Fatalf("unexpected pagination metadata: %+v", out)
+	}
+
+	completedWave := out.Waves[2]
+	if completedWave.WorkerCount != 2 {
+		t.Fatalf("expected 2 workers on completed wave, got %+v", completedWave)
+	}
+	if len(completedWave.SessionIds) != 2 || completedWave.SessionIds[0] != 1 || completedWave.SessionIds[1] != 2 {
+		t.Fatalf("expected local session ids [1,2] on completed wave, got %+v", completedWave.SessionIds)
+	}
+
+	pausedWave := out.Waves[0]
+	if pausedWave.WorkerCount != 0 || len(pausedWave.SessionIds) != 0 {
+		t.Fatalf("expected zero workers/sessions on paused wave, got %+v", pausedWave)
+	}
+	if pausedWave.ControlState != "paused_for_architect" || pausedWave.FailurePolicyState != "repair_required" {
+		t.Fatalf("unexpected paused wave state: %+v", pausedWave)
+	}
+	if !strings.Contains(pausedWave.ControlReason, "Architect must review") {
+		t.Fatalf("unexpected control reason: %+v", pausedWave)
+	}
+
+	// Status filter.
+	_, statusOut, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Status: "failed"})
+	if err != nil {
+		t.Fatalf("status-filtered list failed: %v", err)
+	}
+	if len(statusOut.Waves) != 1 || statusOut.Waves[0].Id != 3 {
+		t.Fatalf("expected single failed wave (id 3), got %+v", statusOut.Waves)
+	}
+
+	// Phase filter.
+	_, phaseOut, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Phase: "completed"})
+	if err != nil {
+		t.Fatalf("phase-filtered list failed: %v", err)
+	}
+	if len(phaseOut.Waves) != 1 || phaseOut.Waves[0].Id != 1 {
+		t.Fatalf("expected single completed wave (id 1), got %+v", phaseOut.Waves)
+	}
+
+	// Invalid phase is rejected.
+	invalidResult, _, invalidErr := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Phase: "bogus"})
+	if invalidErr == nil {
+		t.Fatal("expected error for invalid phase filter")
+	}
+	if invalidResult == nil || !invalidResult.IsError {
+		t.Fatal("expected MCP error result for invalid phase filter")
+	}
+
+	// Search filter matches control_reason text.
+	_, searchOut, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Search: "Architect must review"})
+	if err != nil {
+		t.Fatalf("search-filtered list failed: %v", err)
+	}
+	if len(searchOut.Waves) != 1 || searchOut.Waves[0].Id != 3 {
+		t.Fatalf("expected search to match wave 3 via control_reason, got %+v", searchOut.Waves)
+	}
+
+	// Pagination.
+	_, page1, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Limit: 1})
+	if err != nil {
+		t.Fatalf("paginated list (page 1) failed: %v", err)
+	}
+	if len(page1.Waves) != 1 || page1.Waves[0].Id != 3 || !page1.HasMore {
+		t.Fatalf("unexpected page 1: %+v", page1)
+	}
+
+	_, page2, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{Limit: 1, Offset: 2})
+	if err != nil {
+		t.Fatalf("paginated list (page 2) failed: %v", err)
+	}
+	if len(page2.Waves) != 1 || page2.Waves[0].Id != 1 || page2.HasMore {
+		t.Fatalf("unexpected last page: %+v", page2)
+	}
+}
+
+func TestListNetrunnerWaves_ProjectIsolationAndRoleAccess(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupListNetrunnerWavesTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 2
+
+	_, out, err := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{})
+	if err != nil {
+		t.Fatalf("list_netrunner_waves for project 2 failed: %v", err)
+	}
+	if len(out.Waves) != 1 || out.Waves[0].Id != 4 {
+		t.Fatalf("expected only project-2 wave (id 4), got %+v", out.Waves)
+	}
+	if len(out.Waves[0].SessionIds) != 1 || out.Waves[0].SessionIds[0] != 1 {
+		t.Fatalf("expected project-2 wave to reference its own local session id 1, got %+v", out.Waves[0])
+	}
+
+	authorizedRole = "netrunner"
+	authorizedProjectId = 1
+	deniedResult, _, deniedErr := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{})
+	if deniedErr == nil {
+		t.Fatal("expected access denied for netrunner role")
+	}
+	if deniedResult == nil || !deniedResult.IsError {
+		t.Fatal("expected MCP error result for netrunner role")
+	}
+	if !strings.Contains(deniedErr.Error(), "requires fixer role") {
+		t.Fatalf("unexpected denial error: %v", deniedErr)
+	}
+
+	authorizedRole = "overseer"
+	authorizedProjectId = 0
+	overseerDeniedResult, _, overseerDeniedErr := ListNetrunnerWaves(context.Background(), nil, ListNetrunnerWavesInput{})
+	if overseerDeniedErr == nil {
+		t.Fatal("expected access denied for overseer role")
+	}
+	if overseerDeniedResult == nil || !overseerDeniedResult.IsError {
+		t.Fatal("expected MCP error result for overseer role")
 	}
 }
 

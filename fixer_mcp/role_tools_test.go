@@ -282,11 +282,9 @@ func TestLockedRoleToolSurfacesHideForeignAndAdminTools(t *testing.T) {
 	}
 }
 
-func TestNetrunnerGateToolSurfaceContainsOnlyBlockingOrchestration(t *testing.T) {
+func TestNetrunnerGateToolSurfaceIsWaitOnly(t *testing.T) {
 	expected := []string{
-		launchNetrunnerWaveToolName,
 		waitForNetrunnerWaveToolName,
-		launchNetrunnerWavesToolName,
 		waitForNetrunnerWavesToolName,
 	}
 	if len(netrunnerGateToolNames) != len(expected) {
@@ -295,6 +293,60 @@ func TestNetrunnerGateToolSurfaceContainsOnlyBlockingOrchestration(t *testing.T)
 	for index, name := range expected {
 		if netrunnerGateToolNames[index] != name {
 			t.Fatalf("unexpected direct Netrunner gate surface: %#v", netrunnerGateToolNames)
+		}
+	}
+	for _, name := range []string{launchNetrunnerWaveToolName, launchNetrunnerWavesToolName} {
+		for _, gateName := range netrunnerGateToolNames {
+			if gateName == name {
+				t.Fatalf("launch tool %s must not be on the direct Netrunner gate surface: %#v", name, netrunnerGateToolNames)
+			}
+		}
+	}
+}
+
+func TestLockedRoleFeedbackSurface(t *testing.T) {
+	cases := []struct {
+		lockedRole string
+		present    bool
+	}{
+		{lockedRole: "overseer", present: true},
+		{lockedRole: "fixer", present: true},
+		{lockedRole: "netrunner", present: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.lockedRole, func(t *testing.T) {
+			toolSet := make(map[string]struct{})
+			for _, name := range registeredToolNamesForMode(tc.lockedRole) {
+				toolSet[name] = struct{}{}
+			}
+			for _, name := range []string{"submit_fixer_mcp_feedback", "list_fixer_mcp_feedback"} {
+				_, ok := toolSet[name]
+				if ok != tc.present {
+					if tc.present {
+						t.Fatalf("expected %s in %s surface", name, tc.lockedRole)
+					} else {
+						t.Fatalf("did not expect %s in %s surface", name, tc.lockedRole)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLockedFixerSurfaceKeepsLaunchToolsOnMainServer(t *testing.T) {
+	toolSet := make(map[string]struct{})
+	for _, name := range registeredToolNamesForMode("fixer") {
+		toolSet[name] = struct{}{}
+	}
+	for _, name := range []string{
+		launchNetrunnerWaveToolName,
+		launchNetrunnerWavesToolName,
+		waitForNetrunnerWaveToolName,
+		waitForNetrunnerWavesToolName,
+	} {
+		if _, ok := toolSet[name]; !ok {
+			t.Fatalf("expected %s on the locked fixer fixer_mcp surface", name)
 		}
 	}
 }
@@ -411,5 +463,181 @@ func TestAuthRoleHandlersLiveOutsideMain(t *testing.T) {
 		if !strings.Contains(string(authRoleSource), symbol) {
 			t.Fatalf("expected %q in auth_role_handlers.go", symbol)
 		}
+	}
+}
+
+func setNetrunnerGateAuthEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(fixerMcpDefaultRoleEnv, "fixer")
+	t.Setenv(fixerMcpDefaultCwdEnv, testProjectCWD)
+	t.Setenv(fixerMcpLockedRoleEnv, "fixer")
+	t.Setenv(fixerMcpAutoAuthEnv, "1")
+	t.Setenv(fixerMcpToolProfileEnv, netrunnerGateProfile)
+}
+
+func TestEnsureNetrunnerGateProjectBindingLazyRebinds(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	setNetrunnerGateAuthEnv(t)
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 999
+
+	if err := ensureNetrunnerGateProjectBinding(); err != nil {
+		t.Fatalf("expected lazy gate binding to succeed, got: %v", err)
+	}
+	if authorizedRole != "fixer" || authorizedProjectId != 1 || authorizedSessionId != 0 {
+		t.Fatalf("unexpected gate auth state after lazy bind: role=%q project=%d session=%d", authorizedRole, authorizedProjectId, authorizedSessionId)
+	}
+}
+
+func TestEnsureNetrunnerGateProjectBindingRejectsUnregisteredCwd(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	setNetrunnerGateAuthEnv(t)
+	t.Setenv(fixerMcpDefaultCwdEnv, "/tmp/not-registered-project")
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 999
+
+	err := ensureNetrunnerGateProjectBinding()
+	if err == nil || !strings.Contains(err.Error(), "requires project-bound fixer role") {
+		t.Fatalf("expected project-bound denial for unregistered cwd, got: %v", err)
+	}
+	if authorizedRole != "" || authorizedProjectId != 0 || authorizedSessionId != 999 {
+		t.Fatalf("auth state mutated on failed lazy bind: role=%q project=%d session=%d", authorizedRole, authorizedProjectId, authorizedSessionId)
+	}
+}
+
+func TestEnsureNetrunnerGateProjectBindingDeniesOutsideGateProfile(t *testing.T) {
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	t.Setenv(fixerMcpToolProfileEnv, "")
+	authorizedRole = ""
+	authorizedProjectId = 0
+
+	err := ensureNetrunnerGateProjectBinding()
+	if err == nil || !strings.Contains(err.Error(), "requires project-bound fixer role") {
+		t.Fatalf("expected denial outside gate profile, got: %v", err)
+	}
+	if authorizedRole != "" || authorizedProjectId != 0 {
+		t.Fatalf("auth state mutated outside gate profile: role=%q project=%d", authorizedRole, authorizedProjectId)
+	}
+}
+
+func TestEnsureNetrunnerGateProjectBindingNoopWhenAlreadyBound(t *testing.T) {
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	t.Setenv(fixerMcpToolProfileEnv, "")
+	authorizedRole = "fixer"
+	authorizedProjectId = 5
+
+	if err := ensureNetrunnerGateProjectBinding(); err != nil {
+		t.Fatalf("expected already-bound auth to be accepted, got: %v", err)
+	}
+	if authorizedRole != "fixer" || authorizedProjectId != 5 {
+		t.Fatalf("auth state mutated when already bound: role=%q project=%d", authorizedRole, authorizedProjectId)
+	}
+}
+
+func TestGateWaitForNetrunnerWavesRebindsBeforeDelegating(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	setNetrunnerGateAuthEnv(t)
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 999
+
+	callResult, _, err := gateWaitForNetrunnerWaves(context.Background(), nil, WaitForNetrunnerWavesInput{})
+	if err == nil {
+		t.Fatal("expected delegated wait to fail validation after lazy bind, got nil error")
+	}
+	if !strings.Contains(err.Error(), "at least one wave ID") {
+		t.Fatalf("expected delegated batch validation error, got: %v", err)
+	}
+	if callResult == nil || !callResult.IsError {
+		t.Fatalf("expected MCP error result from delegated wait, got: %+v", callResult)
+	}
+	if authorizedRole != "fixer" || authorizedProjectId != 1 || authorizedSessionId != 0 {
+		t.Fatalf("gate did not lazily bind before delegating: role=%q project=%d session=%d", authorizedRole, authorizedProjectId, authorizedSessionId)
+	}
+}
+
+func TestGateWaitForNetrunnerWavesDeniesOutsideGateProfile(t *testing.T) {
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	t.Setenv(fixerMcpToolProfileEnv, "")
+	authorizedRole = ""
+	authorizedProjectId = 0
+
+	callResult, _, err := gateWaitForNetrunnerWaves(context.Background(), nil, WaitForNetrunnerWavesInput{})
+	if err == nil || !strings.Contains(err.Error(), "requires project-bound fixer role") {
+		t.Fatalf("expected gate denial outside gate profile, got: %v", err)
+	}
+	if callResult == nil || !callResult.IsError {
+		t.Fatalf("expected MCP error result outside gate profile, got: %+v", callResult)
+	}
+	if authorizedRole != "" || authorizedProjectId != 0 {
+		t.Fatalf("auth state mutated outside gate profile: role=%q project=%d", authorizedRole, authorizedProjectId)
 	}
 }

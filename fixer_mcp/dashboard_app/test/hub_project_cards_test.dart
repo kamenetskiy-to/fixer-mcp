@@ -45,6 +45,27 @@ void main() {
     expect(cards.map((card) => card.projectId), [2, 9, 4]);
   });
 
+  test('sorts mixed ISO and space-formatted timestamps correctly', () {
+    final cards = HubProjectCard.sortByActivity([
+      const HubProjectCard(
+        projectId: 11,
+        name: 'Older space',
+        cwd: '/tmp/11',
+        activeWaveCount: 0,
+        lastActivityAt: '2026-07-23 08:00:00',
+      ),
+      const HubProjectCard(
+        projectId: 12,
+        name: 'Newer iso',
+        cwd: '/tmp/12',
+        activeWaveCount: 0,
+        lastActivityAt: '2026-07-23T09:00:00Z',
+      ),
+    ]);
+
+    expect(cards.map((card) => card.projectId), [12, 11]);
+  });
+
   testWidgets('renders active waves and timestamp instead of P/I/R', (
     tester,
   ) async {
@@ -74,5 +95,44 @@ void main() {
 
     await tester.tap(find.text('Fixer MCP'));
     expect(tappedProjectId, 7);
+  });
+
+  testWidgets('filters by activity source', (tester) async {
+    const cards = [
+      HubProjectCard(
+        projectId: 1,
+        name: 'Fixer MCP',
+        cwd: '/workspace/fixer-mcp',
+        activeWaveCount: 0,
+        lastActivityAt: '2026-07-23T12:00:00Z',
+        hasFixerActivity: true,
+        hasHandsActivity: false,
+        hasAutonomousActivity: false,
+      ),
+      HubProjectCard(
+        projectId: 2,
+        name: 'Hands MCP',
+        cwd: '/workspace/hands-mcp',
+        activeWaveCount: 0,
+        lastActivityAt: '2026-07-23T11:00:00Z',
+        hasFixerActivity: false,
+        hasHandsActivity: true,
+        hasAutonomousActivity: false,
+      ),
+    ];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProjectCards(
+          projects: cards,
+          onProjectTap: (_) {},
+          sourceFilter: ProjectActivitySourceFilter.fixer,
+          emptyLabel: 'No projects.',
+        ),
+      ),
+    );
+
+    expect(find.text('Fixer MCP'), findsOneWidget);
+    expect(find.text('Hands MCP'), findsNothing);
   });
 }

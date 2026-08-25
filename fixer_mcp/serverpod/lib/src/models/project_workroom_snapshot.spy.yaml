@@ -1,0 +1,21 @@
+### Consistent initial Project Workroom read model and its journal watermark.
+class: ProjectWorkroomSnapshot
+immutable: true
+fields:
+  projectId: int, jsonKey=project_id
+  projectName: String, jsonKey=project_name
+  projectCwd: String, jsonKey=project_cwd
+  protocolVersion: int, jsonKey=protocol_version
+  watermarkSeq: int, jsonKey=watermark_seq
+  threads: List<WorkroomFixerThread>
+  selectedThreadId: String?, jsonKey=selected_thread_id
+  turns: List<WorkroomFixerTurn>
+  activeSurface: WorkroomSurface?, jsonKey=active_surface
+  handsActorId: String, jsonKey=hands_actor_id
+  handsDisplayName: String, jsonKey=hands_display_name
+  handsAuthorityState: String, jsonKey=hands_authority_state
+  handsDefaultLane: String, jsonKey=hands_default_lane
+  handsLanes: List<WorkroomHandsLane>, jsonKey=hands_lanes
+  handsMailbox: List<WorkroomHandsInstruction>, jsonKey=hands_mailbox
+  activeInstruction: WorkroomHandsInstruction?, jsonKey=active_instruction
+  capabilities: List<String>

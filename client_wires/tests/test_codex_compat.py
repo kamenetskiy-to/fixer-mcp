@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 import sys
@@ -33,13 +34,13 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
 
     def test_codex_model_defaults_include_gpt_56_family(self) -> None:
         self.assertEqual(llm.DEFAULT_MODEL, "gpt-5.6-luna")
-        self.assertEqual(llm.DEFAULT_REASONING, "xhigh")
-        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-sol"], "xhigh")
-        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-terra"], "xhigh")
-        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-luna"], "xhigh")
+        self.assertEqual(llm.DEFAULT_REASONING, "high")
+        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-sol"], "high")
+        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-terra"], "high")
+        self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-luna"], "high")
         self.assertEqual(
             [key for _label, key, _description in llm.MODEL_REASONING_OPTIONS["gpt-5.6-luna"]],
-            ["low", "medium", "high", "xhigh"],
+            ["low", "medium", "high", "xhigh", "max"],
         )
 
     def test_codex_sol_ultra_reasoning_is_preserved_in_launch_args(self) -> None:
@@ -60,7 +61,7 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         self.assertIn("ultra", manifest.reasoning.options)
         self.assertEqual(
             [key for _label, key, _description in llm.MODEL_REASONING_OPTIONS["gpt-5.6-sol"]],
-            ["low", "medium", "high", "xhigh", "ultra"],
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(llm.reasoning_label("gpt-5.6-sol", "ultra"), "Ultra")
         self.assertIn(
@@ -103,6 +104,7 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         self.assertEqual(available["playwright"]["command"], sys.executable)
         self.assertIn("--user-data-dir", available["playwright"]["args"])
         self.assertIn(str(runtime.PLAYWRIGHT_CHROME_PROFILE_DEFAULT), available["playwright"]["args"])
+        self.assertIn("--shared-context", available["playwright"]["args"])
         self.assertNotIn("--isolated", available["playwright"]["args"])
         self.assertEqual(selected["playwright"]["_source"], "preset_mcp")
 
@@ -125,6 +127,7 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         self.assertEqual(available["playwright"]["command"], sys.executable)
         self.assertIn("--user-data-dir", available["playwright"]["args"])
         self.assertIn("--headless", available["playwright"]["args"])
+        self.assertNotIn("--shared-context", available["playwright"]["args"])
         self.assertIn(str(runtime.PLAYWRIGHT_CHROME_PROFILE_DEFAULT), available["playwright"]["args"])
         self.assertNotIn("--isolated", available["playwright"]["args"])
         self.assertEqual(selected["playwright"]["_source"], "preset_mcp")
@@ -251,7 +254,11 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         package_dir = Path(playwright_chrome_cdp.__file__).parent
 
         self.assertEqual(runtime.playwright_chrome_cdp_wrapper_path(), package_dir / "playwright_chrome_cdp.py")
-        for name in ("playwright_chrome_cdp.py", "playwright_owned_context_mcp.cjs"):
+        for name in (
+            "playwright_chrome_cdp.py",
+            "playwright_owned_context_mcp.cjs",
+            "playwright_shared_context_mcp.cjs",
+        ):
             asset = package_dir / name
             self.assertTrue(asset.is_file(), f"missing packaged Playwright ownership asset: {name}")
 
@@ -265,6 +272,82 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
     def test_merge_env_with_os_prefers_loaded_values(self) -> None:
         with patch.dict(os.environ, {"EXISTING": "old"}, clear=True):
             self.assertEqual(llm._merge_env_with_os({"EXISTING": "new"})["EXISTING"], "new")
+
+
+class EnsureSqliteScaffoldNoninteractiveTests(unittest.TestCase):
+    def test_noninteractive_returns_deterministic_config_without_curses_or_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            with (
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(sys.stdout, "isatty", return_value=False),
+                patch.object(
+                    runtime,
+                    "single_select_items",
+                    side_effect=AssertionError("curses selector must not be called"),
+                ),
+                patch("builtins.input", side_effect=AssertionError("input() must not be called")),
+            ):
+                result = runtime.ensure_sqlite_scaffold(cwd)
+
+            self.assertEqual(result, cwd / "sqliteMCP.toml")
+            self.assertTrue(result.is_file())
+            content = result.read_text(encoding="utf-8")
+            self.assertIn("db/dev.sqlite3", content)
+            self.assertTrue((cwd / "db" / "dev.sqlite3").is_file())
+
+    def test_noninteractive_uses_sqlite_db_path_env_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as db_tmp:
+            cwd = Path(tmp)
+            override = Path(db_tmp) / "custom" / "app.db"
+            with (
+                patch.dict(os.environ, {runtime.SQLITE_DB_PATH_ENV: str(override)}, clear=False),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(sys.stdout, "isatty", return_value=False),
+                patch.object(
+                    runtime,
+                    "single_select_items",
+                    side_effect=AssertionError("curses selector must not be called"),
+                ),
+            ):
+                result = runtime.ensure_sqlite_scaffold(cwd)
+
+            self.assertEqual(result, cwd / "sqliteMCP.toml")
+            self.assertTrue(override.is_file())
+            content = result.read_text(encoding="utf-8")
+            self.assertIn(f'db_path = "{override.as_posix()}"', content)
+
+    def test_noninteractive_returns_none_with_actionable_error_when_db_uncreatable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            stderr = io.StringIO()
+            with (
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(sys.stdout, "isatty", return_value=False),
+                patch.object(Path, "touch", side_effect=OSError("disk full")),
+                patch("sys.stderr", new=stderr),
+            ):
+                result = runtime.ensure_sqlite_scaffold(cwd)
+
+            self.assertIsNone(result)
+            self.assertIn("CODEX_PRO_SQLITE_DB_PATH", stderr.getvalue())
+            self.assertFalse((cwd / "sqliteMCP.toml").exists())
+
+    def test_interactive_tty_still_uses_curses_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            db_path = cwd / "existing.sqlite3"
+            db_path.write_text("", encoding="utf-8")
+            with (
+                patch.object(sys.stdin, "isatty", return_value=True),
+                patch.object(sys.stdout, "isatty", return_value=True),
+                patch.object(runtime, "single_select_items", return_value=db_path) as selector,
+            ):
+                result = runtime.ensure_sqlite_scaffold(cwd)
+
+            self.assertEqual(result, cwd / "sqliteMCP.toml")
+            selector.assert_called_once()
+            self.assertIn("existing.sqlite3", result.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

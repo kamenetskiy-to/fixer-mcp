@@ -40,6 +40,17 @@ void main() {
         throwsA(isA<ClientAuthException>()),
       );
     });
+
+    test('only unknown-email failures allow convenience auto-registration', () {
+      const unknownEmail = ClientAuthException(
+        'Invalid email or password',
+        allowAutoRegister: true,
+      );
+      const badPassword = ClientAuthException('Invalid email or password');
+
+      expect(unknownEmail.allowAutoRegister, isTrue);
+      expect(badPassword.allowAutoRegister, isFalse);
+    });
   });
 
   test('uses Serverpod Auth Core Argon2id hashing for passwords', () async {

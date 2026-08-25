@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../shared/provider_model_reasoning_selector.dart';
 import 'fixer_chat_models.dart';
 import 'fixer_chat_service.dart';
 
@@ -54,7 +55,7 @@ class _FixerChatPanelState extends State<FixerChatPanel> {
   Future<void> _createChat() async {
     final request = await showDialog<FixerChatLaunchRequest>(
       context: context,
-      builder: (context) => _CreateFixerChatDialog(
+      builder: (context) => CreateFixerChatDialog(
         cwd: widget.projectCwd,
         providers: widget.providers,
       ),
@@ -212,17 +213,21 @@ class _StatusChip extends StatelessWidget {
   }
 }
 
-class _CreateFixerChatDialog extends StatefulWidget {
-  const _CreateFixerChatDialog({required this.cwd, required this.providers});
+class CreateFixerChatDialog extends StatefulWidget {
+  const CreateFixerChatDialog({
+    required this.cwd,
+    required this.providers,
+    super.key,
+  });
 
   final String cwd;
   final List<FixerProviderOption> providers;
 
   @override
-  State<_CreateFixerChatDialog> createState() => _CreateFixerChatDialogState();
+  State<CreateFixerChatDialog> createState() => _CreateFixerChatDialogState();
 }
 
-class _CreateFixerChatDialogState extends State<_CreateFixerChatDialog> {
+class _CreateFixerChatDialogState extends State<CreateFixerChatDialog> {
   late FixerProviderOption _provider;
   late String _model;
   late String _reasoning;
@@ -244,59 +249,44 @@ class _CreateFixerChatDialogState extends State<_CreateFixerChatDialog> {
     return AlertDialog(
       title: const Text('Create new Fixer chat'),
       content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 480),
+        constraints: const BoxConstraints(maxWidth: 560),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              DropdownButtonFormField<String>(
-                key: const Key('fixer-provider-select'),
-                initialValue: _provider.backend,
-                decoration: const InputDecoration(labelText: 'Provider'),
-                items: widget.providers
-                    .map(
-                      (provider) => DropdownMenuItem(
-                        value: provider.backend,
-                        child: Text(provider.label),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (backend) {
+              ProviderModelReasoningSelector(
+                key: const ValueKey('fixer-provider-select'),
+                providers: [
+                  for (final provider in widget.providers)
+                    ProviderModelReasoningOption(
+                      id: provider.backend,
+                      label: provider.label,
+                      models: provider.models,
+                      reasoningOptions: provider.reasoningOptions,
+                    ),
+                ],
+                selectedProvider: _provider.backend,
+                selectedModel: _model,
+                selectedReasoning: _reasoning,
+                onSelected: (selection) {
                   final provider = widget.providers.firstWhere(
-                    (item) => item.backend == backend,
+                    (item) => item.backend == selection.provider,
+                    orElse: () => widget.providers.first,
                   );
-                  setState(() => _selectProvider(provider));
+                  if (_provider.backend == provider.backend &&
+                      _model == selection.model &&
+                      _reasoning == selection.reasoning) {
+                    return;
+                  }
+                  setState(() {
+                    _provider = provider;
+                    _model = selection.model;
+                    _reasoning = selection.reasoning;
+                  });
                 },
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                key: const Key('fixer-model-select'),
-                initialValue: _model,
-                decoration: const InputDecoration(labelText: 'Model'),
-                items: _provider.models
-                    .map(
-                      (model) =>
-                          DropdownMenuItem(value: model, child: Text(model)),
-                    )
-                    .toList(),
-                onChanged: (model) => setState(() => _model = model!),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                key: const Key('fixer-reasoning-select'),
-                initialValue: _reasoning,
-                decoration: const InputDecoration(labelText: 'Reasoning'),
-                items: _provider.reasoningOptions
-                    .map(
-                      (reasoning) => DropdownMenuItem(
-                        value: reasoning,
-                        child: Text(reasoning),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (reasoning) =>
-                    setState(() => _reasoning = reasoning!),
+                width: 520,
+                height: 56,
               ),
               const SizedBox(height: 12),
               Text('CWD', style: Theme.of(context).textTheme.labelMedium),

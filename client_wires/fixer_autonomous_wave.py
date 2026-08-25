@@ -245,9 +245,14 @@ def _build_wave_netrunner_launch_plan(
 
     selected_config_paths: dict[str, Path] = {}
     if "sqlite" in selected_servers:
-        sqlite_config = ensure_sqlite_scaffold(resolved_project_cwd)
-        if sqlite_config is not None:
-            selected_config_paths["sqlite"] = sqlite_config
+        sqlite_config = ensure_sqlite_scaffold(resolved_project_cwd, interactive=False)
+        if sqlite_config is None:
+            raise RuntimeError(
+                "Unable to scaffold sqliteMCP.toml for the headless wave launch. "
+                "Create sqliteMCP.toml in the project root or set "
+                "CODEX_PRO_SQLITE_DB_PATH to a writable SQLite path."
+            )
+        selected_config_paths["sqlite"] = sqlite_config
 
     for server_name, config_path in selected_config_paths.items():
         env_var = config_env_vars.get(server_name)

@@ -1,0 +1,15 @@
+### One ordered turn in a durable Fixer thread.
+class: WorkroomFixerTurn
+immutable: true
+fields:
+  turnId: String, jsonKey=id
+  threadId: String, jsonKey=thread_id
+  ordinal: int
+  role: String
+  content: String
+  source: String?
+  status: String
+  clientMessageId: String?, jsonKey=client_message_id
+  providerTurnId: String?, jsonKey=provider_turn_id
+  createdAt: String, jsonKey=created_at
+  completedAt: String?, jsonKey=completed_at

@@ -1,0 +1,5 @@
+class: ProjectUiEventFrame
+extends: ProjectUiFrame
+immutable: true
+fields:
+  event: ProjectUiEvent

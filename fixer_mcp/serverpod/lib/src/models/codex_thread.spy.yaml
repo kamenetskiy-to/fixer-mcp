@@ -1,0 +1,20 @@
+### A persisted Codex thread bound to an external app-server thread id.
+class: CodexThread
+table: codex_thread
+fields:
+  threadId: String
+  title: String?
+  cwd: String?
+  model: String?
+  reasoningEffort: String?
+  sandboxMode: String?
+  isActive: bool, default=false
+  activeTurnId: String?
+  activeSince: DateTime?
+  lastActivityAt: DateTime?
+  lastCompletedAt: DateTime?
+  createdAt: DateTime, default=now
+indexes:
+  codex_thread_thread_id_unique_idx:
+    fields: threadId
+    unique: true

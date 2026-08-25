@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +25,179 @@ func TestResolveFixerDBPathUsesEnvOrDefault(t *testing.T) {
 	t.Setenv(fixerDBPathEnv, "  "+explicitPath+"  ")
 	if got := resolveFixerDBPath(); got != explicitPath {
 		t.Fatalf("expected explicit db path %q, got %q", explicitPath, got)
+	}
+}
+
+func TestSchemaBootstrapRequestIsExplicit(t *testing.T) {
+	if !schemaBootstrapRequested([]string{schemaBootstrapArg}) {
+		t.Fatal("expected exact schema bootstrap argument to be recognized")
+	}
+	for _, args := range [][]string{nil, {"--help"}, {schemaBootstrapArg, "extra"}} {
+		if schemaBootstrapRequested(args) {
+			t.Fatalf("unexpected schema bootstrap match for %#v", args)
+		}
+	}
+}
+
+func TestRunSchemaBootstrapMigratesPreHandsDatabaseIdempotently(t *testing.T) {
+	originalDB := db
+	defer func() {
+		db = originalDB
+	}()
+
+	dbPath := filepath.Join(t.TempDir(), "pre-hands.db")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open pre-Hands database: %v", err)
+	}
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE project (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			cwd TEXT UNIQUE NOT NULL
+		);
+		INSERT INTO project (name, cwd) VALUES ('Legacy Project', '/tmp/legacy-project');
+	`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("seed pre-Hands database: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close pre-Hands database: %v", err)
+	}
+
+	t.Setenv(fixerDBPathEnv, dbPath)
+	var firstOutput bytes.Buffer
+	if err := runSchemaBootstrap(&firstOutput); err != nil {
+		t.Fatalf("first schema bootstrap: %v", err)
+	}
+	var firstResult schemaBootstrapResult
+	if err := json.Unmarshal(firstOutput.Bytes(), &firstResult); err != nil {
+		t.Fatalf("decode first schema bootstrap result: %v", err)
+	}
+	if firstResult.Status != "ready" || firstResult.Schema != schemaBootstrapName {
+		t.Fatalf("unexpected first schema bootstrap result: %+v", firstResult)
+	}
+	if firstResult.ProjectCount != 1 || firstResult.ProjectHandsCount != 1 {
+		t.Fatalf("unexpected first schema bootstrap counts: %+v", firstResult)
+	}
+
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migrated database: %v", err)
+	}
+	var firstActorID string
+	if err := verifyDB.QueryRow(`SELECT actor_id FROM project_hands WHERE project_id = 1`).Scan(&firstActorID); err != nil {
+		_ = verifyDB.Close()
+		t.Fatalf("read migrated Hands identity: %v", err)
+	}
+	if err := verifyDB.Close(); err != nil {
+		t.Fatalf("close migrated database: %v", err)
+	}
+
+	var secondOutput bytes.Buffer
+	if err := runSchemaBootstrap(&secondOutput); err != nil {
+		t.Fatalf("repeat schema bootstrap: %v", err)
+	}
+	var secondResult schemaBootstrapResult
+	if err := json.Unmarshal(secondOutput.Bytes(), &secondResult); err != nil {
+		t.Fatalf("decode repeated schema bootstrap result: %v", err)
+	}
+	if secondResult != firstResult {
+		t.Fatalf("schema bootstrap counts changed on repeat: first=%+v second=%+v", firstResult, secondResult)
+	}
+
+	verifyDB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen migrated database: %v", err)
+	}
+	defer func() { _ = verifyDB.Close() }()
+	var secondActorID string
+	if err := verifyDB.QueryRow(`SELECT actor_id FROM project_hands WHERE project_id = 1`).Scan(&secondActorID); err != nil {
+		t.Fatalf("read repeated Hands identity: %v", err)
+	}
+	if firstActorID == "" || secondActorID != firstActorID {
+		t.Fatalf("schema bootstrap replaced durable Hands identity: first=%q second=%q", firstActorID, secondActorID)
+	}
+}
+
+func TestExplicitWaitPendingStartupFailureAppliesOnlyWithoutLiveWorker(t *testing.T) {
+	cases := []struct {
+		name                  string
+		processFound          bool
+		workerProcessTerminal bool
+		want                  bool
+	}{
+		{"no worker process metadata recorded yet", false, false, true},
+		{"recorded worker process already terminal", true, true, true},
+		{"live recorded worker process, session metadata still pending", true, false, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := explicitWaitPendingStartupFailureApplies(testCase.processFound, testCase.workerProcessTerminal); got != testCase.want {
+				t.Fatalf("explicitWaitPendingStartupFailureApplies(%v, %v) = %v, want %v", testCase.processFound, testCase.workerProcessTerminal, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestWaitForNetrunnerSessionDetectsExitedWorkerProcessPromptly(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() {
+		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+	}()
+	testDB := setupGetProjectsTestDB(t)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	if _, err := testDB.Exec("UPDATE session SET status = 'in_progress' WHERE id = 1"); err != nil {
+		t.Fatalf("mark session in_progress: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status, stopped_at) VALUES (1, 1, 999999, 1, 'exited', CURRENT_TIMESTAMP)",
+	); err != nil {
+		t.Fatalf("seed exited worker process: %v", err)
+	}
+
+	result, err := waitForNetrunnerSessionResult(context.Background(), 1, 5, 1)
+	if err != nil {
+		t.Fatalf("wait for exited worker: %v", err)
+	}
+	if !result.Terminal || result.TerminalCondition != "worker_process_exited" {
+		t.Fatalf("expected prompt worker_process_exited terminal condition, got %+v", result)
+	}
+	if result.WorkerProcess == nil || result.WorkerProcess.ProcessStatus != workerStatusExited {
+		t.Fatalf("expected worker process exit diagnostic, got %+v", result.WorkerProcess)
+	}
+}
+
+func TestWaitForNetrunnerSessionTimeoutKeepsLiveWorkerPending(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() {
+		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+	}()
+	testDB := setupGetProjectsTestDB(t)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	// A live worker process exists, but the session metadata is still
+	// "pending". The timeout path must not declare a startup failure while the
+	// worker is demonstrably alive.
+	if _, err := testDB.Exec(
+		"INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status, launch_origin) VALUES (1, 1, ?, 1, 'running', 'explicit')",
+		os.Getpid(),
+	); err != nil {
+		t.Fatalf("seed live worker process: %v", err)
+	}
+
+	result, err := waitForNetrunnerSessionResult(context.Background(), 1, 1, 1)
+	if err != nil {
+		t.Fatalf("wait with live worker should time out, not fail: %v", err)
+	}
+	if result.Terminal {
+		t.Fatalf("expected non-terminal timeout for live worker, got terminal condition %q", result.TerminalCondition)
+	}
+	if !result.TimedOut || result.TerminalCondition != "timed_out" {
+		t.Fatalf("expected timed_out result, got %+v", result)
 	}
 }
 

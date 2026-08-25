@@ -1,0 +1,6 @@
+### Future-call payload for durable Codex turn projection.
+class: CodexTurnPersistRequest
+fields:
+  codexThreadId: int
+  streamId: String
+  turnId: String

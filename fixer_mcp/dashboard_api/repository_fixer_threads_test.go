@@ -50,7 +50,7 @@ func TestFixerThreadsListsAllSupportedProviderStores(t *testing.T) {
 	}
 }
 
-func TestFixerChatBindingIncludesNonCodexFixerHistory(t *testing.T) {
+func TestHandsThreadsFiltersStrictlyToHandsAndIncludesAntigravity(t *testing.T) {
 	repo := openFixtureRepository(t)
 	defer repo.Close()
 
@@ -58,26 +58,66 @@ func TestFixerChatBindingIncludesNonCodexFixerHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load project: %v", err)
 	}
-	seedProviderFixerThreadFixtures(t, os.Getenv("HOME"), project.CWD)
+	home := os.Getenv("HOME")
+	seedProviderHandsThreadFixtures(t, home, project.CWD)
 
-	binding, err := repo.FixerChatBinding(context.Background(), 1)
+	response, err := repo.HandsThreads(context.Background(), 1)
 	if err != nil {
-		t.Fatalf("FixerChatBinding: %v", err)
+		t.Fatalf("HandsThreads: %v", err)
 	}
-	providers := map[string]bool{}
-	for _, session := range binding.Sessions {
-		providers[session.Backend] = true
+	if !response.Supported {
+		t.Fatalf("expected supported response: %+v", response)
 	}
-	for _, provider := range supportedFixerThreadProviders {
-		if !providers[provider] {
-			t.Fatalf("expected %s in fixer chat binding, got %v", provider, providers)
+
+	backends := map[string]int{}
+	for _, thread := range response.Threads {
+		backends[thread.Backend]++
+		if thread.AgentRole != "hands" {
+			t.Fatalf("expected all HandsThreads to have AgentRole 'hands', got: %+v", thread)
+		}
+		if thread.ExternalID == "wave-netrunner-session" || thread.ExternalID == "codex-wave-netrunner" {
+			t.Fatalf("non-hands netrunner session leaked into HandsThreads: %+v", thread)
 		}
 	}
+
+	if backends["antigravity"] < 1 {
+		t.Fatalf("expected at least 1 Antigravity hands thread, got %v", backends)
+	}
+	if backends["codex"] < 1 {
+		t.Fatalf("expected at least 1 Codex hands thread, got %v", backends)
+	}
+}
+
+func seedProviderHandsThreadFixtures(t *testing.T, home string, cwd string) {
+	t.Helper()
+	handsMarker := "Use its Project Hands Channel Mode for the current project."
+	waveMarker := "Activate skill $hands-netrunner immediately.\nUse Netrunner execution-envelope mode for this disposable provider generation."
+
+	// Codex real hands thread
+	writeFixtureFile(t, filepath.Join(home, ".codex", "sessions", "codex-hands.jsonl"), fmt.Sprintf(
+		"{\"timestamp\":\"2026-08-14T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-hands-session\",\"cwd\":%q,\"timestamp\":\"2026-08-14T01:00:00Z\"}}\n"+
+			"{\"timestamp\":\"2026-08-14T01:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":%q}]}}\n",
+		cwd, "Activate skill $hands-netrunner immediately.\n"+handsMarker+"\nThis provider process is a disposable client of the one permanent project actor `Руки`.",
+	))
+
+	// Codex wave netrunner thread (must be excluded from Hands)
+	writeFixtureFile(t, filepath.Join(home, ".codex", "sessions", "codex-wave.jsonl"), fmt.Sprintf(
+		"{\"timestamp\":\"2026-08-14T02:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-wave-netrunner\",\"cwd\":%q,\"timestamp\":\"2026-08-14T02:00:00Z\"}}\n"+
+			"{\"timestamp\":\"2026-08-14T02:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":%q}]}}\n",
+		cwd, waveMarker,
+	))
+
+	// Antigravity hands thread via brain transcript.jsonl
+	agyRoot := filepath.Join(home, ".gemini", "antigravity-cli")
+	writeFixtureFile(t, filepath.Join(agyRoot, "history.jsonl"),
+		fmt.Sprintf("{\"conversationId\":\"agy-hands-session\",\"workspace\":%q,\"display\":\"Руки Antigravity\",\"timestamp\":1786671108888}\n", cwd))
+	writeFixtureFile(t, filepath.Join(agyRoot, "brain", "agy-hands-session", ".system_generated", "logs", "transcript.jsonl"),
+		fmt.Sprintf("{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"content\":%q}\n", "/hands-netrunner\n"+handsMarker+"\nSelected execution lane: `antigravity`."))
 }
 
 func seedProviderFixerThreadFixtures(t *testing.T, home string, cwd string) {
 	t.Helper()
-	marker := "Activate skill `$init-fixer` immediately."
+	marker := "Activate skill $init-fixer immediately."
 	slug := providerProjectStoreSlug(cwd)
 	writeFixtureFile(t, filepath.Join(home, ".claude", "projects", slug, "claude-session.jsonl"),
 		fmt.Sprintf("{\"sessionId\":\"claude-session\",\"cwd\":%q,\"timestamp\":\"2026-07-20T10:00:00Z\",\"model\":\"sonnet\",\"message\":{\"content\":%q}}\n", cwd, marker))

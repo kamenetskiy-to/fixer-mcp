@@ -316,6 +316,138 @@ class AppLocalizations {
       ? 'Активных процессов воркеров нет.'
       : 'No active worker processes reported.';
 
+  String get workroomFixerTab => isRussian ? 'Фиксер' : 'Fixer';
+  String get workroomHandsTab => isRussian ? 'Руки' : 'Hands';
+  String get fixerConversation =>
+      isRussian ? 'Разговор с Фиксером' : 'Fixer conversation';
+  String get fixerConversationHint => isRussian
+      ? 'Спросите о проекте или запросите безопасное действие…'
+      : 'Ask about the project or request a governed action…';
+  String get sendMessage => isRussian ? 'Отправить' : 'Send';
+  String get noFixerTurns => isRussian
+      ? 'В этом треде пока нет сообщений.'
+      : 'This thread has no messages yet.';
+  String get chooseFixerThread =>
+      isRussian ? 'Выбрать тред Фиксера' : 'Choose Fixer thread';
+  String get genuiSurface => isRussian ? 'Поверхность GenUI' : 'GenUI surface';
+  String get surfaceCatalog =>
+      isRussian ? 'Поверхности проекта' : 'Project surfaces';
+  String get chooseSurface =>
+      isRussian ? 'Открыть поверхность' : 'Open surface';
+  String get surfaceRequestPending => isRussian
+      ? 'Запрашиваем типизированную поверхность…'
+      : 'Requesting the typed surface…';
+  String get noActiveSurface => isRussian
+      ? 'Фиксер ещё не представил поверхность.'
+      : 'Fixer has not presented a surface yet.';
+  String get surfaceProtocolError => isRussian
+      ? 'Эта ревизия не прошла проверку протокола. Последняя корректная поверхность сохранена.'
+      : 'This revision failed protocol validation. The last valid surface is retained.';
+  String get helpful => isRussian ? 'Полезно' : 'Helpful';
+  String get notHelpful => isRussian ? 'Не помогло' : 'Not helpful';
+  String get feedbackRecorded =>
+      isRussian ? 'Оценка сохранена.' : 'Feedback recorded.';
+  String get feedbackFailed =>
+      isRussian ? 'Не удалось сохранить оценку.' : 'Could not record feedback.';
+  String get governedAction =>
+      isRussian ? 'Подтвердите действие' : 'Confirm governed action';
+  String confirmAction(String label) => isRussian
+      ? 'Выполнить «$label»? Сервер повторно проверит права и актуальность состояния.'
+      : 'Run “$label”? The server will re-check authorization and current state.';
+  String get cancel => isRussian ? 'Отмена' : 'Cancel';
+  String get continueAction => isRussian ? 'Продолжить' : 'Continue';
+  String get connectionReplaying =>
+      isRussian ? 'Восстанавливаем события…' : 'Replaying durable events…';
+  String get connectionReconnecting =>
+      isRussian ? 'Переподключаемся…' : 'Reconnecting…';
+  String get connectionProtocolError =>
+      isRussian ? 'Нужно обновить приложение' : 'Application update required';
+  String get connectionAuthorizationLost =>
+      isRussian ? 'Доступ отозван' : 'Access revoked';
+  String get handsPermanentActor =>
+      isRussian ? 'Постоянный канал проекта' : 'Permanent project channel';
+  String get handsMailbox =>
+      isRussian ? 'Почта и история' : 'Mailbox & history';
+  String get handsInstruction => isRussian ? 'Поручение' : 'Instruction';
+  String get handsNoInstructions => isRussian
+      ? 'Поручений пока нет. Руки остаются тем же постоянным каналом.'
+      : 'No instructions yet. Hands remains the same permanent channel.';
+  String get handsQueue => isRussian ? 'Очередь' : 'Queue';
+  String get handsLane => isRussian ? 'Линия провайдера' : 'Provider lane';
+  String get handsLease => isRussian ? 'Запись / lease' : 'Write lease';
+  String get handsIdle => isRussian ? 'спит' : 'sleeping';
+  String get handsRunning => isRussian ? 'работает' : 'running';
+  String get handsBusy => isRussian ? 'занят' : 'busy';
+  String get handsError => isRussian ? 'ошибка' : 'error';
+  String get handsAwaitingReview =>
+      isRussian ? 'ждёт проверки' : 'awaiting review';
+  String get handsInstructionComposer =>
+      isRussian ? 'Поручить Рукам' : 'Instruct Hands';
+  String get handsInstructionHint => isRussian
+      ? 'Опишите один проверяемый результат…'
+      : 'Describe one verifiable outcome…';
+  String get handsWriteScope =>
+      isRussian ? 'Область записи' : 'Declared write scope';
+  String get handsWriteScopeHint => isRussian
+      ? 'Пути относительно проекта, по одному в строке'
+      : 'Project-relative paths, one per line';
+  String get handsAdvanced =>
+      isRussian ? 'Провайдер и область записи' : 'Provider & write scope';
+  String get handsSubmit => isRussian ? 'Поручить' : 'Submit instruction';
+  String get handsSubmitted => isRussian
+      ? 'Поручение сохранено в постоянной почте.'
+      : 'Instruction stored in the permanent mailbox.';
+  String get handsSelectLane => isRussian ? 'Сменить линию' : 'Select lane';
+  String get handsCancelInstruction =>
+      isRussian ? 'Отменить поручение' : 'Cancel instruction';
+  String get handsAcceptResult =>
+      isRussian ? 'Принять результат' : 'Accept result';
+  String get handsRequestChanges =>
+      isRussian ? 'Запросить изменения' : 'Request changes';
+  String get handsReviewNote =>
+      isRussian ? 'Комментарий проверки' : 'Review note';
+  String get handsTimeline => isRussian ? 'Хронология' : 'Timeline';
+  String get handsResult => isRussian ? 'Результат' : 'Result';
+  String get handsRepositoryDiff =>
+      isRussian ? 'Изменения репозитория' : 'Repository diff';
+  String get unknownValue => isRussian ? 'неизвестно' : 'unknown';
+  String surfaceLabel(String key) {
+    final labels = isRussian
+        ? const {
+            'project.overview.v1': 'Обзор проекта',
+            'wave.list.v1': 'Волны',
+            'wave.detail.v1': 'Детали волны',
+            'execution.review.v1': 'Проверка выполнения',
+            'backlog.list.v1': 'Бэклог',
+            'backlog.item.v1': 'Элемент бэклога',
+            'docs.tree.v1': 'Документы',
+            'docs.viewer.v1': 'Документ',
+            'execution.list.v1': 'Netrunner-сессии',
+            'execution.detail.v1': 'Детали сессии',
+            'skills.catalog.v1': 'Навыки',
+            'skills.detail.v1': 'Навык',
+            'runtime.evidence.v1': 'Состояние процесса',
+            'unsupported.request.v1': 'Неподдерживаемый запрос',
+          }
+        : const {
+            'project.overview.v1': 'Project overview',
+            'wave.list.v1': 'Waves',
+            'wave.detail.v1': 'Wave detail',
+            'execution.review.v1': 'Execution review',
+            'backlog.list.v1': 'Backlog',
+            'backlog.item.v1': 'Backlog item',
+            'docs.tree.v1': 'Documents',
+            'docs.viewer.v1': 'Document',
+            'execution.list.v1': 'Netrunner sessions',
+            'execution.detail.v1': 'Session detail',
+            'skills.catalog.v1': 'Skills',
+            'skills.detail.v1': 'Skill',
+            'runtime.evidence.v1': 'Runtime evidence',
+            'unsupported.request.v1': 'Unsupported request',
+          };
+    return labels[key] ?? key;
+  }
+
   String get formatDatePattern => isRussian ? 'dd.MM.yyyy' : 'dd.MM.yyyy';
   String formatDate(DateTime value) =>
       DateFormat(formatDatePattern, locale.languageCode).format(value);

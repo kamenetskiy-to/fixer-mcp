@@ -25,6 +25,55 @@ func setupTwoSingleWorkerWaves(t *testing.T) (*sql.DB, CreateNetrunnerWaveOutput
 	return testDB, first, second
 }
 
+func TestWaitNetrunnerWavesGateProfileEnvAuthSkipsAssumeRole(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	t.Setenv(fixerMcpDefaultRoleEnv, "fixer")
+	t.Setenv(fixerMcpDefaultCwdEnv, repoDir)
+	t.Setenv(fixerMcpLockedRoleEnv, "fixer")
+	t.Setenv(fixerMcpAutoAuthEnv, "1")
+	t.Setenv(fixerMcpToolProfileEnv, netrunnerGateProfile)
+
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 0
+
+	bootstrapDefaultRoleAuthFromEnv()
+	if authorizedRole != "fixer" || authorizedProjectId != 1 {
+		t.Fatalf("gate env auto-auth failed: role=%q project=%d", authorizedRole, authorizedProjectId)
+	}
+
+	// No explicit assume_role call: the batch wait handler must pass the
+	// project-bound fixer auth gate and reject the missing waves instead of
+	// returning an access-denied error.
+	callResult, _, err := WaitForNetrunnerWaves(context.Background(), nil, WaitForNetrunnerWavesInput{WaveIds: []int{9998, 9999}})
+	if err == nil {
+		t.Fatal("expected missing-wave rejection")
+	}
+	if strings.Contains(err.Error(), "fixer role") {
+		t.Fatalf("batch wait gate must be auto-authorized from env, got auth error: %v", err)
+	}
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
+	}
+}
+
 func TestLaunchNetrunnerWavesPreservesPerWaveFailureIsolation(t *testing.T) {
 	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
 	defer func() {
@@ -156,6 +205,21 @@ func TestParallelWaveBatchDetailLevelValidation(t *testing.T) {
 				t.Fatalf("detail level %q = %q, %v", test.input, got, err)
 			}
 		})
+	}
+}
+
+func TestValidateParallelWaveBatchIDsAllowsSingleWaveAndRejectsEmptyBatch(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	testDB, first, _ := setupTwoSingleWorkerWaves(t)
+	defer testDB.Close()
+	db = testDB
+
+	if err := validateParallelWaveBatchIDs([]int{first.WaveId}, 1); err != nil {
+		t.Fatalf("single-wave batch should be allowed, got: %v", err)
+	}
+	if err := validateParallelWaveBatchIDs(nil, 1); err == nil || !strings.Contains(err.Error(), "at least one wave ID") {
+		t.Fatalf("expected empty-batch rejection, got: %v", err)
 	}
 }
 

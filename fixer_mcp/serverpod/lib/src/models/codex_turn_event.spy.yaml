@@ -1,0 +1,12 @@
+### A durable raw notification received from codex-bridge for a turn.
+class: CodexTurnEvent
+table: codex_turn_event
+fields:
+  codexThreadId: int, relation(parent=codex_thread, onDelete=Cascade)
+  turnId: String
+  method: String
+  json: String
+  createdAt: DateTime, default=now
+indexes:
+  codex_turn_event_turn_id_id_idx:
+    fields: turnId, id

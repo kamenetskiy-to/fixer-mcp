@@ -1,0 +1,18 @@
+### One immutable event from the authoritative per-project SQLite journal.
+class: ProjectUiEvent
+immutable: true
+fields:
+  projectId: int, jsonKey=project_id
+  seq: int
+  eventId: String, jsonKey=event_id
+  schemaVersion: int, jsonKey=schema_version
+  kind: String
+  aggregateType: String, jsonKey=aggregate_type
+  aggregateId: String, jsonKey=aggregate_id
+  aggregateRevision: int, jsonKey=aggregate_revision
+  payloadJson: String, jsonKey=payload
+  actorKind: String, jsonKey=actor_kind
+  actorId: String, jsonKey=actor_id
+  causationId: String, jsonKey=causation_id
+  correlationId: String, jsonKey=correlation_id
+  createdAt: String, jsonKey=created_at

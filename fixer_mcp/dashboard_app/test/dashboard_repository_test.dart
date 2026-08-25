@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fixer_dashboard_app/src/client_order_repository.dart';
 import 'package:fixer_dashboard_app/src/dashboard_repository.dart';
 import 'package:fixer_dashboard_app/src/dashboard_runtime_client.dart';
 import 'package:fixer_dashboard_app/src/hub/fixer_chat/fixer_chat_models.dart';
@@ -10,8 +11,14 @@ void main() {
   test('loads bridge-backed home, project, and session payloads', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(server.close);
+    final serverpodAuthorizationHeaders = <String?>[];
 
     server.listen((request) async {
+      if (request.uri.path.startsWith('/dashboardRuntime/')) {
+        serverpodAuthorizationHeaders.add(
+          request.headers.value(HttpHeaders.authorizationHeader),
+        );
+      }
       final payload = switch (request.uri.path) {
         '/api/home' => {
           'current_project': {
@@ -547,9 +554,11 @@ void main() {
       await request.response.close();
     });
 
+    final authProvider = ClientSessionAuthProvider()..setToken('test-token');
     final repository = BridgeDashboardRepository(
       baseUrl: 'http://${server.address.host}:${server.port}',
       serverpodBaseUrl: 'http://${server.address.host}:${server.port}',
+      authProvider: authProvider,
     );
 
     final home = await repository.loadHomeSnapshot();
@@ -613,5 +622,6 @@ void main() {
     final turnStatus = await repository.loadThreadTurnStatus('stream-123');
     expect(turnStatus.assistantText, 'Streaming text');
     expect(turnStatus.events.last.phase, 'assistant_delta');
+    expect(serverpodAuthorizationHeaders, everyElement('Bearer test-token'));
   });
 }

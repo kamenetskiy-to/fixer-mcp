@@ -485,6 +485,21 @@ def _wait_for_new_droid_session_id(
     )
 
 
+def _wait_for_new_commandcode_session_id(
+    cwd: Path,
+    before: str | None,
+    *,
+    launch_started_at: float | None = None,
+    timeout_sec: float = 8.0,
+) -> str | None:
+    return fixer_autonomous_transcripts._wait_for_new_commandcode_session_id(
+        cwd,
+        before,
+        launch_started_at=launch_started_at,
+        timeout_sec=timeout_sec,
+    )
+
+
 def _wait_for_new_external_session_id(
     backend: str,
     cwd: Path,
@@ -502,6 +517,7 @@ def _wait_for_new_external_session_id(
         timeout_sec=timeout_sec,
         normalize_backend_name_fn=fixer_wire.normalize_backend_name,
         wait_for_new_codex_session_id_fn=_wait_for_new_codex_session_id,
+        wait_for_new_commandcode_session_id_fn=_wait_for_new_commandcode_session_id,
         wait_for_new_droid_session_id_fn=_wait_for_new_droid_session_id,
         wait_for_new_antigravity_conversation_id_fn=_wait_for_new_antigravity_conversation_id,
     )
@@ -758,7 +774,7 @@ def launch_netrunner(
 
     before = (
         fixer_wire._latest_codex_session_id_for_cwd(cwd)
-        if launch_selection.backend == "codex"
+        if fixer_wire.is_codex_backend(launch_selection.backend)
         else None
     )
     log_path = (
@@ -975,7 +991,7 @@ def launch_wave_netrunner_worker(
 
     before = (
         fixer_wire._latest_codex_session_id_for_cwd(resolved_worker_cwd)
-        if launch_selection.backend == "codex"
+        if fixer_wire.is_codex_backend(launch_selection.backend)
         else None
     )
     log_path = (

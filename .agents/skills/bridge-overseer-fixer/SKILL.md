@@ -18,7 +18,12 @@ Use this skill only as a project-bound Fixer invoked by the global Overseer.
 7. Route clear work through canonical Fixer flows:
    - `$run-netrunner-wave` for every bounded implementation task, including a one-worker wave
    - `$review-netrunner-session` for completed-session review
-   - `$run-manual-netrunner` only when Overseer explicitly requests the separate-terminal path
+   - never launch or resume Project Hands; the Architect exclusively opens Hands
+     through the fixer TUI or Fixer Studio
+   - use Hands tools only to inspect state/history, submit instructions, cancel
+     stale work, or perform governed review
+   - `$hands-netrunner` applies only inside an Architect-opened Hands client
+     or an explicitly preselected compatibility envelope, never as bridge dispatch
 8. Send the compact result through `append_overseer_fixer_message`.
 
 ## Constraints

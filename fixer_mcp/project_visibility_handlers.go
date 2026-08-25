@@ -1497,3 +1497,210 @@ func WaitForOverseerFixerMessages(ctx context.Context, req *mcp.CallToolRequest,
 		}
 	}
 }
+
+const (
+	listNetrunnerWavesDefaultLimit = 20
+	listNetrunnerWavesMaxLimit     = 100
+	waveSearchReasonMaxRunes       = 220
+)
+
+var validNetrunnerWavePhases = map[string]struct{}{
+	parallelWavePhaseInitialized:    {},
+	parallelWavePhaseImplementation: {},
+	parallelWavePhaseAcceptance:     {},
+	parallelWavePhaseCompleted:      {},
+}
+
+type ListNetrunnerWavesInput struct {
+	Status string `json:"status,omitempty" jsonschema:"Optional exact parallel_wave.status filter, for example created, launching, running, review_ready, partially_failed, stopping, stopped, completed, failed, cleaned."`
+	Phase  string `json:"phase,omitempty" jsonschema:"Optional exact wave phase filter: initialized, implementation, acceptance, or completed."`
+	Search string `json:"search,omitempty" jsonschema:"Optional substring filter matched against control_reason and failure_reason (SQLite LIKE, case-insensitive for ASCII)."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum rows to return. Defaults to 20; maximum 100."`
+	Offset int    `json:"offset,omitempty" jsonschema:"Rows to skip for pagination, ordered by most recent wave first. Defaults to 0."`
+}
+
+type NetrunnerWaveSummary struct {
+	Id                 int    `json:"id"`
+	Status             string `json:"status"`
+	Phase              string `json:"phase"`
+	GateState          string `json:"gate_state"`
+	ControlState       string `json:"control_state"`
+	FailurePolicyState string `json:"failure_policy_state"`
+	ParentWaveId       int    `json:"parent_wave_id,omitempty"`
+	RootWaveId         int    `json:"root_wave_id,omitempty"`
+	WorkerCount        int    `json:"worker_count"`
+	SessionIds         []int  `json:"session_ids"`
+	ControlReason      string `json:"control_reason,omitempty"`
+	FailureReason      string `json:"failure_reason,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+	LaunchedAt         string `json:"launched_at,omitempty"`
+	CompletedAt        string `json:"completed_at,omitempty"`
+}
+
+type ListNetrunnerWavesOutput struct {
+	ProjectId int                    `json:"project_id"`
+	Waves     []NetrunnerWaveSummary `json:"waves"`
+	Limit     int                    `json:"limit"`
+	Offset    int                    `json:"offset"`
+	Returned  int                    `json:"returned"`
+	HasMore   bool                   `json:"has_more"`
+}
+
+func fetchNetrunnerWaveSessionIDs(waveID int, projectID int) ([]int, error) {
+	rows, err := db.Query(
+		`SELECT (
+			SELECT COUNT(*) FROM session ranked
+			WHERE ranked.project_id = ? AND ranked.id <= w.session_id
+		) AS local_session_id
+		 FROM parallel_wave_worker w
+		 WHERE w.wave_id = ? AND w.project_id = ?
+		 ORDER BY w.session_id`,
+		projectID,
+		waveID,
+		projectID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sessionIDs := []int{}
+	for rows.Next() {
+		var localSessionID int
+		if err := rows.Scan(&localSessionID); err != nil {
+			return nil, err
+		}
+		sessionIDs = append(sessionIDs, localSessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sessionIDs, nil
+}
+
+func ListNetrunnerWaves(ctx context.Context, req *mcp.CallToolRequest, input ListNetrunnerWavesInput) (*mcp.CallToolResult, ListNetrunnerWavesOutput, error) {
+	if authorizedRole != "fixer" {
+		return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("access denied: requires fixer role")
+	}
+	if authorizedProjectId <= 0 {
+		return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("access denied: fixer role is not bound to a project")
+	}
+
+	status := strings.TrimSpace(input.Status)
+	phase := strings.TrimSpace(input.Phase)
+	if phase != "" {
+		if _, ok := validNetrunnerWavePhases[phase]; !ok {
+			return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("phase must be one of initialized, implementation, acceptance, completed")
+		}
+	}
+	search := strings.TrimSpace(input.Search)
+
+	limit := normalizeSearchListLimit(input.Limit, listNetrunnerWavesDefaultLimit, listNetrunnerWavesMaxLimit)
+	offset := normalizeSearchListOffset(input.Offset)
+
+	var query strings.Builder
+	query.WriteString(`SELECT
+		p.id,
+		p.status,
+		COALESCE(p.phase, 'initialized'),
+		COALESCE(p.gate_state, 'none'),
+		COALESCE(p.control_state, 'active'),
+		COALESCE(p.failure_policy_state, 'none'),
+		COALESCE(p.parent_wave_id, 0),
+		COALESCE(p.root_wave_id, 0),
+		COALESCE(p.control_reason, ''),
+		COALESCE(p.failure_reason, ''),
+		p.created_at,
+		p.updated_at,
+		COALESCE(p.launched_at, ''),
+		COALESCE(p.completed_at, ''),
+		(SELECT COUNT(*) FROM parallel_wave_worker w WHERE w.wave_id = p.id) AS worker_count
+	 FROM parallel_wave p
+	 WHERE p.project_id = ?`)
+
+	args := []any{authorizedProjectId}
+
+	if status != "" {
+		query.WriteString(" AND p.status = ?")
+		args = append(args, status)
+	}
+	if phase != "" {
+		query.WriteString(" AND COALESCE(p.phase, 'initialized') = ?")
+		args = append(args, phase)
+	}
+	if search != "" {
+		query.WriteString(" AND (COALESCE(p.control_reason, '') LIKE ? ESCAPE '\\' OR COALESCE(p.failure_reason, '') LIKE ? ESCAPE '\\')")
+		pattern := "%" + escapeSQLLikePattern(search) + "%"
+		args = append(args, pattern, pattern)
+	}
+
+	query.WriteString(" ORDER BY p.id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit+1, offset)
+
+	rows, err := db.Query(query.String(), args...)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("DB query error: %v", err)
+	}
+
+	waves := []NetrunnerWaveSummary{}
+	for rows.Next() {
+		var (
+			item          NetrunnerWaveSummary
+			controlReason string
+			failureReason string
+		)
+		if err := rows.Scan(
+			&item.Id,
+			&item.Status,
+			&item.Phase,
+			&item.GateState,
+			&item.ControlState,
+			&item.FailurePolicyState,
+			&item.ParentWaveId,
+			&item.RootWaveId,
+			&controlReason,
+			&failureReason,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+			&item.LaunchedAt,
+			&item.CompletedAt,
+			&item.WorkerCount,
+		); err != nil {
+			_ = rows.Close()
+			return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("DB scan error: %v", err)
+		}
+		item.ControlReason = truncateRunes(normalizeCompactText(controlReason), waveSearchReasonMaxRunes)
+		item.FailureReason = truncateRunes(normalizeCompactText(failureReason), waveSearchReasonMaxRunes)
+		waves = append(waves, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("DB rows error: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("DB close error: %v", err)
+	}
+
+	hasMore := len(waves) > limit
+	if hasMore {
+		waves = waves[:limit]
+	}
+
+	for i := range waves {
+		sessionIDs, err := fetchNetrunnerWaveSessionIDs(waves[i].Id, authorizedProjectId)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, ListNetrunnerWavesOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
+		waves[i].SessionIds = sessionIDs
+	}
+
+	return nil, ListNetrunnerWavesOutput{
+		ProjectId: authorizedProjectId,
+		Waves:     waves,
+		Limit:     limit,
+		Offset:    offset,
+		Returned:  len(waves),
+		HasMore:   hasMore,
+	}, nil
+}

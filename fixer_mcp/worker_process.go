@@ -22,6 +22,42 @@ type parallelWaveReviewSession struct {
 	Report          string
 }
 
+func normalizeParallelWaveReviewPolicy(raw string) (string, error) {
+	policy := strings.ToLower(strings.TrimSpace(raw))
+	if policy == "" {
+		return defaultParallelWaveReviewPolicy, nil
+	}
+	switch policy {
+	case parallelWaveReviewPolicyAutomatic, parallelWaveReviewPolicyManual:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("unsupported review_policy %q; supported values are %q and %q", raw, parallelWaveReviewPolicyAutomatic, parallelWaveReviewPolicyManual)
+	}
+}
+
+func resolveParallelWaveReviewConfig(policy, backend, model, reasoning string) (string, string, string, string, error) {
+	normalizedPolicy, err := normalizeParallelWaveReviewPolicy(policy)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	normalizedBackend := strings.TrimSpace(backend)
+	if normalizedBackend == "" {
+		normalizedBackend = defaultParallelWaveReviewBackend
+	}
+	normalizedModel := strings.TrimSpace(model)
+	if normalizedModel == "" {
+		normalizedModel = defaultParallelWaveReviewModel
+	}
+	if normalizedModel == "opencode-go/deepseek-v4-pro" {
+		return "", "", "", "", fmt.Errorf("OpenCode Go DeepSeek V4 Pro is disabled for Fixer review")
+	}
+	normalizedReasoning := strings.TrimSpace(reasoning)
+	if normalizedReasoning == "" {
+		normalizedReasoning = defaultParallelWaveReviewReasoning
+	}
+	return normalizedPolicy, normalizedBackend, normalizedModel, normalizedReasoning, nil
+}
+
 func parallelWaveReviewMarker(waveID int) string {
 	return fmt.Sprintf("%s%d", parallelWaveReviewMarkerPrefix, waveID)
 }
@@ -257,11 +293,25 @@ func launchParallelWaveReviewer(ctx context.Context, wave NetrunnerWaveSnapshot,
 		return err
 	}
 	defer logHandle.Close()
+	reviewBackend := strings.TrimSpace(wave.ReviewBackend)
+	if reviewBackend == "" {
+		reviewBackend = defaultParallelWaveReviewBackend
+	}
+	reviewModel := strings.TrimSpace(wave.ReviewModel)
+	if reviewModel == "" {
+		reviewModel = defaultParallelWaveReviewModel
+	}
+	reviewReasoning := strings.TrimSpace(wave.ReviewReasoning)
+	if reviewReasoning == "" {
+		reviewReasoning = defaultParallelWaveReviewReasoning
+	}
 	command := execCommand("python3", launcherScript, "launch-wave-reviewer",
 		"--cwd", projectCWD,
 		"--session-id", strconv.Itoa(review.LocalSessionID),
 		"--wave-id", strconv.Itoa(wave.Id),
-		"--backend", "codex",
+		"--backend", reviewBackend,
+		"--model", reviewModel,
+		"--reasoning", reviewReasoning,
 		"--headless-log-path", logPath,
 		"--worker-metadata-path", metadataPath,
 	)
@@ -309,6 +359,13 @@ func launchParallelWaveReviewer(ctx context.Context, wave NetrunnerWaveSnapshot,
 }
 
 func ensureParallelWaveReviewer(ctx context.Context, wave NetrunnerWaveSnapshot) error {
+	policy, err := normalizeParallelWaveReviewPolicy(wave.ReviewPolicy)
+	if err != nil {
+		return err
+	}
+	if policy != parallelWaveReviewPolicyAutomatic {
+		return nil
+	}
 	if wave.FailurePolicyState != parallelWaveFailurePolicyPassed {
 		return fmt.Errorf("wave %d failure policy is %q; reviewer launch requires %q", wave.Id, wave.FailurePolicyState, parallelWaveFailurePolicyPassed)
 	}

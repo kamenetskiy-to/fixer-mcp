@@ -83,6 +83,23 @@ class ResolveFixerDbPathTests(unittest.TestCase):
 
             with (
                 patch.object(fixer_wire, "_repo_root", return_value=repo_root),
+                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: f"  {env_db}  "}, clear=False),
+            ):
+                resolved = fixer_wire._resolve_fixer_db_path(cwd)
+
+        self.assertEqual(resolved, env_db.resolve())
+
+    def test_explicit_env_path_is_authoritative_before_database_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+            repo_root = Path(repo_tmp)
+            cwd = Path(cwd_tmp)
+            repo_db = repo_root / "fixer_mcp" / "fixer.db"
+            env_db = repo_root / "new-state" / "fixer.db"
+            repo_db.parent.mkdir(parents=True, exist_ok=True)
+            repo_db.touch()
+
+            with (
+                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
                 patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: str(env_db)}, clear=False),
             ):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)

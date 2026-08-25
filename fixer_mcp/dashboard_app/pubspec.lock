@@ -25,6 +25,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
+  cascade_widget:
+    dependency: "direct main"
+    description:
+      name: cascade_widget
+      sha256: "38917a12162adfe8966a14723f2e54bbea139932d9528abce36c2f10d2127978"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.8"
   characters:
     dependency: transitive
     description:

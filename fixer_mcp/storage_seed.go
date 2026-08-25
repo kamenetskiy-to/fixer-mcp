@@ -194,6 +194,18 @@ func applyCuratedDefaultMcpServers() error {
 	return tx.Commit()
 }
 
+func ensureGlobalEdgeMcpBindings() error {
+	_, err := db.Exec(
+		`INSERT OR IGNORE INTO project_mcp_server (project_id, mcp_server_id)
+		 SELECT p.id, m.id
+		 FROM project p
+		 CROSS JOIN mcp_server m
+		 WHERE m.name = ?`,
+		"edge",
+	)
+	return err
+}
+
 func ensureProjectMcpBindingsForProjectTx(tx *sql.Tx, projectID int) error {
 	var existingCount int
 	if err := tx.QueryRow(
@@ -611,6 +623,15 @@ var liveMcpMarketplaceCatalog = []mcpMarketplaceCatalogSpec{
 		InstallHint:      "npx -y @playwright/mcp@latest --isolated --headless",
 	},
 	{
+		Name:             "edge",
+		ShortDescription: "Existing-browser Edge MCP exposing all tabs in the default Edge profile.",
+		LongDescription:  "Uses the local Edge MCP All Tabs extension with Playwright's official extension relay protocol v2 to attach to the Architect's already-open default Microsoft Edge and intentionally expose all existing and newly created ordinary tabs. It does not launch a separate automation profile or durable window and does not touch Chrome.",
+		Category:         "Coding",
+		HowTo:            "Use only when the Architect explicitly selects Edge MCP. Load the local Edge MCP All Tabs extension once in the default Edge profile; selecting the MCP then exposes every existing ordinary tab and automatically tracks new tabs until disconnect.",
+		Portability:      "local-only",
+		InstallHint:      "In edge://extensions enable Developer mode and load unpacked /home/operator/Desktop/projects/self_orchestration/client_wires/edge_mcp_extension. Codex launches /home/operator/Desktop/projects/mcp_servers/codex_pro_app/playwright_edge_extension_mcp.cjs.",
+	},
+	{
 		Name:             "postgres",
 		ShortDescription: "PostgreSQL diagnostics and operations: inspect schemas, run queries, and analyze database health/performance.",
 		Category:         "DB",
@@ -761,8 +782,15 @@ func upsertRolePreprompt(roleName, promptText string) error {
 	return err
 }
 
+func fixerRolePrepromptText() string {
+	return strings.TrimSpace(defaultRolePreprompts["fixer"])
+}
+
 func seedRolePreprompts() error {
 	for roleName, promptText := range defaultRolePreprompts {
+		if roleName == "fixer" {
+			promptText = fixerRolePrepromptText()
+		}
 		if err := upsertRolePreprompt(roleName, promptText); err != nil {
 			return err
 		}

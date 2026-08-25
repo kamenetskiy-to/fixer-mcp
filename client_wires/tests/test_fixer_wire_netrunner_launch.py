@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import sys
 import tempfile
@@ -8,7 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from client_wires import fixer_wire
+from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_netrunner_launch
+from client_wires import fixer_wire_selectors
 from client_wires.backends.antigravity_adapter import AntigravityBackendAdapter
 from client_wires.backends.droid_adapter import DroidBackendAdapter
 from client_wires.backends.junie_adapter import JunieBackendAdapter
@@ -21,7 +24,7 @@ from client_wires.tests.test_fixer_wire import (
 
 
 class _DummyOption:
-    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False) -> None:
+    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False, **kwargs: object) -> None:
         self.label = label
         self.value = value
         self.disabled = disabled
@@ -29,6 +32,16 @@ class _DummyOption:
 
 
 class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
+    def test_command_display_redacts_embedded_environment_payload(self) -> None:
+        displayed = fixer_wire_netrunner_launch._redacted_command_for_display(
+            ["codex", "--config", 'mcp_servers.secret.env={\"TOKEN\":\"private\"}']
+        )
+
+        self.assertEqual(
+            displayed,
+            ["codex", "--config", "mcp_servers.secret.env=<redacted>"],
+        )
+
     def test_launch_netrunner_wrapper_delegates_with_facade_callbacks(self) -> None:
         with patch.object(fixer_wire_netrunner_launch, "launch_netrunner", return_value=73) as delegated:
             code = fixer_wire._launch_netrunner(
@@ -53,6 +66,255 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
         self.assertIs(callbacks.resolve_netrunner_resume_session_id, fixer_wire._resolve_netrunner_resume_session_id)
         self.assertIs(callbacks.append_codex_apps_gate, fixer_wire._append_codex_apps_gate)
         self.assertEqual(callbacks.forced_mcp_server, fixer_wire.FORCED_MCP_SERVER)
+
+    def test_project_hands_state_reads_one_actor_and_provider_lanes(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        db_path = Path(tmp.name) / "fixer.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE project (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    cwd TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE project_hands (
+                    project_id INTEGER PRIMARY KEY,
+                    actor_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    authority_state TEXT NOT NULL,
+                    default_lane TEXT NOT NULL
+                );
+                INSERT INTO project VALUES (1, 'Project', '/tmp/project');
+                INSERT INTO project_hands
+                VALUES (1, 'actor-1', 'Руки', 'enabled', 'codex');
+                """
+            )
+        finally:
+            conn.close()
+        try:
+            with (
+                patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
+                patch.object(fixer_wire, "_bootstrap_fixer_mcp_database"),
+                patch.object(
+                    fixer_wire,
+                    "_ensure_wire_schema",
+                    side_effect=AssertionError("Python must not migrate the Project Hands schema"),
+                ),
+                patch.object(fixer_wire, "_ensure_project_registered", return_value=1),
+            ):
+                state = fixer_wire._load_project_hands_state(Path("/tmp/project"))
+        finally:
+            tmp.cleanup()
+
+        self.assertEqual(state.display_name, "Руки")
+        self.assertEqual(state.default_lane, "codex")
+        self.assertEqual([lane.provider for lane in state.lanes], ["codex", "commandcode", "claude", "kimi", "antigravity"])
+        self.assertEqual(state.lanes[0].backend, "codex")
+        self.assertEqual(state.lanes[2].backend, "claude")
+
+    def test_project_hands_facade_bootstraps_go_schema_before_reading_state(self) -> None:
+        cwd = Path("/tmp/project")
+        db_path = Path("/tmp/fixer.db")
+        expected = fixer_wire_netrunner_launch.ProjectHandsState(
+            project_id=1,
+            display_name="Руки",
+            authority_state="enabled",
+            default_lane="codex",
+            lanes=(),
+        )
+        calls: list[tuple[str, object]] = []
+
+        def record_bootstrap(path: Path) -> None:
+            calls.append(("bootstrap", path))
+
+        def record_read(path: Path, *, callbacks: object) -> fixer_wire_netrunner_launch.ProjectHandsState:
+            calls.append(("read", path))
+            self.assertIsInstance(callbacks, fixer_wire_netrunner_launch.NetrunnerLaunchCallbacks)
+            return expected
+
+        with (
+            patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
+            patch.object(fixer_wire, "_bootstrap_fixer_mcp_database", side_effect=record_bootstrap),
+            patch.object(fixer_wire_netrunner_launch, "load_project_hands_state", side_effect=record_read),
+        ):
+            state = fixer_wire._load_project_hands_state(cwd)
+
+        self.assertIs(state, expected)
+        self.assertEqual(calls, [("bootstrap", db_path), ("read", cwd)])
+
+    def test_project_hands_lane_selector_exposes_every_registered_lane(self) -> None:
+        lanes = (
+            fixer_wire_netrunner_launch.ProjectHandsLane("codex", "gpt", "high"),
+            fixer_wire_netrunner_launch.ProjectHandsLane("kimi", "kimi-k3-256k", "default"),
+        )
+        captured: dict[str, object] = {}
+
+        def choose_backend(preferred: str, option_cls: object, chooser: object) -> str:
+            captured["backend_args"] = (preferred, option_cls, chooser)
+            return "codex"
+
+        def choose_model(backend: str, preferred: str, *_args: object, **_kwargs: object) -> str:
+            captured["model_selection"] = (backend, preferred)
+            return "gpt"
+
+        selected = fixer_wire_selectors._select_project_hands_lane_interactive(
+            lanes,
+            "codex",
+            _DummyOption,
+            choose_backend,
+            select_backend_interactive=choose_backend,
+            select_model_interactive=choose_model,
+        )
+
+        self.assertEqual(selected.provider, "codex")
+        self.assertEqual(selected.model, "gpt")
+        self.assertEqual(captured["backend_args"][0], "codex")
+        self.assertEqual(captured["model_selection"], ("codex", "gpt"))
+
+    def test_launch_project_hands_uses_disposable_fixer_client_and_durable_lane(self) -> None:
+        state = fixer_wire_netrunner_launch.ProjectHandsState(
+            project_id=1,
+            display_name="Руки",
+            authority_state="enabled",
+            default_lane="codex",
+            lanes=(
+                fixer_wire_netrunner_launch.ProjectHandsLane(
+                    "codex",
+                    "gpt-5.6-sol",
+                    "high",
+                ),
+            ),
+        )
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "fixer.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE project (id INTEGER PRIMARY KEY, name TEXT, cwd TEXT);
+                CREATE TABLE mcp_server (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE,
+                    auto_attach INTEGER NOT NULL DEFAULT 0,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    category TEXT,
+                    how_to TEXT
+                );
+                CREATE TABLE project_mcp_server (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    mcp_server_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT '',
+                    UNIQUE(project_id, mcp_server_id)
+                );
+                CREATE TABLE project_doc (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    doc_type TEXT,
+                    parent_doc_id INTEGER,
+                    level INTEGER,
+                    slug TEXT,
+                    path TEXT,
+                    status TEXT
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO project (id, name, cwd) VALUES (1, 'proj', ?)",
+                (str(Path.cwd().resolve()),),
+            )
+            conn.execute("INSERT INTO mcp_server (name, is_default) VALUES ('fixer_mcp', 1)")
+            conn.execute("INSERT INTO mcp_server (name, is_default) VALUES ('sqlite', 0)")
+            conn.execute(
+                "INSERT INTO project_doc (project_id, title, content, level, slug, path, status) "
+                "VALUES (1, 'Overview', 'doc body', 0, 'overview', 'overview', 'current')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        real_callbacks_factory = fixer_wire._netrunner_launch_callbacks
+
+        def callbacks_with_fake_servers() -> fixer_wire_netrunner_launch.NetrunnerLaunchCallbacks:
+            callbacks = real_callbacks_factory()
+            return dataclasses.replace(
+                callbacks,
+                load_available_servers=lambda _cwd, *, backend: (  # noqa: ARG005
+                    {"fixer_mcp": {}, "sqlite": {}},
+                    {},
+                    None,
+                    None,
+                ),
+            )
+
+        with (
+            patch.object(fixer_wire, "_load_project_hands_state", return_value=state),
+            patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
+            patch.object(
+                fixer_wire,
+                "_netrunner_launch_callbacks",
+                side_effect=callbacks_with_fake_servers,
+            ),
+            patch(
+                "client_wires.fixer_wire_role_launch.launch_fresh_role_session",
+                return_value=0,
+            ) as launched,
+        ):
+            selections = iter(
+                (
+                    fixer_wire_selectors.HANDS_LAUNCH_NEW,
+                    fixer_wire_selectors.HANDS_WORKSPACE_SAFE,
+                    "codex",
+                    "openai",
+                    "gpt-5.5",
+                )
+            )
+            code = fixer_wire._launch_project_hands(
+                [],
+                preset_backend=None,
+                preset_model=None,
+                preset_reasoning=None,
+                preset_mcp_names=[],
+                acceptance=False,
+                dry_run=True,
+                Option=_DummyOption,
+                single_select_items=lambda *_a, **_k: next(selections),
+                multi_select_items=lambda *_a, **_k: [],
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(launched.call_args.args[0], "netrunner")
+        prompt = launched.call_args.args[1]
+        self.assertIn("one permanent project actor `Руки`", prompt)
+        self.assertIn("without creating or asking for a Netrunner session ID", prompt)
+        self.assertEqual(launched.call_args.kwargs["selected_mcp_names"], [fixer_wire.FORCED_MCP_SERVER])
+        self.assertEqual(launched.call_args.kwargs["preset_backend"], "codex")
+        self.assertEqual(launched.call_args.kwargs["preset_model"], "gpt-5.5")
+        self.assertTrue(launched.call_args.kwargs["dangerous_sandbox"])
+        self.assertEqual(
+            launched.call_args.kwargs["launch_label"],
+            "disposable Project Hands mailbox client",
+        )
+
+    def test_launch_project_hands_rejects_session_scoped_overrides(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "control-plane managed"):
+            fixer_wire._launch_project_hands(
+                [],
+                preset_backend=None,
+                preset_model=None,
+                preset_reasoning=None,
+                preset_mcp_names=["sqlite"],
+                acceptance=False,
+                dry_run=True,
+                Option=_DummyOption,
+                single_select_items=lambda *_a, **_k: "codex",
+                multi_select_items=lambda *_a, **_k: [],
+            )
 
 
 class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
@@ -424,21 +686,9 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
         self.assertIn("apps", cmd)
         self.assertNotIn("computer-use", "".join(cmd))
 
-    def test_launch_netrunner_interactive_pending_can_choose_acceptance_mode(self) -> None:
+    def test_launch_netrunner_explicit_session_can_choose_acceptance_mode(self) -> None:
         tmp, db_path = self._make_db()
         try:
-            choose_calls: list[str] = []
-
-            def choose(options: list[_DummyOption], **_kwargs: object) -> object:
-                labels = [option.label for option in options]
-                choose_calls.append(" | ".join(labels))
-                values = [option.value for option in options]
-                if fixer_wire.NETRUNNER_KIND_ACCEPTANCE in values:
-                    return fixer_wire.NETRUNNER_KIND_ACCEPTANCE
-                if 36 in values:
-                    return 36
-                raise AssertionError(f"unexpected single-select options: {labels}")
-
             with (
                 patch.dict(sys.modules, {"client_wires.codex_compat.llm": _fake_codex_main_module(), "client_wires.codex_compat.runtime": _fake_codex_main_module()}),
                 patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
@@ -462,23 +712,25 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
             ):
                 code = fixer_wire._launch_netrunner(
                     [],
-                    preset_session_id=None,
+                    preset_session_id=36,
                     preset_backend="codex",
                     preset_model="gpt-5.4",
                     preset_reasoning="medium",
                     preset_mcp_names=["playwright"],
                     dry_run=False,
                     Option=_DummyOption,
-                    single_select_items=choose,
+                    single_select_items=lambda *_a, **_k: (_ for _ in ()).throw(
+                        AssertionError("unexpected compatibility-session picker")
+                    ),
                     multi_select_items=lambda *_a, **_k: ["playwright"],
+                    netrunner_kind=fixer_wire.NETRUNNER_KIND_ACCEPTANCE,
                 )
         finally:
             tmp.cleanup()
 
         self.assertEqual(code, 0)
         cmd = mock_call.call_args.args[0]
-        self.assertTrue(any("Activate skill `$run-manual-acceptance-netrunner` immediately." in item for item in cmd))
-        self.assertFalse(any("Computer Use" in call for call in choose_calls))
+        self.assertTrue(any("Activate skill $hands-netrunner immediately." in item for item in cmd))
 
     def test_launch_netrunner_resumes_non_pending_session_by_default(self) -> None:
         tmp, db_path = self._make_db()
@@ -652,7 +904,7 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
         cmd = mock_call.call_args.args[0]
         self.assertIn("--mcp=fixer_mcp,react-native-guide", cmd)
 
-    def test_launch_netrunner_closes_db_before_interactive_steps_and_subprocess(self) -> None:
+    def test_launch_netrunner_uses_durable_mcp_assignment_without_interactive_picker(self) -> None:
         tmp, db_path = self._make_db()
         try:
             tracked_connections: list[_TrackingConnection] = []
@@ -673,9 +925,7 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
                 return 36
 
             def choose_mcp(_options: list[_DummyOption], **_kwargs: object) -> list[str]:
-                self.assertTrue(tracked_connections)
-                self.assertTrue(all(conn.closed for conn in tracked_connections))
-                return ["sqlite"]
+                raise AssertionError("compatibility envelopes must not open the MCP picker")
 
             def fake_call(_cmd: list[str], **_kwargs: object) -> int:
                 self.assertTrue(tracked_connections)
@@ -707,7 +957,7 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
             ):
                 code = fixer_wire._launch_netrunner(
                     [],
-                    preset_session_id=None,
+                    preset_session_id=36,
                     preset_backend="codex",
                     preset_model="gpt-5.4",
                     preset_reasoning="medium",
@@ -743,7 +993,7 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertTrue(all(conn.closed for conn in tracked_connections))
-        self.assertEqual(assigned_rows, [("fixer_mcp",), ("sqlite",)])
+        self.assertEqual(assigned_rows, [("fixer_mcp",)])
         self.assertEqual(codex_link, [("after-session",)])
 
     def test_launch_netrunner_closes_db_before_resume_selection(self) -> None:
@@ -952,11 +1202,11 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
         self.assertEqual(cmd[0], "droid")
         self.assertNotIn("exec", cmd)
         self.assertNotIn("--skip-permissions-unsafe", cmd)
-        self.assertTrue(any("Activate skill `$run-manual-netrunner` immediately." in item for item in cmd))
+        self.assertTrue(any("Activate skill $hands-netrunner immediately." in item for item in cmd))
         self.assertFalse(any("Droid MCP tool guidance:" in item for item in cmd))
         self.assertFalse(any("Attached MCP how-to guidance:" in item for item in cmd))
         self.assertFalse(any("Standard web stack guidance:" in item for item in cmd))
-        self.assertTrue(any("Run the initialization checklist for session" in item for item in cmd))
+        self.assertTrue(any("Run the initialization checklist for compatibility session" in item for item in cmd))
         self.assertFalse(any("mcp_fixer_mcp_checkout_task" in item for item in cmd))
         self.assertEqual(call_kwargs["cwd"], str(Path.cwd()))
         self.assertEqual(session_row, ("droid", "glm-5.1", "medium"))
@@ -994,7 +1244,7 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
                     [],
                     preset_session_id=36,
                     preset_backend="agy",
-                    preset_model="Gemini 3.5 Flash (High)",
+                    preset_model="Gemini 3.6 Flash (High)",
                     preset_reasoning="default",
                     preset_mcp_names=[],
                     dry_run=False,
@@ -1026,17 +1276,17 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         cmd = mock_call.call_args.args[0]
-        self.assertEqual(session_row, ("antigravity", "Gemini 3.5 Flash", "high"))
+        self.assertEqual(session_row, ("antigravity", "Gemini 3.6 Flash", "high"))
         self.assertEqual(external_link, [("antigravity", "agy-conversation-139")])
         self.assertEqual(cmd[0], "agy")
         self.assertIn("--model", cmd)
-        self.assertEqual(cmd[cmd.index("--model") + 1], "Gemini 3.5 Flash (High)")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "Gemini 3.6 Flash (High)")
         self.assertNotIn("-p", cmd)
         self.assertNotIn("--print", cmd)
         self.assertIn("--prompt-interactive", cmd)
         prompt = cmd[cmd.index("--prompt-interactive") + 1]
-        self.assertTrue(prompt.startswith("/run-manual-netrunner\n"))
-        self.assertNotIn("Activate skill `$run-manual-netrunner` immediately.", prompt)
+        self.assertTrue(prompt.startswith("/hands-netrunner\n"))
+        self.assertNotIn("Activate skill $hands-netrunner immediately.", prompt)
         self.assertIn("fixer_mcp.log_netrunner_progress", prompt)
 
     def test_launch_netrunner_persists_junie_backend_and_external_link(self) -> None:
@@ -1118,6 +1368,62 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
         self.assertIn("--mcp-location", cmd)
         self.assertEqual(cmd[cmd.index("--mcp-location") + 1], ".junie/fixer-runtime/mcp")
         self.assertNotIn("--openrouter-api-key", cmd)
+
+
+class HandsDocsTreePickerTests(unittest.TestCase):
+    def _entries(self) -> list[fixer_wire_hands_context.HandsDocEntry]:
+        entry = fixer_wire_hands_context.HandsDocEntry
+        return [
+            entry(doc_id=1, title="Root A", content="", level=0, slug="a", path="a", status="current", parent_id=0),
+            entry(doc_id=2, title="Child A1", content="", level=1, slug="a1", path="a/a1", status="current", parent_id=1),
+            entry(doc_id=3, title="Grandchild", content="", level=2, slug="g", path="a/a1/g", status="current", parent_id=2),
+            entry(doc_id=4, title="Root B", content="", level=0, slug="b", path="b", status="current", parent_id=0),
+        ]
+
+    def _run_picker(self, rounds: list[list[object]], preselected: list[int] | None = None):
+        seen: list[list[object]] = []
+
+        def multi_select_items(options, **_kwargs):
+            seen.append([getattr(option, "value", None) for option in options])
+            return rounds.pop(0) if rounds else []
+
+        result = fixer_wire_selectors._select_hands_docs_interactive(
+            self._entries(),
+            preselected or [],
+            _DummyOption,
+            multi_select_items,
+        )
+        return result, seen
+
+    def test_initial_round_shows_only_root_docs(self) -> None:
+        result, seen = self._run_picker([[]])
+        self.assertEqual(result, [])
+        first_round = seen[0]
+        self.assertIn(1, first_round)
+        self.assertIn(4, first_round)
+        self.assertNotIn(2, first_round)
+        self.assertNotIn(3, first_round)
+        self.assertIn("expand:1", first_round)
+        self.assertIn("branch:1", first_round)
+        self.assertNotIn("expand:4", first_round)  # Root B has no children
+
+    def test_expand_branch_reveals_children_for_selection(self) -> None:
+        result, seen = self._run_picker([["expand:1"], [2]])
+        self.assertEqual(result, [2])
+        self.assertIn(2, seen[1])
+        self.assertNotIn(3, seen[1])  # grandchild still collapsed under child
+
+    def test_branch_toggle_selects_whole_subtree(self) -> None:
+        result, _ = self._run_picker([["branch:1"], [1, 2, 3]])
+        self.assertEqual(result, [1, 2, 3])
+
+    def test_branch_toggle_twice_deselects_subtree(self) -> None:
+        result, _ = self._run_picker([["branch:1"], [1, 2, 3, "branch:1"], []])
+        self.assertEqual(result, [])
+
+    def test_hidden_docs_keep_preselection(self) -> None:
+        result, _ = self._run_picker([[4]], preselected=[3])
+        self.assertEqual(result, [3, 4])
 
 
 if __name__ == "__main__":

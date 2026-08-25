@@ -3,6 +3,8 @@ package dashboardapi
 import (
 	"context"
 	"sort"
+	"strings"
+	"time"
 )
 
 type projectRecord struct {
@@ -37,22 +39,47 @@ func (r *Repository) loadProjects(ctx context.Context) (map[int]projectRecord, [
 		return nil, nil, err
 	}
 	sort.SliceStable(order, func(i, j int) bool {
-		left := activity[order[i]].LastActivityAt
-		right := activity[order[j]].LastActivityAt
-		if left != right {
-			// Empty timestamps sort after real activity. SQLite's timestamp
-			// defaults are ISO-like, so lexical ordering is deterministic.
-			if !hasProjectActivity(left) {
+		leftAt := parseProjectActivityTime(activity[order[i]].LastActivityAt)
+		rightAt := parseProjectActivityTime(activity[order[j]].LastActivityAt)
+		if !leftAt.Equal(rightAt) {
+			// Empty/invalid timestamps sort after real activity.
+			if leftAt.IsZero() {
 				return false
 			}
-			if !hasProjectActivity(right) {
+			if rightAt.IsZero() {
 				return true
 			}
-			return left > right
+			// Newest first.
+			return leftAt.After(rightAt)
 		}
 		return order[i] < order[j]
 	})
 	return projectMap, order, nil
+}
+
+func parseProjectActivityTime(raw string) time.Time {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	} {
+		parsed, err := time.Parse(layout, text)
+		if err == nil {
+			return parsed
+		}
+		if err != nil {
+			// Fallback for local-style timestamps without timezone.
+			if parsed, parseErr := time.ParseInLocation(layout, text, time.UTC); parseErr == nil {
+				return parsed
+			}
+		}
+	}
+	return time.Time{}
 }
 
 func (r *Repository) requireProject(ctx context.Context, projectID int) (projectRecord, error) {

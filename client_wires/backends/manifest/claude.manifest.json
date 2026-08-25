@@ -6,15 +6,19 @@
     "options": [
       "sonnet",
       "opus",
-      "claude-opus-5",
-      "haiku"
+      "kimi/k3",
+      "kimi/k3-256k",
+      "kimi/kimi-for-coding",
+      "kimi/kimi-for-coding-highspeed"
     ],
     "default": "sonnet",
     "internal_id_map": {
       "sonnet": "sonnet",
       "opus": "opus",
-      "claude-opus-5": "claude-opus-5",
-      "haiku": "haiku"
+      "kimi/k3": "kimi/k3",
+      "kimi/k3-256k": "kimi/k3-256k",
+      "kimi/kimi-for-coding": "kimi/kimi-for-coding",
+      "kimi/kimi-for-coding-highspeed": "kimi/kimi-for-coding-highspeed"
     },
     "byok": false,
     "auth": "api_key",
@@ -28,7 +32,7 @@
       "xhigh",
       "max"
     ],
-    "default": "medium",
+    "default": "high",
     "pass_mechanism": "flag",
     "flag_or_key": "--effort"
   },

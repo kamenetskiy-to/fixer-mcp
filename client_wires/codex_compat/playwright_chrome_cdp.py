@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
@@ -14,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -22,6 +27,10 @@ DEFAULT_CHROME_CANDIDATES = (
     Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
 )
+PLAYWRIGHT_LOG_ENV = "CODEX_PRO_PLAYWRIGHT_LOG"
+PLAYWRIGHT_HANDOFF_GRACE_ENV = "CODEX_PRO_PLAYWRIGHT_HANDOFF_GRACE_SEC"
+DEFAULT_HANDOFF_GRACE_SEC = 5.0
+RUNTIME_DIR_NAME = ".codex-playwright-runtime"
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,127 @@ class ChromeProfileProcess:
     pid: int
     command: str
     remote_debugging_port: int | None
+
+
+@dataclass(frozen=True)
+class ManagedChromeState:
+    pid: int
+    port: int
+
+
+def _playwright_log_path() -> Path:
+    configured = os.environ.get(PLAYWRIGHT_LOG_ENV)
+    if configured and configured.strip():
+        return Path(configured).expanduser()
+    mcp_logs = Path.home() / "Desktop" / "projects" / "mcp_servers" / "logs"
+    if mcp_logs.is_dir():
+        return mcp_logs / "playwright_mcp.log"
+    return Path.home() / ".codex" / "logs" / "playwright_mcp.log"
+
+
+def _log(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    line = f"{timestamp} pid={os.getpid()} {message}\n"
+    try:
+        path = _playwright_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(line)
+    except OSError:
+        pass
+
+
+def _runtime_dir(profile_dir: Path) -> Path:
+    return profile_dir / RUNTIME_DIR_NAME
+
+
+@contextmanager
+def _profile_runtime_lock(profile_dir: Path):
+    runtime_dir = _runtime_dir(profile_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with (runtime_dir / "lifecycle.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _managed_state_path(profile_dir: Path) -> Path:
+    return _runtime_dir(profile_dir) / "managed-chrome.json"
+
+
+def _lease_path(profile_dir: Path, pid: int) -> Path:
+    return _runtime_dir(profile_dir) / f"lease-{pid}.json"
+
+
+def _read_managed_state(profile_dir: Path) -> ManagedChromeState | None:
+    try:
+        payload = json.loads(_managed_state_path(profile_dir).read_text(encoding="utf-8"))
+        return ManagedChromeState(pid=int(payload["pid"]), port=int(payload["port"]))
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _write_managed_state(profile_dir: Path, state: ManagedChromeState) -> None:
+    path = _managed_state_path(profile_dir)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"pid": state.pid, "port": state.port}) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _register_lease(profile_dir: Path) -> Path:
+    path = _lease_path(profile_dir, os.getpid())
+    path.write_text(json.dumps({"pid": os.getpid(), "started_at": time.time()}) + "\n", encoding="utf-8")
+    return path
+
+
+def _process_command(pid: int) -> str:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip()
+
+
+def _is_live_wrapper_lease(pid: int, profile_dir: Path) -> bool:
+    if pid == os.getpid():
+        return True
+    command = _process_command(pid)
+    return bool(command and Path(__file__).name in command and str(profile_dir) in command)
+
+
+def _live_lease_pids(profile_dir: Path) -> list[int]:
+    live: list[int] = []
+    for path in _runtime_dir(profile_dir).glob("lease-*.json"):
+        try:
+            pid = int(path.stem.removeprefix("lease-"))
+        except ValueError:
+            path.unlink(missing_ok=True)
+            continue
+        if _is_live_wrapper_lease(pid, profile_dir):
+            live.append(pid)
+        else:
+            path.unlink(missing_ok=True)
+    return sorted(live)
+
+
+def _managed_state_is_live(profile_dir: Path, state: ManagedChromeState) -> bool:
+    return any(
+        process.pid == state.pid and process.remote_debugging_port == state.port
+        for process in _chrome_processes_for_profile(profile_dir)
+    )
+
+
+def _handoff_grace_sec() -> float:
+    raw = os.environ.get(PLAYWRIGHT_HANDOFF_GRACE_ENV)
+    if not raw or not raw.strip():
+        return DEFAULT_HANDOFF_GRACE_SEC
+    try:
+        return min(max(float(raw), 0.0), 30.0)
+    except ValueError:
+        return DEFAULT_HANDOFF_GRACE_SEC
 
 
 def _find_chrome() -> str:
@@ -205,6 +335,10 @@ def _ensure_profile_not_in_use(profile_dir: Path) -> None:
 
 def _terminate_chrome_for_profile(chrome: subprocess.Popen[object], profile_dir: Path) -> None:
     _terminate(chrome)
+    _terminate_chrome_processes_for_profile(profile_dir)
+
+
+def _terminate_chrome_processes_for_profile(profile_dir: Path) -> None:
     pids = _chrome_pids_for_profile(profile_dir)
     for pid in pids:
         try:
@@ -218,6 +352,67 @@ def _terminate_chrome_for_profile(chrome: subprocess.Popen[object], profile_dir:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def _release_lease_and_maybe_chrome(
+    profile_dir: Path,
+    lease_path: Path,
+    chrome: subprocess.Popen[object] | None,
+    *,
+    keep_chrome: bool = False,
+) -> None:
+    keep_chrome = keep_chrome or os.environ.get("CODEX_PRO_PLAYWRIGHT_KEEP_CHROME") == "1"
+    with _profile_runtime_lock(profile_dir):
+        lease_path.unlink(missing_ok=True)
+        live_leases = _live_lease_pids(profile_dir)
+        state = _read_managed_state(profile_dir)
+        if state is not None and not _managed_state_is_live(profile_dir, state):
+            _managed_state_path(profile_dir).unlink(missing_ok=True)
+            state = None
+
+    if keep_chrome:
+        _log(f"leaving persistent managed Chrome running profile={profile_dir}")
+        return
+
+    if state is None:
+        if chrome is not None and chrome.poll() is None:
+            _log(f"cleaning unregistered Chrome after startup failure profile={profile_dir}")
+            _terminate_chrome_for_profile(chrome, profile_dir)
+        return
+
+    if live_leases:
+        _log(f"handed managed Chrome to wrapper pid(s)={live_leases} profile={profile_dir}")
+        return
+
+    deadline = time.monotonic() + _handoff_grace_sec()
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        with _profile_runtime_lock(profile_dir):
+            live_leases = _live_lease_pids(profile_dir)
+            current_state = _read_managed_state(profile_dir)
+        if live_leases:
+            _log(f"handed managed Chrome to wrapper pid(s)={live_leases} profile={profile_dir}")
+            return
+        if current_state is None:
+            return
+
+    # Keep the lock while terminating so a late replacement cannot attach to a
+    # browser that has already been selected for teardown.
+    with _profile_runtime_lock(profile_dir):
+        live_leases = _live_lease_pids(profile_dir)
+        current_state = _read_managed_state(profile_dir)
+        if live_leases:
+            _log(f"handed managed Chrome to wrapper pid(s)={live_leases} profile={profile_dir}")
+            return
+        if current_state is None or not _managed_state_is_live(profile_dir, current_state):
+            _managed_state_path(profile_dir).unlink(missing_ok=True)
+            return
+        _log(f"closing last managed Chrome pid={current_state.pid} profile={profile_dir}")
+        _managed_state_path(profile_dir).unlink(missing_ok=True)
+        if chrome is not None and chrome.pid == current_state.pid:
+            _terminate_chrome_for_profile(chrome, profile_dir)
+        else:
+            _terminate_chrome_processes_for_profile(profile_dir)
 
 
 def _playwright_mcp_node_modules() -> Path:
@@ -249,18 +444,25 @@ def _playwright_mcp_node_modules() -> Path:
     return node_modules
 
 
-def _owned_context_mcp_command(cdp_endpoint: str, viewport_size: str | None) -> tuple[list[str], dict[str, str]]:
+def _owned_context_mcp_command(
+    cdp_endpoint: str,
+    viewport_size: str | None,
+    *,
+    shared_context: bool = False,
+) -> tuple[list[str], dict[str, str]]:
     node = shutil.which("node")
     if not node:
         raise RuntimeError("node executable not found")
-    helper = Path(__file__).with_name("playwright_owned_context_mcp.cjs")
+    helper_name = "playwright_shared_context_mcp.cjs" if shared_context else "playwright_owned_context_mcp.cjs"
+    helper = Path(__file__).with_name(helper_name)
     if not helper.is_file():
-        raise RuntimeError("Playwright owned-context MCP helper is missing")
+        raise RuntimeError(f"Playwright context MCP helper is missing: {helper_name}")
     node_modules = _playwright_mcp_node_modules()
     command = [node, str(helper), "--cdp-endpoint", cdp_endpoint]
     if viewport_size:
         command.extend(["--viewport-size", viewport_size])
     env = os.environ.copy()
+    env[PLAYWRIGHT_LOG_ENV] = str(_playwright_log_path())
     existing_node_path = env.get("NODE_PATH")
     env["NODE_PATH"] = str(node_modules) + (os.pathsep + existing_node_path if existing_node_path else "")
     return command, env
@@ -270,48 +472,87 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Start normal Chrome and bridge Playwright MCP over CDP.")
     parser.add_argument("--user-data-dir", required=True)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--shared-context", action="store_true")
     parser.add_argument("--viewport-size")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args(argv)
 
     profile_dir = Path(args.user_data_dir).expanduser()
     profile_dir.mkdir(parents=True, exist_ok=True)
+    _log(
+        f"wrapper starting profile={profile_dir} headless={args.headless} "
+        f"context={'shared' if args.shared_context else 'owned'}"
+    )
 
-    cdp_endpoint = _existing_cdp_endpoint_for_profile(profile_dir)
     chrome: subprocess.Popen[object] | None = None
-    if cdp_endpoint is None:
-        port = args.port or _free_port()
-        cdp_endpoint = f"http://127.0.0.1:{port}"
-        chrome_cmd = [
-            _find_chrome(),
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "about:blank",
-        ]
-        if args.headless:
-            chrome_cmd.insert(1, "--headless=new")
-        chrome = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    lease_path: Path | None = None
     mcp: subprocess.Popen[object] | None = None
 
-    def stop_children(_signum: int, _frame: object) -> None:
-        if mcp is not None:
-            _terminate(mcp)
-        if chrome is not None:
-            _terminate_chrome_for_profile(chrome, profile_dir)
+    def stop_children(signum: int, _frame: object) -> None:
+        _log(f"wrapper received signal={signum} profile={profile_dir}")
+        if mcp is not None and mcp.poll() is None:
+            mcp.terminate()
+        raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGINT, stop_children)
     signal.signal(signal.SIGTERM, stop_children)
 
     try:
-        if chrome is not None:
-            _wait_for_cdp(cdp_endpoint)
-        mcp_cmd, mcp_env = _owned_context_mcp_command(cdp_endpoint, args.viewport_size)
+        with _profile_runtime_lock(profile_dir):
+            _live_lease_pids(profile_dir)
+            lease_path = _register_lease(profile_dir)
+            cdp_endpoint = _existing_cdp_endpoint_for_profile(profile_dir)
+            state = _read_managed_state(profile_dir)
+            if state is not None and not _managed_state_is_live(profile_dir, state):
+                _managed_state_path(profile_dir).unlink(missing_ok=True)
+                state = None
+            if cdp_endpoint is None:
+                port = args.port or _free_port()
+                cdp_endpoint = f"http://127.0.0.1:{port}"
+                chrome_cmd = [
+                    _find_chrome(),
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ]
+                if args.headless:
+                    chrome_cmd.insert(1, "--headless=new")
+                chrome = subprocess.Popen(
+                    chrome_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                _log(f"launched managed Chrome pid={chrome.pid} endpoint={cdp_endpoint} profile={profile_dir}")
+                _wait_for_cdp(cdp_endpoint)
+                _write_managed_state(profile_dir, ManagedChromeState(pid=chrome.pid, port=port))
+            elif state is not None:
+                _log(f"attached to managed Chrome pid={state.pid} endpoint={cdp_endpoint} profile={profile_dir}")
+            else:
+                _log(f"attached to external Chrome endpoint={cdp_endpoint} profile={profile_dir}")
+
+        mcp_cmd, mcp_env = _owned_context_mcp_command(
+            cdp_endpoint,
+            args.viewport_size,
+            shared_context=args.shared_context,
+        )
         mcp = subprocess.Popen(mcp_cmd, env=mcp_env)
-        return mcp.wait()
+        context_mode = "shared" if args.shared_context else "owned"
+        _log(f"started {context_mode}-context MCP pid={mcp.pid} endpoint={cdp_endpoint}")
+        return_code = mcp.wait()
+        _log(f"{context_mode}-context MCP exited code={return_code} endpoint={cdp_endpoint}")
+        return return_code
     finally:
-        if chrome is not None and os.environ.get("CODEX_PRO_PLAYWRIGHT_KEEP_CHROME") != "1":
+        if lease_path is not None:
+            _release_lease_and_maybe_chrome(
+                profile_dir,
+                lease_path,
+                chrome,
+                keep_chrome=args.shared_context and not args.headless,
+            )
+        elif chrome is not None and chrome.poll() is None:
             _terminate_chrome_for_profile(chrome, profile_dir)
 
 
@@ -319,5 +560,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
     except Exception as exc:
-        print(f"playwright chrome cdp wrapper failed: {exc}", file=sys.stderr)
+        detail = traceback.format_exc()
+        print(f"playwright chrome cdp wrapper failed: {exc}\n{detail}", file=sys.stderr)
+        _log(f"wrapper failed: {exc}\n{detail.rstrip()}")
         raise SystemExit(1)

@@ -22,6 +22,7 @@ MODEL_REASONING_OPTIONS: Dict[str, List[Tuple[str, str, str]]] = {
         ("Medium", "medium", "Balances speed and reasoning depth for everyday tasks"),
         ("High", "high", "Greater reasoning depth for complex problems"),
         ("Extra High", "xhigh", "Extra high reasoning depth for complex problems"),
+        ("Max", "max", "Very deep reasoning for demanding tasks"),
         ("Ultra", "ultra", "Maximum reasoning depth for the most complex problems"),
     ],
     "gpt-5.6-terra": [
@@ -29,12 +30,15 @@ MODEL_REASONING_OPTIONS: Dict[str, List[Tuple[str, str, str]]] = {
         ("Medium", "medium", "Balances speed and reasoning depth for everyday tasks"),
         ("High", "high", "Greater reasoning depth for complex problems"),
         ("Extra High", "xhigh", "Extra high reasoning depth for complex problems"),
+        ("Max", "max", "Very deep reasoning for demanding tasks"),
+        ("Ultra", "ultra", "Maximum reasoning depth for the most complex problems"),
     ],
     "gpt-5.6-luna": [
         ("Low", "low", "Fast responses with lighter reasoning"),
         ("Medium", "medium", "Balances speed and reasoning depth for everyday tasks"),
         ("High", "high", "Greater reasoning depth for complex problems"),
         ("Extra High", "xhigh", "Extra high reasoning depth for complex problems"),
+        ("Max", "max", "Very deep reasoning for demanding tasks"),
     ],
     "gpt-5.5": [
         ("Minimal", "minimal", "Fastest responses with little reasoning"),
@@ -68,9 +72,9 @@ MODEL_REASONING_OPTIONS: Dict[str, List[Tuple[str, str, str]]] = {
 }
 
 MODEL_DEFAULT_EFFORT = {
-    "gpt-5.6-sol": "xhigh",
-    "gpt-5.6-terra": "xhigh",
-    "gpt-5.6-luna": "xhigh",
+    "gpt-5.6-sol": "high",
+    "gpt-5.6-terra": "high",
+    "gpt-5.6-luna": "high",
     "gpt-5.5": "high",
     "gpt-5.4": "high",
     "gpt-5.3-codex": "medium",

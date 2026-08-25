@@ -360,9 +360,9 @@ class FixerAutonomousTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Activate skill `$run-manual-netrunner` immediately.", prompt)
+        self.assertIn("Activate skill $hands-netrunner immediately.", prompt)
         self.assertIn("headless durable worker", prompt)
-        self.assertIn("Preselected session ID from fixer autonomous flow: `7`.", prompt)
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `7`.", prompt)
         self.assertIn("Autonomous fixer Codex session ID: `fixer-session-123`.", prompt)
         self.assertIn("Do not wait for a manual 'Go'.", prompt)
         self.assertIn("create, update, or remove the relevant automated tests", prompt)
@@ -420,7 +420,7 @@ class FixerAutonomousTests(unittest.TestCase):
         )
 
         self.assertNotIn("Autonomous fixer Codex session ID", prompt)
-        self.assertIn("Preselected session ID from fixer autonomous flow: `7`.", prompt)
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `7`.", prompt)
         self.assertIn("Do not call fixer_mcp.wake_fixer_autonomous", prompt)
 
     def test_wave_naming_helpers_use_deterministic_branch_and_worktree_paths(self) -> None:
@@ -591,7 +591,7 @@ class FixerAutonomousTests(unittest.TestCase):
                     available_servers=available_servers,
                     config_env_vars={},
                     adapter=adapter,
-                    ensure_sqlite_scaffold=lambda _cwd: None,
+                    ensure_sqlite_scaffold=lambda _cwd, *, interactive=False: None,
                     db_path=db_path,
                 )
 
@@ -611,6 +611,101 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_DEFAULT_CWD_ENV], str(project_cwd.resolve()))
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "netrunner")
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "netrunner")
+
+    def test_build_wave_netrunner_launch_plan_scaffolds_sqlite_noninteractively(self) -> None:
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
+            project_cwd = Path(project_tmp)
+            worker_cwd = Path(worker_tmp)
+            db_path = project_cwd / "fixer.db"
+            db_path.touch()
+            sqlite_config = project_cwd / "sqliteMCP.toml"
+            ensure_calls: list[tuple[Path, bool]] = []
+
+            def fake_ensure_sqlite_scaffold(cwd: Path, *, interactive: bool) -> Path:
+                ensure_calls.append((cwd, interactive))
+                return sqlite_config
+
+            available_servers = {
+                "sqlite": {"command": "sqlite-mcp"},
+                fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"},
+            }
+            adapter = _FakeBackendAdapter()
+            launch_selection = fixer_wire.SessionLaunchSelection(
+                backend="codex",
+                model="gpt-5.5",
+                reasoning="xhigh",
+            )
+
+            with (
+                patch.object(_FakeBackendAdapter, "ensure_runtime_files"),
+                patch.object(fixer_autonomous, "_build_common_codex_env", return_value={"BASE_ENV": "1"}),
+            ):
+                plan = fixer_autonomous._build_wave_netrunner_launch_plan(
+                    project_cwd=project_cwd,
+                    worker_cwd=worker_cwd,
+                    local_session_id=7,
+                    wave_id=3,
+                    wave_worker_id=44,
+                    declared_write_scope=["client_wires/fixer_autonomous.py"],
+                    fixer_session_id="fixer-session-123",
+                    assigned_mcp_names=["sqlite"],
+                    mcp_how_to={"sqlite": "Use sqlite."},
+                    launch_selection=launch_selection,
+                    available_servers=available_servers,
+                    config_env_vars={"sqlite": "SQLITE_MCP_CONFIG_PATH"},
+                    adapter=adapter,
+                    ensure_sqlite_scaffold=fake_ensure_sqlite_scaffold,
+                    db_path=db_path,
+                )
+
+        self.assertEqual(ensure_calls, [(project_cwd.resolve(), False)])
+        self.assertEqual(plan.selected_config_paths["sqlite"], sqlite_config)
+        self.assertEqual(
+            plan.selected_servers["sqlite"]["env"]["SQLITE_MCP_CONFIG_PATH"],
+            str(sqlite_config),
+        )
+        self.assertEqual(plan.env["SQLITE_MCP_CONFIG_PATH"], str(sqlite_config))
+
+    def test_build_wave_netrunner_launch_plan_fails_clearly_when_sqlite_scaffold_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
+            project_cwd = Path(project_tmp)
+            worker_cwd = Path(worker_tmp)
+            db_path = project_cwd / "fixer.db"
+            db_path.touch()
+
+            available_servers = {
+                "sqlite": {"command": "sqlite-mcp"},
+                fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"},
+            }
+            adapter = _FakeBackendAdapter()
+            launch_selection = fixer_wire.SessionLaunchSelection(
+                backend="codex",
+                model="gpt-5.5",
+                reasoning="xhigh",
+            )
+
+            with (
+                patch.object(_FakeBackendAdapter, "ensure_runtime_files"),
+                patch.object(fixer_autonomous, "_build_common_codex_env", return_value={"BASE_ENV": "1"}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "sqliteMCP.toml"):
+                    fixer_autonomous._build_wave_netrunner_launch_plan(
+                        project_cwd=project_cwd,
+                        worker_cwd=worker_cwd,
+                        local_session_id=7,
+                        wave_id=3,
+                        wave_worker_id=44,
+                        declared_write_scope=["client_wires/fixer_autonomous.py"],
+                        fixer_session_id="fixer-session-123",
+                        assigned_mcp_names=["sqlite"],
+                        mcp_how_to={"sqlite": "Use sqlite."},
+                        launch_selection=launch_selection,
+                        available_servers=available_servers,
+                        config_env_vars={"sqlite": "SQLITE_MCP_CONFIG_PATH"},
+                        adapter=adapter,
+                        ensure_sqlite_scaffold=lambda _cwd, *, interactive=False: None,
+                        db_path=db_path,
+                    )
 
     def test_write_worker_metadata_can_include_wave_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -680,7 +775,7 @@ class FixerAutonomousTests(unittest.TestCase):
             "Implemented feature and ran tests.",
         )
 
-        self.assertIn("Activate skill `$review-netrunner-session` immediately.", prompt)
+        self.assertIn("Activate skill $review-netrunner-session immediately.", prompt)
         self.assertIn("Target completed session ID: `9`.", prompt)
         self.assertNotIn("GenUI", prompt)
         self.assertNotIn("Ghost Run", prompt)
@@ -845,7 +940,7 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(new_session_id, "new-session")
         self.assertEqual(payload["active_netrunner_session_ids"], [5, 6])
         self.assertEqual(payload["active_netrunner_session_id"], 6)
-        self.assertIn("Preselected session ID from fixer autonomous flow: `6`.", launched["command"][-1])
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `6`.", launched["command"][-1])
 
     def test_launch_netrunner_closes_db_before_subprocess_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -993,7 +1088,7 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(new_session_id, "new-session")
         self.assertEqual(payload["active_netrunner_session_ids"], [2])
         self.assertEqual(payload["active_netrunner_session_id"], 2)
-        self.assertIn("Preselected session ID from fixer autonomous flow: `2`.", launched["command"][-1])
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `2`.", launched["command"][-1])
 
     def test_launch_netrunner_allows_empty_assigned_mcp_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1609,7 +1704,7 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(saved_ids, [(60, "droid", "droid-native-session")])
         self.assertEqual(payload["last_launched_netrunner_session_id"], "droid-native-session")
         self.assertEqual(payload["last_launched_netrunner_backend"], "droid")
-        self.assertIn("Preselected session ID from fixer autonomous flow: `6`.", launched["command"][-1])
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `6`.", launched["command"][-1])
 
     def test_launch_netrunner_saves_antigravity_external_id_from_cli_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as log_tmp:
@@ -1643,7 +1738,7 @@ class FixerAutonomousTests(unittest.TestCase):
                 task_description="Task",
                 status="pending",
                 cli_backend="antigravity",
-                cli_model="Gemini 3.5 Flash",
+                cli_model="Gemini 3.6 Flash",
                 cli_reasoning="low",
             )
             _seed_launch_db(db_path, [session_row])
@@ -1698,7 +1793,7 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(saved_ids, [(60, "antigravity", "cb18f692-f4a9-4895-9509-d093dd911437")])
         self.assertEqual(payload["last_launched_netrunner_session_id"], "cb18f692-f4a9-4895-9509-d093dd911437")
         self.assertEqual(payload["last_launched_netrunner_backend"], "antigravity")
-        self.assertIn("Preselected session ID from fixer autonomous flow: `6`.", launched["command"][-1])
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `6`.", launched["command"][-1])
 
     def test_launch_netrunner_allows_explicit_droid_model_override_for_pending_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1776,7 +1871,7 @@ class FixerAutonomousTests(unittest.TestCase):
 
         self.assertIsNone(new_session_id)
         self.assertEqual(stored, ("droid", "glm-5.1", "high"))
-        self.assertIn("Preselected session ID from fixer autonomous flow: `6`.", launched["command"][-1])
+        self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `6`.", launched["command"][-1])
 
     def test_resume_fixer_removes_only_completed_session_from_active_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

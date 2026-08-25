@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -363,6 +365,44 @@ func parallelWaveScheduledCohort(wave NetrunnerWaveSnapshot) []NetrunnerWaveWork
 	return cohort
 }
 
+func parallelWaveFailedLikeCohortCount(wave NetrunnerWaveSnapshot) int {
+	count := 0
+	for _, worker := range parallelWaveScheduledCohort(wave) {
+		if parallelWaveFailureLike(worker.Status) {
+			count++
+		}
+	}
+	return count
+}
+
+const parallelWaveArchitectApprovedReasonPrefix = "architect_approved:ack_failed="
+
+func formatArchitectApprovedControlReason(acknowledgedFailedCount int, customReason string) string {
+	reason := fmt.Sprintf("%s%d", parallelWaveArchitectApprovedReasonPrefix, acknowledgedFailedCount)
+	if strings.TrimSpace(customReason) != "" {
+		reason += ":" + strings.TrimSpace(customReason)
+	}
+	return reason
+}
+
+// parseArchitectApprovedAcknowledgedFailedCount extracts the failed-worker
+// count the Architect acknowledged at resume time. ok is false when reason
+// does not carry the marker, e.g. legacy rows written before this format.
+func parseArchitectApprovedAcknowledgedFailedCount(controlReason string) (int, bool) {
+	if !strings.HasPrefix(controlReason, parallelWaveArchitectApprovedReasonPrefix) {
+		return 0, false
+	}
+	rest := controlReason[len(parallelWaveArchitectApprovedReasonPrefix):]
+	if idx := strings.IndexByte(rest, ':'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	count, err := strconv.Atoi(rest)
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	return count, true
+}
+
 type parallelWaveFailureDecision struct {
 	State    string
 	Reason   string
@@ -569,8 +609,16 @@ func reconcileParallelWaveFailureControl(wave NetrunnerWaveSnapshot) (NetrunnerW
 	if wave.ControlState == parallelWaveControlPausedForArchitect {
 		return wave, nil
 	}
-	if wave.ControlState == parallelWaveControlActive && strings.HasPrefix(wave.ControlReason, "architect_approved") {
-		return wave, nil
+	if wave.ControlState == parallelWaveControlActive {
+		if acknowledgedFailedCount, ok := parseArchitectApprovedAcknowledgedFailedCount(wave.ControlReason); ok {
+			// The Architect's resume only acknowledges the failures that existed at
+			// that moment. A worker that fails afterwards (e.g. a dependency-gated
+			// worker released post-repair) must still reach canonical recovery
+			// instead of being silently absorbed by the stale approval forever.
+			if parallelWaveFailedLikeCohortCount(wave) <= acknowledgedFailedCount {
+				return wave, nil
+			}
+		}
 	}
 	decision := decideParallelWaveFailurePolicy(wave)
 	switch decision.State {
@@ -669,10 +717,7 @@ func SetNetrunnerWaveControlState(ctx context.Context, req *mcp.CallToolRequest,
 			if !input.ArchitectApproved {
 				return &mcp.CallToolResult{IsError: true}, SetNetrunnerWaveControlStateOutput{}, fmt.Errorf("architect_approved must be true to resume a paused_for_architect wave")
 			}
-			controlReason = "architect_approved"
-			if strings.TrimSpace(input.Reason) != "" {
-				controlReason += ":" + strings.TrimSpace(input.Reason)
-			}
+			controlReason = formatArchitectApprovedControlReason(parallelWaveFailedLikeCohortCount(wave), input.Reason)
 			failurePolicyState = parallelWaveFailurePolicyPassed
 		} else {
 			controlReason = wave.ControlReason
@@ -754,6 +799,106 @@ func parallelWaveAllWorkersTerminal(wave NetrunnerWaveSnapshot) bool {
 	return true
 }
 
+// parallelWaveScopeEntryContainsPath reports whether a single declared
+// write-scope entry contains a project-relative changed path. A trailing
+// "/**" glob denotes "this directory and everything inside it", so a file
+// written directly inside the directory matches the same way a deeper file
+// does.
+func parallelWaveScopeEntryContainsPath(scopeEntry string, path string) bool {
+	normalizedPath := filepath.ToSlash(filepath.Clean(path))
+	normalizedScopeEntry := filepath.ToSlash(filepath.Clean(scopeEntry))
+	if normalizedScopeEntry == defaultWriteScopePath {
+		return true
+	}
+	if strings.HasSuffix(normalizedScopeEntry, "/**") {
+		directory := strings.TrimSuffix(normalizedScopeEntry, "/**")
+		return normalizedPath == directory || strings.HasPrefix(normalizedPath, directory+"/")
+	}
+	return normalizedPath == normalizedScopeEntry ||
+		strings.HasPrefix(normalizedPath, normalizedScopeEntry+"/")
+}
+
+// parallelWaveDeclaredWriteScopeContainsPath is the parallel-wave completion
+// variant of declaredWriteScopeContainsPath. It additionally honors "/**"
+// glob entries, which the legacy overlap-only matcher silently rejects.
+func parallelWaveDeclaredWriteScopeContainsPath(scope []string, path string) bool {
+	for _, scopeEntry := range scope {
+		if parallelWaveScopeEntryContainsPath(scopeEntry, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseParallelWaveWorkerScopeLeases releases the scope-lease rows owned by
+// a terminal worker without waiting for whole-wave cleanup. A scope path is
+// deliberately kept while another non-terminal worker in the same wave still
+// declares an overlapping scope (for example a dependency-gated child that
+// inherits its parent's scope), so the release never opens a fence that a live
+// worker still relies on.
+func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
+	if len(worker.DeclaredWriteScope) == 0 {
+		return nil
+	}
+	blocked := make(map[string]struct{})
+	for _, other := range wave.Workers {
+		if other.Id == worker.Id {
+			continue
+		}
+		if _, terminal := parallelWaveWorkerTerminalCondition(other.Status); terminal {
+			continue
+		}
+		for _, otherPath := range other.DeclaredWriteScope {
+			for _, workerPath := range worker.DeclaredWriteScope {
+				if writeScopePathsOverlap(otherPath, workerPath) {
+					blocked[workerPath] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, scopePath := range worker.DeclaredWriteScope {
+		if _, keep := blocked[scopePath]; keep {
+			continue
+		}
+		if _, err := db.Exec(
+			`UPDATE parallel_wave_scope_lease
+			 SET active = 0,
+			     released_at = COALESCE(released_at, CURRENT_TIMESTAMP)
+			 WHERE wave_id = ? AND project_id = ? AND scope_path = ? AND active = 1`,
+			wave.Id,
+			wave.ProjectId,
+			scopePath,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileStaleParallelWaveWorkers deterministically re-inspects every
+// non-terminal, scheduled worker. A worker whose session already completed or
+// whose recorded process is gone is finalized instead of remaining "running"
+// forever, so phase transitions and cleanup are not stranded by metadata that
+// the wait loop never observed again.
+func reconcileStaleParallelWaveWorkers(projectCWD string, wave NetrunnerWaveSnapshot) (NetrunnerWaveSnapshot, error) {
+	normalizedProjectCWD, err := normalizeProjectCWD(projectCWD)
+	if err != nil {
+		return NetrunnerWaveSnapshot{}, err
+	}
+	for _, worker := range wave.Workers {
+		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
+			continue
+		}
+		if worker.Status == parallelWaveWorkerStatusCreated {
+			continue
+		}
+		if _, _, err := inspectParallelWaveWorkerForWait(normalizedProjectCWD, wave, worker); err != nil {
+			return NetrunnerWaveSnapshot{}, err
+		}
+	}
+	return fetchNetrunnerWaveSnapshot(wave.Id, wave.ProjectId)
+}
+
 type TransitionNetrunnerWavePhaseInput struct {
 	WaveId              int    `json:"wave_id" jsonschema:"Parallel wave ID to transition."`
 	TargetPhase         string `json:"target_phase" jsonschema:"Target phase. Supported reviewed transitions: acceptance, completed."`
@@ -806,6 +951,18 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 	case parallelWavePhaseAcceptance:
 		if wave.Phase != parallelWavePhaseImplementation {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d must be in implementation phase before acceptance, got %q", wave.Id, wave.Phase)
+		}
+		projectCWD, cwdErr := projectCWDFromID(authorizedProjectId)
+		if cwdErr != nil {
+			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", cwdErr)
+		}
+		normalizedProjectCWD, normErr := normalizeProjectCWD(projectCWD)
+		if normErr != nil {
+			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, normErr
+		}
+		wave, err = reconcileStaleParallelWaveWorkers(normalizedProjectCWD, wave)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("failed to reconcile stale implementation workers: %v", err)
 		}
 		if !parallelWaveAllWorkersTerminal(wave) {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d implementation workers are not all terminal", wave.Id)

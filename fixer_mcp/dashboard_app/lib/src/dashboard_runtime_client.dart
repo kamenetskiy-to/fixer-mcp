@@ -5,17 +5,20 @@ class DashboardRuntimeClient {
   DashboardRuntimeClient({
     this.dashboardBaseUrl,
     this.serverpodBaseUrl,
+    this.authHeaderProvider,
     HttpClient? httpClient,
   }) : _httpClient = httpClient ?? HttpClient();
 
   final String? dashboardBaseUrl;
   final String? serverpodBaseUrl;
+  Future<String?> Function()? authHeaderProvider;
   final HttpClient _httpClient;
 
   static const defaultDashboardBaseUrl = 'http://127.0.0.1:18090';
 
   Future<Map<String, dynamic>> readDashboardJson(String path) async {
     final request = await _httpClient.getUrl(_resolveDashboardUri(path));
+    await _authorize(request);
     return _sendJson(request, path);
   }
 
@@ -24,6 +27,7 @@ class DashboardRuntimeClient {
     Map<String, dynamic> payload,
   ) async {
     final request = await _httpClient.postUrl(_resolveDashboardUri(path));
+    await _authorize(request);
     request.headers.contentType = ContentType.json;
     request.write(jsonEncode(payload));
     return _sendJson(request, path);
@@ -51,6 +55,7 @@ class DashboardRuntimeClient {
   ) async {
     final path = '/$endpoint/$method';
     final request = await _httpClient.postUrl(_resolveServerpodUri(path));
+    await _authorize(request);
     request.headers.contentType = ContentType.json;
     request.write(jsonEncode(payload));
     final decoded = await _sendJson(request, path);
@@ -58,6 +63,13 @@ class DashboardRuntimeClient {
       return decoded;
     }
     return decoded['result'];
+  }
+
+  Future<void> _authorize(HttpClientRequest request) async {
+    final value = await authHeaderProvider?.call();
+    if (value != null && value.trim().isNotEmpty) {
+      request.headers.set(HttpHeaders.authorizationHeader, value.trim());
+    }
   }
 
   Future<Map<String, dynamic>> _sendJson(

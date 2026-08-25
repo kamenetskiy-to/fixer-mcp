@@ -1,5 +1,6 @@
 import 'package:fixer_dashboard_server/src/generated/protocol.dart';
 import 'package:serverpod/serverpod.dart' hide Order;
+import 'package:serverpod/serverpod.dart' as sp;
 
 /// Architect actions that finalize a client order and deliver its result.
 ///
@@ -30,8 +31,9 @@ class OrderDeliveryEndpoint extends Endpoint {
     final revision = await Revision.db.findFirstRow(
       session,
       where: (t) => t.orderId.equals(orderId),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
     if (revision != null) {
       revision.status = 'completed';
@@ -69,8 +71,9 @@ class OrderDeliveryEndpoint extends Endpoint {
     final revision = await Revision.db.findFirstRow(
       session,
       where: (t) => t.orderId.equals(orderId),
-      orderBy: (t) => t.revisionNumber,
-      orderDescending: true,
+      orderByList: (t) => [
+        sp.Order(column: t.revisionNumber, orderDescending: true),
+      ],
     );
     if (revision != null) {
       revision.status = 'rejected';

@@ -5,3 +5,7 @@ abstract class FixerChatService {
 
   Future<void> createFixerChat(int projectId, FixerChatLaunchRequest request);
 }
+
+abstract class HandsChatService {
+  Future<List<FixerThreadRecord>> loadHandsThreads(int projectId);
+}

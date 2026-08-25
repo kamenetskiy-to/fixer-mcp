@@ -23,17 +23,17 @@ func TestRolesFromMarkersRecognizesCanonicalSkillNames(t *testing.T) {
 	}{
 		{
 			name: "canonical fixer",
-			text: "Activate skill `$init-fixer` immediately.",
+			text: "Activate skill $init-fixer immediately.",
 			want: []string{"fixer"},
 		},
 		{
 			name: "canonical overseer",
-			text: "Activate skill `$init-overseer` immediately.",
+			text: "Activate skill $init-overseer immediately.",
 			want: []string{"overseer"},
 		},
 		{
 			name: "canonical netrunner",
-			text: "Activate skill `$run-manual-netrunner` immediately.",
+			text: "Activate skill $hands-netrunner immediately.",
 			want: []string{"netrunner"},
 		},
 	}
@@ -607,26 +607,26 @@ func seedFixtureCodexLogs(homeDir string, projectCWD string) error {
 		"rollout-2026-04-28T09-00-00-019overseer-0000-0000-0000-000000000000.jsonl": strings.Join([]string{
 			fmt.Sprintf(`{"timestamp":"2026-04-28T09:00:00Z","type":"session_meta","payload":{"id":"019overseer-0000-0000-0000-000000000000","timestamp":"2026-04-28T09:00:00Z","cwd":"%s"}}`, projectCWD),
 			`{"timestamp":"2026-04-28T09:00:05Z","type":"turn_context","payload":{"model":"gpt-5.4","effort":"medium"}}`,
-			"{\"timestamp\":\"2026-04-28T09:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill `$init-overseer` immediately.\"}}",
+			"{\"timestamp\":\"2026-04-28T09:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill $init-overseer immediately.\"}}",
 			`{"timestamp":"2026-04-28T09:30:00Z","type":"assistant_message","payload":{"text":"Overseer note"}}`,
 		}, "\n"),
 		"rollout-2026-04-28T10-00-00-019fixer-0000-0000-0000-000000000000.jsonl": strings.Join([]string{
 			fmt.Sprintf(`{"timestamp":"2026-04-28T10:00:00Z","type":"session_meta","payload":{"id":"019fixer-0000-0000-0000-000000000000","timestamp":"2026-04-28T10:00:00Z","cwd":"%s"}}`, projectCWD),
 			`{"timestamp":"2026-04-28T10:00:05Z","type":"turn_context","payload":{"model":"gpt-5.4","effort":"medium"}}`,
-			"{\"timestamp\":\"2026-04-28T10:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill `$init-fixer` immediately.\"}}",
+			"{\"timestamp\":\"2026-04-28T10:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill $init-fixer immediately.\"}}",
 			`{"timestamp":"2026-04-28T10:45:00Z","type":"assistant_message","payload":{"text":"Fixer note"}}`,
 		}, "\n"),
 		"rollout-2026-04-28T11-00-00-019resumed-fixer-filename.jsonl": strings.Join([]string{
 			fmt.Sprintf(`{"timestamp":"2026-04-28T11:00:00Z","type":"session_meta","payload":{"id":"019fixer-0000-0000-0000-000000000000","timestamp":"2026-04-28T11:00:00Z","cwd":"%s"}}`, projectCWD),
 			`{"timestamp":"2026-04-28T11:00:05Z","type":"turn_context","payload":{"model":"gpt-5.4","effort":"medium"}}`,
-			"{\"timestamp\":\"2026-04-28T11:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill `$init-fixer` immediately.\"}}",
+			"{\"timestamp\":\"2026-04-28T11:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill $init-fixer immediately.\"}}",
 			`{"timestamp":"2026-04-28T11:15:00Z","type":"assistant_message","payload":{"text":"Fixer resumed note"}}`,
 		}, "\n"),
 		"rollout-2026-04-28T08-00-00-019ambiguous-0000-0000-0000-0000000000.jsonl": strings.Join([]string{
 			fmt.Sprintf(`{"timestamp":"2026-04-28T08:00:00Z","type":"session_meta","payload":{"id":"019ambiguous-0000-0000-0000-0000000000","timestamp":"2026-04-28T08:00:00Z","cwd":"%s"}}`, projectCWD),
 			`{"timestamp":"2026-04-28T08:00:05Z","type":"turn_context","payload":{"model":"gpt-5.4","effort":"medium"}}`,
-			"{\"timestamp\":\"2026-04-28T08:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill `$init-fixer` immediately.\"}}",
-			"{\"timestamp\":\"2026-04-28T08:00:11Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill `$run-manual-netrunner` immediately.\"}}",
+			"{\"timestamp\":\"2026-04-28T08:00:10Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill $init-fixer immediately.\"}}",
+			"{\"timestamp\":\"2026-04-28T08:00:11Z\",\"type\":\"user_message\",\"payload\":{\"text\":\"Activate skill $hands-netrunner immediately.\"}}",
 			`{"timestamp":"2026-04-28T08:15:00Z","type":"assistant_message","payload":{"text":"Ambiguous note"}}`,
 		}, "\n"),
 	}

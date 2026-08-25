@@ -6,12 +6,20 @@ import curses
 from typing import Any, Iterable, List, Optional
 
 
+BACK_VALUE = "__back__"
+
+
+class BackNavigation(Exception):
+    """Raised when the operator presses backspace to leave the current stage."""
+
+
 class Option:
-    def __init__(self, label: str, value: Any = None, *, disabled: bool = False, is_header: bool = False):
+    def __init__(self, label: str, value: Any = None, *, disabled: bool = False, is_header: bool = False, instant: bool = False):
         self.label = label
         self.value = value if value is not None else label
         self.disabled = disabled
         self.is_header = is_header
+        self.instant = instant
 
 
 def _render_option(name: str, selected: bool, active: bool) -> str:
@@ -79,6 +87,8 @@ def multi_select_items(
                 cursor = (cursor + 1) % len(option_list)
             elif key == ord(" "):
                 if not (option_list[cursor].disabled or option_list[cursor].is_header):
+                    if option_list[cursor].instant:
+                        return [option_list[cursor].value]
                     selected[cursor] = not selected[cursor]
             elif key in (ord("a"), ord("A")):
                 make_active = any(
@@ -90,6 +100,8 @@ def multi_select_items(
                         selected[idx] = make_active
             elif key in (10, 13, curses.KEY_ENTER):
                 return [option_list[idx].value for idx, flag in selected.items() if flag and not option_list[idx].is_header]
+            elif key in (127, 8, curses.KEY_BACKSPACE):
+                return BACK_VALUE
             elif key in (27, ord("q"), ord("Q")):
                 raise KeyboardInterrupt
 
@@ -166,6 +178,8 @@ def single_select_items(
                 if opt.is_header or opt.disabled:
                     continue
                 return opt.value
+            elif key in (127, 8, curses.KEY_BACKSPACE):
+                return BACK_VALUE
             elif key in (27, ord("q"), ord("Q")):
                 raise KeyboardInterrupt
 
@@ -173,4 +187,3 @@ def single_select_items(
         return curses.wrapper(_main)
     except KeyboardInterrupt:
         return None
-

@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Edge MCP — All Tabs",
+  "description": "Connects the current Microsoft Edge tabs to the local Playwright MCP relay when that relay is explicitly launched.",
+  "version": "0.1.3",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmmBgblwsOLLG4kwdCDYjzlWyEZcOrdEhyHusA/dhSB7ZyppZtPaViYD8ifbJxnB8ln+bhnoJsLpRKvt0k1Z22doj+PsX179+Xvz2njEgR1zBv3DUjIb6NHkr6SKkx+/qF8SYROaVczaS4kltG/jeSlOm/eXHE9E3Hx/Lz9FSrMiuiGke92XskjHBQO4M43T0RtEiJ8dj2pV51PEshUkAO173cUtvf0gh3tz4iDmao4aWL20GYFZlpzJ4mWPaoPqutzaj6vuFH8kk0D++wbXRrJlxAnx7h6LpYP/BmE7TKFtJfZF/n5ifFhtsuJT/HlKXTVgU9lyC0+1NVs2NdSYKRwIDAQAB",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "keepalive.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "Edge MCP — All Tabs"
+  }
+}

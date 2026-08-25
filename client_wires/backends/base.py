@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import os
+import fcntl
+import hashlib
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -13,8 +14,9 @@ FIXER_ROLE_SKILL_NAMES = (
     "init-unattached-fixer",
     "init-overseer",
     "maintain-project-docs",
-    "run-manual-acceptance-netrunner",
-    "run-manual-netrunner",
+    "fixer-backend-providers",
+    "fixer-repo-cleanup",
+    "hands-netrunner",
     "run-netrunner-wave",
     "review-netrunner-session",
     "complete-netrunner-session",
@@ -45,6 +47,8 @@ FIXER_RETIRED_SKILL_NAMES = (
     "check-netrunner-statuses-autonomous",
     "start-netrunner-autonomous",
 )
+# One checked-in catalog; provider-specific directories are generated views.
+CANONICAL_SKILLS_RELATIVE_ROOT = ".agents/skills"
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,10 @@ def normalize_backend_name(raw: str | None) -> str:
     if normalized == "agy":
         return "antigravity"
     return normalized
+
+
+def is_codex_backend(raw: str | None) -> bool:
+    return normalize_backend_name(raw) == "codex"
 
 
 def normalize_mcp_server_for_factory(source: Mapping[str, object]) -> dict[str, object]:
@@ -97,81 +105,51 @@ def normalize_mcp_server_for_factory(source: Mapping[str, object]) -> dict[str, 
 
 
 def materialize_factory_skills(cwd: Path, skill_names: Sequence[str]) -> None:
-    skill_root = cwd / ".factory" / "skills"
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _prune_retired_fixer_skills(skill_root)
-    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
-        destination = skill_root / normalized_name
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source_dir, destination)
+    _materialize_provider_skills(cwd, ".factory/skills", skill_names)
 
 
 def materialize_antigravity_workspace_skills(cwd: Path, skill_names: Sequence[str]) -> None:
-    skill_root = cwd / ".agents" / "skills"
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _prune_retired_fixer_skills(skill_root)
-    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
-        legacy_flat_file = skill_root / f"{normalized_name}.md"
-        try:
-            legacy_flat_file.unlink()
-        except FileNotFoundError:
-            pass
-        destination = skill_root / normalized_name
-        if _same_path(source_dir, destination):
-            continue
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source_dir, destination)
+    _materialize_provider_skills(cwd, CANONICAL_SKILLS_RELATIVE_ROOT, skill_names)
 
 
 def materialize_codex_project_skills(cwd: Path, skill_names: Sequence[str]) -> None:
-    skill_root = cwd / ".agents" / "skills"
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _prune_retired_fixer_skills(skill_root)
-    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
-        legacy_flat_file = skill_root / f"{normalized_name}.md"
-        try:
-            legacy_flat_file.unlink()
-        except FileNotFoundError:
-            pass
-        destination = skill_root / normalized_name
-        if _same_path(source_dir, destination):
-            continue
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source_dir, destination)
+    _materialize_provider_skills(cwd, CANONICAL_SKILLS_RELATIVE_ROOT, skill_names)
 
 
 def materialize_claude_workspace_skills(cwd: Path, skill_names: Sequence[str]) -> None:
-    skill_root = cwd / ".claude" / "skills"
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _prune_retired_fixer_skills(skill_root)
-    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
-        legacy_flat_file = skill_root / f"{normalized_name}.md"
-        try:
-            legacy_flat_file.unlink()
-        except FileNotFoundError:
-            pass
-        destination = skill_root / normalized_name
-        if _same_path(source_dir, destination):
-            continue
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source_dir, destination)
+    _materialize_provider_skills(cwd, ".claude/skills", skill_names)
 
 
 def materialize_junie_workspace_skills(cwd: Path, skill_names: Sequence[str]) -> None:
-    skill_root = cwd / ".junie" / "fixer-runtime" / "skills"
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _prune_retired_fixer_skills(skill_root)
-    for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
-        legacy_flat_file = skill_root / f"{normalized_name}.md"
+    _materialize_provider_skills(cwd, ".junie/fixer-runtime/skills", skill_names)
+
+
+def materialize_kimi_workspace_skills(cwd: Path, skill_names: Sequence[str]) -> None:
+    _materialize_provider_skills(cwd, ".kimi-code/skills", skill_names)
+
+
+def _materialize_provider_skills(cwd: Path, relative_root: str, skill_names: Sequence[str]) -> None:
+    lock_id = hashlib.sha256(str(cwd.resolve()).encode()).hexdigest()[:16]
+    lock_path = Path("/tmp") / f"fixer-skill-materialize-{lock_id}.lock"
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            legacy_flat_file.unlink()
-        except FileNotFoundError:
-            pass
-        destination = skill_root / normalized_name
-        if _same_path(source_dir, destination):
-            continue
-        shutil.rmtree(destination, ignore_errors=True)
-        shutil.copytree(source_dir, destination)
+            skill_root = cwd / relative_root
+            skill_root.mkdir(parents=True, exist_ok=True)
+            _prune_retired_fixer_skills(skill_root)
+            for normalized_name, source_dir in _iter_available_skill_sources(cwd, skill_names):
+                legacy_flat_file = skill_root / f"{normalized_name}.md"
+                try:
+                    legacy_flat_file.unlink()
+                except FileNotFoundError:
+                    pass
+                destination = skill_root / normalized_name
+                if _same_path(source_dir, destination):
+                    continue
+                shutil.rmtree(destination, ignore_errors=True)
+                shutil.copytree(source_dir, destination)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _prune_retired_fixer_skills(skill_root: Path) -> None:
@@ -189,14 +167,9 @@ def _same_path(left: Path, right: Path) -> bool:
 
 
 def _iter_available_skill_sources(cwd: Path, skill_names: Sequence[str]) -> list[tuple[str, Path]]:
-    codex_home = os.environ.get("CODEX_HOME", "").strip()
     repo_root = Path(__file__).resolve().parents[2]
     candidate_roots = [
-        repo_root / ".agents" / "skills",
-        cwd / ".agents" / "skills",
-        Path(codex_home).expanduser() / "skills" if codex_home else None,
-        Path.home() / ".codex" / "skills",
-        cwd / ".codex" / "skills",
+        repo_root / CANONICAL_SKILLS_RELATIVE_ROOT,
     ]
     found: list[tuple[str, Path]] = []
     for skill_name in skill_names:
@@ -360,3 +333,22 @@ class BackendAdapter(ABC):
         prompt: str,
     ) -> list[str]:
         """Build the backend-specific detached/headless command."""
+
+    def build_headless_resume_command(
+        self,
+        *,
+        external_session_id: str,
+        model: str,
+        reasoning: str,
+        selected: Mapping[str, Mapping[str, object]],
+        available: Mapping[str, Mapping[str, object]],
+        prompt: str,
+    ) -> list[str]:
+        """Build a non-interactive resume command for a durable worker generation.
+
+        Interactive resume and headless resume are separate provider contracts.
+        Providers must opt in explicitly instead of silently reusing a TUI
+        command in a detached process.
+        """
+        del external_session_id, model, reasoning, selected, available, prompt
+        raise RuntimeError(f"Backend {self.name!r} has not implemented headless resume.")

@@ -59,6 +59,10 @@ type CreateNetrunnerWaveInput struct {
 	MaxChildWaveDepth       int              `json:"max_child_wave_depth,omitempty" jsonschema:"Root-only recursion depth. Zero disables child-wave creation; maximum 16."`
 	MaxTotalDescendantWaves int              `json:"max_total_descendant_waves,omitempty" jsonschema:"Root-only total descendant-wave safety budget. Defaults to 32 when recursion is enabled; maximum 256."`
 	MaxTotalSessions        int              `json:"max_total_sessions,omitempty" jsonschema:"Root-only total session safety budget across the wave tree. Defaults to 128; maximum 2048."`
+	ReviewPolicy            string           `json:"review_policy,omitempty" jsonschema:"Review policy for the wave: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner after all workers are terminal; use only when explicitly requested by the Architect or for a very large parallel wave)."`
+	ReviewBackend           string           `json:"review_backend,omitempty" jsonschema:"Backend for an automatic reviewer. Defaults to codex."`
+	ReviewModel             string           `json:"review_model,omitempty" jsonschema:"Model for an automatic reviewer. Defaults to opencode-go/deepseek-v4-flash."`
+	ReviewReasoning         string           `json:"review_reasoning,omitempty" jsonschema:"Reasoning level for an automatic reviewer. Defaults to high."`
 }
 
 type WaveDependency struct {
@@ -71,13 +75,17 @@ type GetNetrunnerWaveInput struct {
 }
 
 type LaunchNetrunnerWaveInput struct {
-	WaveId         int                      `json:"wave_id" jsonschema:"Parallel wave ID to launch."`
-	Backend        string                   `json:"backend,omitempty" jsonschema:"Optional default CLI backend for workers without a worker_configs override. Supported: codex, droid, antigravity, junie, kimi-code."`
-	Model          string                   `json:"model,omitempty" jsonschema:"Optional default model for workers without a worker_configs override."`
-	Reasoning      string                   `json:"reasoning,omitempty" jsonschema:"Optional default reasoning for workers without a worker_configs override."`
-	WorkerConfigs  []WaveWorkerLaunchConfig `json:"worker_configs,omitempty" jsonschema:"Optional per-worker launch overrides keyed by project-scoped session_id. Unspecified fields inherit the wave defaults or the session's stored launch configuration."`
-	FixerSessionId string                   `json:"fixer_session_id,omitempty" jsonschema:"Optional current Fixer Codex session ID to pass into worker prompts."`
-	TimeoutSeconds int                      `json:"timeout_seconds,omitempty" jsonschema:"Optional startup metadata wait in seconds. Default 120; max 21600."`
+	WaveId          int                      `json:"wave_id" jsonschema:"Parallel wave ID to launch."`
+	Backend         string                   `json:"backend,omitempty" jsonschema:"Optional default CLI backend for workers without a worker_configs override. Supported: codex, commandcode, droid, antigravity, junie, kimi-code, grok."`
+	Model           string                   `json:"model,omitempty" jsonschema:"Optional default model for workers without a worker_configs override."`
+	Reasoning       string                   `json:"reasoning,omitempty" jsonschema:"Optional default reasoning for workers without a worker_configs override."`
+	WorkerConfigs   []WaveWorkerLaunchConfig `json:"worker_configs,omitempty" jsonschema:"Optional per-worker launch overrides keyed by project-scoped session_id. Unspecified fields inherit the wave defaults or the session's stored launch configuration."`
+	FixerSessionId  string                   `json:"fixer_session_id,omitempty" jsonschema:"Optional current Fixer Codex session ID to pass into worker prompts."`
+	TimeoutSeconds  int                      `json:"timeout_seconds,omitempty" jsonschema:"Optional startup metadata wait in seconds. Default 120; max 21600."`
+	ReviewPolicy    string                   `json:"review_policy,omitempty" jsonschema:"Optional review policy override: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner only when explicitly requested)."`
+	ReviewBackend   string                   `json:"review_backend,omitempty" jsonschema:"Optional automatic reviewer backend. Defaults to codex."`
+	ReviewModel     string                   `json:"review_model,omitempty" jsonschema:"Optional automatic reviewer model. Defaults to opencode-go/deepseek-v4-flash."`
+	ReviewReasoning string                   `json:"review_reasoning,omitempty" jsonschema:"Optional automatic reviewer reasoning. Defaults to high."`
 }
 
 type WaveWorkerLaunchConfig struct {
@@ -171,6 +179,10 @@ type NetrunnerWaveSnapshot struct {
 	AcceptanceSessionId     int                           `json:"acceptance_session_id,omitempty"`
 	AcceptanceSessionStatus string                        `json:"acceptance_session_status,omitempty"`
 	AcceptanceSessionReport string                        `json:"acceptance_session_report,omitempty"`
+	ReviewPolicy            string                        `json:"review_policy"`
+	ReviewBackend           string                        `json:"review_backend"`
+	ReviewModel             string                        `json:"review_model"`
+	ReviewReasoning         string                        `json:"review_reasoning"`
 	Workers                 []NetrunnerWaveWorkerSnapshot `json:"workers"`
 	Dependencies            []WaveDependency              `json:"dependencies"`
 }
@@ -209,6 +221,10 @@ type NetrunnerWaveOperatorSummary struct {
 	WaveCompleted       bool                      `json:"wave_completed"`
 	ReviewSessionId     int                       `json:"review_session_id,omitempty"`
 	ReviewState         string                    `json:"review_state"`
+	ReviewPolicy        string                    `json:"review_policy"`
+	ReviewBackend       string                    `json:"review_backend"`
+	ReviewModel         string                    `json:"review_model"`
+	ReviewReasoning     string                    `json:"review_reasoning"`
 	AcceptanceSessionId int                       `json:"acceptance_session_id,omitempty"`
 	AcceptanceState     string                    `json:"acceptance_state"`
 	RepairWorkerId      int                       `json:"repair_worker_id,omitempty"`
@@ -293,7 +309,7 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 	case waveReviewReady:
 		operatorState, label, nextAction = "wave_review_ready", "Ready for implementation review", "review_implementation"
 	case allWorkersTerminal:
-		operatorState, label, nextAction = "worker_terminal", "Workers terminal; review pending", "inspect_failure"
+		operatorState, label, nextAction = "worker_terminal", "Workers terminal; Fixer review pending", "review_implementation"
 	}
 
 	return NetrunnerWaveOperatorSummary{
@@ -317,6 +333,10 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 		WaveCompleted:       waveCompleted,
 		ReviewSessionId:     wave.ReviewSessionId,
 		ReviewState:         parallelWaveSessionState(wave.ReviewSessionId, wave.ReviewSessionStatus),
+		ReviewPolicy:        wave.ReviewPolicy,
+		ReviewBackend:       wave.ReviewBackend,
+		ReviewModel:         wave.ReviewModel,
+		ReviewReasoning:     wave.ReviewReasoning,
 		AcceptanceSessionId: wave.AcceptanceSessionId,
 		AcceptanceState:     parallelWaveSessionState(wave.AcceptanceSessionId, wave.AcceptanceSessionStatus),
 		RepairWorkerId:      wave.RepairWorkerId,
@@ -466,6 +486,48 @@ func parallelWaveWorkerLaunchInputs(wave NetrunnerWaveSnapshot, input LaunchNetr
 		inputs[override.SessionId] = workerInput
 	}
 	return inputs, nil
+}
+
+func applyParallelWaveReviewConfig(wave NetrunnerWaveSnapshot, input LaunchNetrunnerWaveInput) (NetrunnerWaveSnapshot, error) {
+	policy := wave.ReviewPolicy
+	backend := wave.ReviewBackend
+	model := wave.ReviewModel
+	reasoning := wave.ReviewReasoning
+	if strings.TrimSpace(input.ReviewPolicy) != "" {
+		policy = input.ReviewPolicy
+	}
+	if strings.TrimSpace(input.ReviewBackend) != "" {
+		backend = input.ReviewBackend
+	}
+	if strings.TrimSpace(input.ReviewModel) != "" {
+		model = input.ReviewModel
+	}
+	if strings.TrimSpace(input.ReviewReasoning) != "" {
+		reasoning = input.ReviewReasoning
+	}
+	policy, backend, model, reasoning, err := resolveParallelWaveReviewConfig(policy, backend, model, reasoning)
+	if err != nil {
+		return NetrunnerWaveSnapshot{}, err
+	}
+	if policy == parallelWaveReviewPolicyAutomatic && len(wave.Workers) == 1 {
+		return NetrunnerWaveSnapshot{}, fmt.Errorf("automatic review_policy is not allowed for a one-worker wave; use manual Fixer review")
+	}
+	if policy == wave.ReviewPolicy && backend == wave.ReviewBackend && model == wave.ReviewModel && reasoning == wave.ReviewReasoning {
+		return wave, nil
+	}
+	if _, err := db.Exec(
+		`UPDATE parallel_wave
+		 SET review_policy = ?, review_backend = ?, review_model = ?, review_reasoning = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		policy, backend, model, reasoning, wave.Id, authorizedProjectId,
+	); err != nil {
+		return NetrunnerWaveSnapshot{}, fmt.Errorf("DB update error: %v", err)
+	}
+	wave.ReviewPolicy = policy
+	wave.ReviewBackend = backend
+	wave.ReviewModel = model
+	wave.ReviewReasoning = reasoning
+	return wave, nil
 }
 
 func prepareParallelWaveWorkerLaunchConfigs(ctx context.Context, wave NetrunnerWaveSnapshot, input LaunchNetrunnerWaveInput) (map[int]LaunchNetrunnerWaveInput, error) {
@@ -679,7 +741,7 @@ func normalizeWaveDependencies(dependencies []WaveDependency, sessionIDs []int) 
 	return normalized, nil
 }
 
-func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, baseSHA string, baseBranch string, orchestrationEpoch int, epicDocID int, lineage parallelWaveLineage, candidates []parallelWaveSessionCandidate, dependencies []WaveDependency) (int, error) {
+func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, baseSHA string, baseBranch string, orchestrationEpoch int, epicDocID int, lineage parallelWaveLineage, candidates []parallelWaveSessionCandidate, dependencies []WaveDependency, reviewPolicy string, reviewBackend string, reviewModel string, reviewReasoning string) (int, error) {
 	hasEpicDocColumn := dbTableHasColumn("parallel_wave", "epic_doc_id")
 	if epicDocID > 0 && !hasEpicDocColumn {
 		return 0, fmt.Errorf("parallel_wave table is missing epic_doc_id")
@@ -707,8 +769,8 @@ func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, b
 	if lineage.RootWaveID > 0 {
 		rootWaveID = lineage.RootWaveID
 	}
-	insertColumns := "project_id, status, phase, gate_state, control_state, control_reason, base_sha, base_branch, project_cwd, worktree_root, orchestration_epoch, parent_wave_id, root_wave_id, depth, max_child_wave_depth, max_total_descendant_waves, max_total_sessions"
-	insertValues := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+	insertColumns := "project_id, status, phase, gate_state, control_state, control_reason, base_sha, base_branch, project_cwd, worktree_root, orchestration_epoch, parent_wave_id, root_wave_id, depth, max_child_wave_depth, max_total_descendant_waves, max_total_sessions, review_policy, review_backend, review_model, review_reasoning"
+	insertValues := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
 	args := []any{
 		projectID,
 		parallelWaveStatusCreated,
@@ -727,6 +789,10 @@ func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, b
 		lineage.MaxChildWaveDepth,
 		lineage.MaxTotalDescendantWaves,
 		lineage.MaxTotalSessions,
+		reviewPolicy,
+		reviewBackend,
+		reviewModel,
+		reviewReasoning,
 	}
 	if hasEpicDocColumn {
 		insertColumns += ", epic_doc_id"
@@ -871,6 +937,10 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		&snapshot.RepairAttemptCount,
 		&snapshot.HandoffSha,
 		&acceptanceSessionID,
+		&snapshot.ReviewPolicy,
+		&snapshot.ReviewBackend,
+		&snapshot.ReviewModel,
+		&snapshot.ReviewReasoning,
 	}
 	if dbTableHasColumn("parallel_wave", "epic_doc_id") {
 		epicDocColumn = "COALESCE(epic_doc_id, 0),"
@@ -908,6 +978,10 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		        COALESCE(repair_attempt_count, 0),
 		        COALESCE(handoff_sha, ''),
 		        COALESCE(acceptance_session_id, 0),
+		        COALESCE(review_policy, 'manual'),
+		        COALESCE(review_backend, 'codex'),
+		        COALESCE(NULLIF(review_model, 'opencode-go/deepseek-v4-pro'), 'opencode-go/deepseek-v4-flash'),
+		        COALESCE(review_reasoning, 'high'),
 		        `+epicDocColumn+`
 		        COALESCE(failure_reason, ''),
 		        created_at,
@@ -1175,7 +1249,19 @@ func CreateNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input Cr
 			)
 		}
 	}
-	waveID, err := insertParallelWave(authorizedProjectId, normalizedProjectCWD, worktreeRoot, baseSHA, baseBranch, control.OrchestrationEpoch, epicDocID, lineage, candidates, dependencies)
+	reviewPolicy, reviewBackend, reviewModel, reviewReasoning, err := resolveParallelWaveReviewConfig(
+		input.ReviewPolicy,
+		input.ReviewBackend,
+		input.ReviewModel,
+		input.ReviewReasoning,
+	)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, err
+	}
+	if reviewPolicy == parallelWaveReviewPolicyAutomatic && len(candidates) == 1 {
+		return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, fmt.Errorf("automatic review_policy is not allowed for a one-worker wave; use manual Fixer review")
+	}
+	waveID, err := insertParallelWave(authorizedProjectId, normalizedProjectCWD, worktreeRoot, baseSHA, baseBranch, control.OrchestrationEpoch, epicDocID, lineage, candidates, dependencies, reviewPolicy, reviewBackend, reviewModel, reviewReasoning)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, fmt.Errorf("DB insert error: %v", err)
 	}
@@ -1523,7 +1609,7 @@ func validateWorkerCompletionState(projectCWD string, wave NetrunnerWaveSnapshot
 	trackedNames, err := gitCommandInWorktree(worktreePath, "diff", "--name-only", baseSHA, "--")
 	if err == nil {
 		for _, path := range splitGitPathLines(trackedNames) {
-			if !declaredWriteScopeContainsPath(worker.DeclaredWriteScope, path) {
+			if !parallelWaveDeclaredWriteScopeContainsPath(worker.DeclaredWriteScope, path) {
 				return fmt.Errorf("worker completion rejected: changed path %q is outside declared write scope %v", path, worker.DeclaredWriteScope)
 			}
 		}
@@ -1563,6 +1649,11 @@ func finalizeParallelWaveWorker(projectCWD string, wave NetrunnerWaveSnapshot, w
 	}
 	for _, updatedWorker := range updatedWave.Workers {
 		if updatedWorker.Id == worker.Id {
+			if updatedWorker.Status == parallelWaveWorkerStatusReviewReady || updatedWorker.Status == parallelWaveWorkerStatusCompleted {
+				if leaseErr := releaseParallelWaveWorkerScopeLeases(updatedWave, updatedWorker); leaseErr != nil {
+					log.Printf("warning: failed to release terminal worker %d scope leases: %v", updatedWorker.SessionId, leaseErr)
+				}
+			}
 			return updatedWorker, nil
 		}
 	}
@@ -2316,6 +2407,34 @@ func launchParallelWaveWorkerProcess(
 	return nil
 }
 
+// abandonNeverLaunchedParallelWaveWorkers deterministically closes out workers
+// whose worktrees were prepared but whose process never launched: mark them
+// failed, remove their worktrees, and release their scope leases so they do
+// not remain stranded until whole-wave cleanup.
+func abandonNeverLaunchedParallelWaveWorkers(projectCWD string, waveID int, projectID int, workerFailures map[int]string, worktreePaths []string) []string {
+	for workerID, reason := range workerFailures {
+		_ = markParallelWaveWorkerFailed(workerID, projectID, reason)
+	}
+	rollbackFailures := rollbackParallelWaveWorktrees(projectCWD, worktreePaths)
+	if len(rollbackFailures) > 0 {
+		log.Printf("warning: wave %d launch-failure worktree rollback: %s", waveID, strings.Join(rollbackFailures, "; "))
+	}
+	partialWave, err := fetchNetrunnerWaveSnapshot(waveID, projectID)
+	if err != nil {
+		log.Printf("warning: failed to fetch wave %d after launch abandonment: %v", waveID, err)
+		return rollbackFailures
+	}
+	for _, worker := range partialWave.Workers {
+		if worker.Status != parallelWaveWorkerStatusFailed {
+			continue
+		}
+		if leaseErr := releaseParallelWaveWorkerScopeLeases(partialWave, worker); leaseErr != nil {
+			log.Printf("warning: failed to release abandoned worker %d scope leases: %v", worker.SessionId, leaseErr)
+		}
+	}
+	return rollbackFailures
+}
+
 func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input LaunchNetrunnerWaveInput) (*mcp.CallToolResult, LaunchNetrunnerWaveOutput, error) {
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, fmt.Errorf("access denied: requires fixer role")
@@ -2343,6 +2462,10 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 	}
 	if len(wave.Workers) == 0 {
 		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, fmt.Errorf("wave %d has no workers to launch", wave.Id)
+	}
+	wave, err = applyParallelWaveReviewConfig(wave, input)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, err
 	}
 
 	control, _, err := fetchOrchestrationControl(authorizedProjectId)
@@ -2399,8 +2522,12 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 	}
 	createdWorktrees, err := createParallelWaveWorktrees(normalizedProjectCWD, launchWave, worktreePathByWorkerID)
 	if err != nil {
-		rollbackFailures := rollbackParallelWaveWorktrees(normalizedProjectCWD, createdWorktrees)
 		reason := err.Error()
+		workerFailures := make(map[int]string, len(launchWave.Workers))
+		for _, worker := range launchWave.Workers {
+			workerFailures[worker.Id] = "launch aborted: " + reason
+		}
+		rollbackFailures := abandonNeverLaunchedParallelWaveWorkers(normalizedProjectCWD, wave.Id, authorizedProjectId, workerFailures, createdWorktrees)
 		if len(rollbackFailures) > 0 {
 			reason += "; rollback failures: " + strings.Join(rollbackFailures, "; ")
 		}
@@ -2409,7 +2536,7 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 	}
 
 	launchedWorkers := 0
-	for _, worker := range launchWave.Workers {
+	for workerIndex, worker := range launchWave.Workers {
 		worktreePath := worktreePathByWorkerID[worker.Id]
 		workerInput := workerLaunchInputs[worker.SessionId]
 		if err := launchParallelWaveWorkerProcess(ctx, normalizedProjectCWD, wave, worker, worktreePath, workerInput, control.OrchestrationEpoch, startupTimeout); err != nil {
@@ -2417,8 +2544,15 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 			if launchedWorkers > 0 {
 				status = parallelWaveStatusPartiallyFailed
 			}
-			_ = updateParallelWaveWorkerStatus(worker.Id, authorizedProjectId, parallelWaveWorkerStatusFailed, err.Error())
+			workerFailures := map[int]string{worker.Id: err.Error()}
+			abandonedWorktreePaths := []string{worktreePath}
+			for _, remaining := range launchWave.Workers[workerIndex+1:] {
+				reason := fmt.Sprintf("launch abandoned after session %d launch failure", worker.SessionId)
+				workerFailures[remaining.Id] = reason
+				abandonedWorktreePaths = append(abandonedWorktreePaths, worktreePathByWorkerID[remaining.Id])
+			}
 			_ = updateParallelWaveStatus(wave.Id, authorizedProjectId, status, err.Error(), launchedWorkers > 0)
+			abandonNeverLaunchedParallelWaveWorkers(normalizedProjectCWD, wave.Id, authorizedProjectId, workerFailures, abandonedWorktreePaths)
 			partialWave, fetchErr := fetchNetrunnerWaveSnapshot(wave.Id, authorizedProjectId)
 			if fetchErr != nil {
 				return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, err
@@ -2700,7 +2834,11 @@ func WaitForNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input W
 			result := buildParallelWaveWaitResult(startedAt, timeoutSeconds, pollIntervalSeconds, returnWhen, wave, nil, true, "follow_up_blocked", false, false, blockedReason, control)
 			return nil, WaitForNetrunnerWaveOutput{Status: "blocked", Result: result}, nil
 		}
-		if allTerminal {
+		reviewPolicy := strings.TrimSpace(wave.ReviewPolicy)
+		if reviewPolicy == "" {
+			reviewPolicy = defaultParallelWaveReviewPolicy
+		}
+		if allTerminal && reviewPolicy == parallelWaveReviewPolicyAutomatic {
 			if err := ensureParallelWaveReviewer(ctx, wave); err != nil {
 				// Reviewer launch is deliberately non-fatal for the worker result: the
 				// failure is persisted on the reviewer session for Architect follow-up.
@@ -2777,9 +2915,6 @@ func CleanupNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input C
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
-	if err := validateParallelWaveCleanupPreconditions(wave, authorizedProjectId); err != nil {
-		return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, err
-	}
 
 	projectCWD, err := projectCWDFromID(authorizedProjectId)
 	if err != nil {
@@ -2795,6 +2930,14 @@ func CleanupNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input C
 	}
 	if storedProjectCWD != normalizedProjectCWD {
 		return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("wave %d belongs to project cwd %q, current project cwd is %q", wave.Id, storedProjectCWD, normalizedProjectCWD)
+	}
+
+	wave, err = reconcileStaleParallelWaveWorkers(normalizedProjectCWD, wave)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("failed to reconcile stale wave workers: %v", err)
+	}
+	if err := validateParallelWaveCleanupPreconditions(wave, authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, err
 	}
 
 	resolvedPathsByWorkerID := make(map[int]string, len(wave.Workers))
@@ -3049,12 +3192,12 @@ func processParallelWaveGovernedRepair(ctx context.Context, projectCWD string, w
 
 func backendToProviderName(backend string) string {
 	switch backend {
-	case "kimi-code-native":
-		return "Kimi Code"
 	case "claude":
 		return "Claude Code"
 	case "codex":
 		return "Codex"
+	case "commandcode":
+		return "CommandCode"
 	case "antigravity":
 		return "Agy/Gemini"
 	// droid (Factory CLI) and other backends have no check-my-limits bucket:

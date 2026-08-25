@@ -4,43 +4,57 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .base import BackendAdapter, BackendDescriptor
+from .base import BackendAdapter, BackendDescriptor, FIXER_ROLE_SKILL_NAMES, materialize_kimi_workspace_skills
 from .catalog import load_backend_entry
 from .manifest import load_manifest
 
-
-# Public alias surfaced in the catalog / launcher.
-KIMI_CODE_PUBLIC_MODEL = "kimi-k2.7-code"
-# Internal model id understood by kimi-cli (-m). The managed "K2.7 Code" model.
-KIMI_CODE_INTERNAL_MODEL = "kimi-code/kimi-for-coding"
-
-# Public alias for the managed "K3" model.
+# Public aliases surfaced in the catalog / launcher.
+KIMI_CODE_K27_MODEL = "kimi-k2.7-code"
+KIMI_CODE_K27_HIGHSPEED_MODEL = "kimi-k2.7-code-highspeed"
 KIMI_CODE_K3_MODEL = "kimi-k3"
-# Internal model id understood by kimi-cli (-m) for K3.
+KIMI_CODE_K3_256K_MODEL = "kimi-k3-256k"
+
+# Internal model ids understood by the native `kimi` binary (-m).
+KIMI_CODE_K27_INTERNAL_MODEL = "kimi-code/kimi-for-coding"
+KIMI_CODE_K27_HIGHSPEED_INTERNAL_MODEL = "kimi-code/kimi-for-coding-highspeed"
 KIMI_CODE_K3_INTERNAL_MODEL = "kimi-code/k3"
+KIMI_CODE_K3_256K_INTERNAL_MODEL = "kimi-code/k3-256k"
 
-# Scoped runtime MCP config path, relative to the project cwd.  Using a scoped
-# file avoids clobbering the operator's interactive .mcp.json in the project
-# root and lets us pass the config explicitly via --mcp-config-file.
-_KIMI_RUNTIME_MCP_CONFIG = Path(".kimi") / "fixer-runtime" / "mcp.json"
+# Documented project-scoped MCP config path for the native Kimi Code binary
+# (https://moonshotai.github.io/kimi-code/en/customization/mcp.html). Unlike
+# The native binary has no --mcp-config-file-style flag to point at
+# an arbitrary scoped file: `.kimi-code/mcp.json` under the project cwd is the
+# only project-local location it auto-discovers, so the adapter must write
+# there directly. This CAN collide with a config the operator maintains by
+# hand for their own interactive sessions in the same repo; that is a known
+# limitation of this prototype, not an oversight.
+_KIMI_NATIVE_MCP_CONFIG = Path(".kimi-code") / "mcp.json"
 
-_KIMI_MODEL_ALIASES = {
-    "kimi-k2.7-code": KIMI_CODE_PUBLIC_MODEL,
-    "kimi-k2.7": KIMI_CODE_PUBLIC_MODEL,
-    "kimi k2.7 code": KIMI_CODE_PUBLIC_MODEL,
-    "k2.7 code": KIMI_CODE_PUBLIC_MODEL,
-    "kimi-code": KIMI_CODE_PUBLIC_MODEL,
-    "kimi-for-coding": KIMI_CODE_PUBLIC_MODEL,
-    "kimi-code/kimi-for-coding": KIMI_CODE_PUBLIC_MODEL,
+_KIMI_NATIVE_MODEL_ALIASES = {
+    "kimi-for-coding": KIMI_CODE_K27_MODEL,
+    "kimi-code": KIMI_CODE_K27_MODEL,
+    "kimi-code/kimi-for-coding": KIMI_CODE_K27_MODEL,
+    "kimi-k2.7": KIMI_CODE_K27_MODEL,
+    "kimi k2.7": KIMI_CODE_K27_MODEL,
+    "kimi-k2.7-code": KIMI_CODE_K27_MODEL,
+    "kimi k2.7 code": KIMI_CODE_K27_MODEL,
+    "k2.7 coding": KIMI_CODE_K27_MODEL,
+    "kimi-k2.7-code-highspeed": KIMI_CODE_K27_HIGHSPEED_MODEL,
+    "kimi k2.7 code highspeed": KIMI_CODE_K27_HIGHSPEED_MODEL,
+    "k2.7 coding highspeed": KIMI_CODE_K27_HIGHSPEED_MODEL,
     "kimi-k3": KIMI_CODE_K3_MODEL,
-    "kimi k3": KIMI_CODE_K3_MODEL,
     "k3": KIMI_CODE_K3_MODEL,
     "kimi-code/k3": KIMI_CODE_K3_MODEL,
+    "kimi-k3-256k": KIMI_CODE_K3_256K_MODEL,
+    "k3-256k": KIMI_CODE_K3_256K_MODEL,
+    "kimi-code/k3-256k": KIMI_CODE_K3_256K_MODEL,
 }
 
-_KIMI_INTERNAL_MODEL_IDS = {
-    KIMI_CODE_PUBLIC_MODEL: KIMI_CODE_INTERNAL_MODEL,
+_KIMI_NATIVE_INTERNAL_MODEL_IDS = {
+    KIMI_CODE_K27_MODEL: KIMI_CODE_K27_INTERNAL_MODEL,
+    KIMI_CODE_K27_HIGHSPEED_MODEL: KIMI_CODE_K27_HIGHSPEED_INTERNAL_MODEL,
     KIMI_CODE_K3_MODEL: KIMI_CODE_K3_INTERNAL_MODEL,
+    KIMI_CODE_K3_256K_MODEL: KIMI_CODE_K3_256K_INTERNAL_MODEL,
 }
 
 
@@ -48,13 +62,25 @@ def _manifest_path() -> Path:
     return Path(__file__).resolve().parent / "manifest" / "kimi-code.manifest.json"
 
 
-def normalize_mcp_server_for_kimi(source: Mapping[str, object]) -> dict[str, object]:
-    """Translate a launcher MCP server spec into kimi-cli .mcp.json schema."""
+def normalize_mcp_server_for_kimi_native(source: Mapping[str, object]) -> dict[str, object]:
+    """Translate a launcher MCP server spec into the native kimi-code mcp.json schema.
+
+    Schema per https://moonshotai.github.io/kimi-code/en/customization/mcp.html:
+    entries with a "command" field are stdio servers; entries with a "url" field
+    and no "transport" are HTTP servers; legacy SSE servers set "transport": "sse".
+    """
+    # Anything reaching this function is already in the launcher's
+    # `selected_servers` set, i.e. the operator/Fixer already chose to
+    # include it — that decision is authoritative. Some upstream server
+    # specs (notably the registry-sourced `fixer_mcp` entry) carry an
+    # incidental "enabled" field left over from unrelated dashboard/registry
+    # state (Codex's launcher has to force-override it to true for the same
+    # reason). Only "disabled" is treated as a real per-server opt-out
+    # signal here, matching the launcher's convention.
     if "url" in source or "serverUrl" in source:
         payload: dict[str, object] = {
-            "transport": "http",
             "url": source.get("url", source.get("serverUrl", "")),
-            "disabled": bool(source.get("disabled", False)),
+            "enabled": not bool(source.get("disabled", False)),
         }
         headers = source.get("headers")
         if isinstance(headers, dict) and headers:
@@ -62,9 +88,8 @@ def normalize_mcp_server_for_kimi(source: Mapping[str, object]) -> dict[str, obj
         return payload
 
     payload = {
-        "transport": "stdio",
         "command": str(source.get("command", "")).strip(),
-        "disabled": bool(source.get("disabled", False)),
+        "enabled": not bool(source.get("disabled", False)),
     }
     args = source.get("args")
     if isinstance(args, (list, tuple)):
@@ -81,6 +106,11 @@ def normalize_mcp_server_for_kimi(source: Mapping[str, object]) -> dict[str, obj
 
 
 class KimiCodeBackendAdapter(BackendAdapter):
+    """Adapter for the native Kimi Code binary (~/.kimi-code/bin/kimi).
+
+    Shared native Kimi Code adapter used by Fixer and Project Hands.
+    """
+
     def __init__(self) -> None:
         entry = load_backend_entry("kimi-code")
         self.descriptor = BackendDescriptor(
@@ -94,31 +124,20 @@ class KimiCodeBackendAdapter(BackendAdapter):
             fresh_launch_supported=bool(entry.get("fresh_launch_supported", True)),
             resume_supported=bool(entry.get("resume_supported", True)),
         )
-        self.command = "kimi-cli"
+        self.command = "kimi"
         self.supports_resume = self.descriptor.resume_supported
         self._manifest = self._load_manifest()
         self._runtime_cwd: Path | None = None
 
     def _load_manifest(self) -> Any:
-        """Load the kimi-code manifest; fall back to defaults if absent."""
         try:
             return load_manifest(_manifest_path())
         except Exception:
             return None
 
     def _mcp_config_path(self, cwd: Path | None = None) -> Path:
-        """Absolute path to the scoped MCP config file."""
         base = cwd or self._runtime_cwd or Path.cwd()
-        return (base / _KIMI_RUNTIME_MCP_CONFIG).resolve()
-
-    @property
-    def _mcp_config_flag(self) -> str:
-        """Flag name used to pass the scoped MCP config file."""
-        if self._manifest is not None:
-            flags = list(self._manifest.mcp.scope_flags)
-            if flags:
-                return flags[0]
-        return "--mcp-config-file"
+        return (base / _KIMI_NATIVE_MCP_CONFIG).resolve()
 
     def _interactive_approve_flags(self) -> list[str]:
         if self._manifest is not None:
@@ -128,30 +147,33 @@ class KimiCodeBackendAdapter(BackendAdapter):
         return ["--yolo"]
 
     def _headless_approve_flags(self) -> list[str]:
+        # Empirically verified (real `kimi` binary v0.29.0): `--auto` and
+        # `--yolo` both hard-error when combined with `-p`/`--prompt`
+        # ("Cannot combine --prompt with --auto."/"...--yolo."). A bare `-p`
+        # invocation with no approval flag at all already auto-approves
+        # ordinary tool calls, so no approval flag is needed or valid here.
         if self._manifest is not None:
-            flags = list(self._manifest.permissions.headless_auto_approve_flags)
-            if flags:
-                return flags
-        return ["--print"]
+            return list(self._manifest.permissions.headless_auto_approve_flags)
+        return []
 
     def normalize_model(self, model: str | None) -> str:
         candidate = (model or "").strip().lower()
         if not candidate:
-            return KIMI_CODE_PUBLIC_MODEL
-        if candidate in _KIMI_MODEL_ALIASES:
-            canonical = _KIMI_MODEL_ALIASES[candidate]
+            return KIMI_CODE_K27_MODEL
+        if candidate in _KIMI_NATIVE_MODEL_ALIASES:
+            canonical = _KIMI_NATIVE_MODEL_ALIASES[candidate]
             if self._manifest is not None and canonical not in self._manifest.models.options:
                 raise RuntimeError(
-                    f"Kimi alias {candidate!r} resolved to {canonical!r} which is not "
-                    f"declared in the manifest options: {self._manifest.models.options}"
+                    f"Kimi Code native alias {candidate!r} resolved to {canonical!r} which is "
+                    f"not declared in the manifest options: {self._manifest.models.options}"
                 )
             return canonical
-        # Fall back to base validation against catalog model_options.
         return super().normalize_model(model)
 
     def normalize_reasoning(self, reasoning: str | None) -> str:
-        # kimi-cli has no reasoning-effort levels (thinking is on by default);
-        # accept whatever the launcher passes and ignore it downstream.
+        # No CLI flag surfaces reasoning effort for the native binary today
+        # (confirmed absent from `kimi --help`); thinking is controlled only
+        # via config.toml. Accept whatever is passed and ignore it downstream.
         return "default"
 
     def _internal_model(self, model: str | None) -> str:
@@ -160,7 +182,7 @@ class KimiCodeBackendAdapter(BackendAdapter):
             internal = self._manifest.models.internal_id_map.get(public)
             if internal:
                 return internal
-        return _KIMI_INTERNAL_MODEL_IDS.get(public, KIMI_CODE_INTERNAL_MODEL)
+        return _KIMI_NATIVE_INTERNAL_MODEL_IDS.get(public, KIMI_CODE_K27_INTERNAL_MODEL)
 
     def build_llm_args(self, selection: Any) -> list[str]:
         model = str(getattr(selection, "model", "") or "").strip() or self.default_model
@@ -168,34 +190,31 @@ class KimiCodeBackendAdapter(BackendAdapter):
 
     def build_execution_args(self, prefs: Any) -> list[str]:
         del prefs
-        return list(self._interactive_approve_flags())
+        return [
+            *self._interactive_approve_flags(),
+            "--skills-dir",
+            str((self._runtime_cwd or Path.cwd()) / ".kimi-code" / "skills"),
+        ]
 
     def build_mcp_flags(
         self,
         selected: Mapping[str, Mapping[str, object]],
         available: Mapping[str, Mapping[str, object]],
     ) -> list[str]:
+        # Native Kimi Code discovers the project-scoped `.kimi-code/mcp.json`
+        # automatically.  It does not support a --mcp-config-file option.
         del selected, available
-        # Use a relative path: the launcher always runs kimi-cli with cwd set to
-        # the project root, so the scoped config resolves correctly without
-        # needing cwd passed into this method.
-        return [self._mcp_config_flag, str(_KIMI_RUNTIME_MCP_CONFIG)]
+        return []
 
     def build_prompt_args(self, prompt: str) -> list[str]:
-        # `-p`/`--prompt` is a one-shot flag on kimi-cli: passing it makes the
-        # CLI run that single turn and exit, it does NOT stay in the
-        # interactive TUI afterward (confirmed the hard way — a prior fix
-        # here wrongly assumed `-p` auto-submits into an ongoing interactive
-        # session and broke real interactive kimi-code launches). Kimi shell
-        # mode has no way to auto-submit an initial prompt into a session
-        # that stays open, so the launcher surfaces the bootstrap prompt to
-        # the operator instead. The headless path builds its own `-p` flag
-        # directly in build_headless_command, where one-shot-and-exit is the
-        # correct/intended behavior.
+        # Empirically verified this session: -p/--prompt is one-shot only and
+        # there is no flag to preload a message into a session that then stays
+        # interactive. The launcher must fall back to the clipboard/bootstrap
+        # print pattern for interactive launches.
         return []
 
     def build_resume_command(self, option_args: Sequence[str], external_session_id: str) -> list[str]:
-        return [self.command, "-r", external_session_id.strip(), *list(option_args)]
+        return [self.command, "-S", external_session_id.strip(), *list(option_args)]
 
     def prepare_env(self, env: dict[str, str], selection: Any) -> None:
         del env, selection
@@ -211,20 +230,41 @@ class KimiCodeBackendAdapter(BackendAdapter):
         prompt: str,
     ) -> list[str]:
         del reasoning, selected, available
-        # Non-interactive: --print auto-dismisses AskUserQuestion and
-        # auto-approves tool calls; --yolo approves all actions.
         cmd = [
             self.command,
             *self._headless_approve_flags(),
-            *self._interactive_approve_flags(),
+            "--skills-dir",
+            str((self._runtime_cwd or Path.cwd()) / ".kimi-code" / "skills"),
             "-m",
             self._internal_model(model),
-            self._mcp_config_flag,
-            str(self._mcp_config_path()),
+            "--output-format",
+            "text",
         ]
         if prompt.strip():
             cmd.extend(["-p", prompt.strip()])
         return cmd
+
+    def build_headless_resume_command(
+        self,
+        *,
+        external_session_id: str,
+        model: str,
+        reasoning: str,
+        selected: Mapping[str, Mapping[str, object]],
+        available: Mapping[str, Mapping[str, object]],
+        prompt: str,
+    ) -> list[str]:
+        command = self.build_headless_command(
+            model=model,
+            reasoning=reasoning,
+            selected=selected,
+            available=available,
+            prompt="",
+        )
+        command[1:1] = ["-S", external_session_id.strip()]
+        if prompt.strip():
+            command.extend(["-p", prompt.strip()])
+        return command
 
     def ensure_runtime_files(
         self,
@@ -235,14 +275,15 @@ class KimiCodeBackendAdapter(BackendAdapter):
     ) -> None:
         del selection
         self._runtime_cwd = cwd.resolve()
+        materialize_kimi_workspace_skills(cwd, FIXER_ROLE_SKILL_NAMES)
         mcp_servers: dict[str, dict[str, object]] = {}
         for name, config in sorted(selected.items()):
             source = dict(available.get(name, {}))
             source.update(dict(config))
-            server_payload = normalize_mcp_server_for_kimi(source)
-            if server_payload.get("transport") == "http" and not str(server_payload.get("url", "")).strip():
+            server_payload = normalize_mcp_server_for_kimi_native(source)
+            if "url" in server_payload and not str(server_payload.get("url", "")).strip():
                 continue
-            if server_payload.get("transport") == "stdio" and not str(server_payload.get("command", "")).strip():
+            if "url" not in server_payload and not str(server_payload.get("command", "")).strip():
                 continue
             mcp_servers[name] = server_payload
 
@@ -252,3 +293,10 @@ class KimiCodeBackendAdapter(BackendAdapter):
             json.dumps({"mcpServers": mcp_servers}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+
+
+# Backwards-compatible Python symbol names. The only dispatchable backend name
+# remains "kimi-code"; the retired "kimi-code-native" backend is not registered.
+KIMI_CODE_PUBLIC_MODEL = KIMI_CODE_K27_MODEL
+KIMI_CODE_INTERNAL_MODEL = KIMI_CODE_K27_INTERNAL_MODEL
+KimiCodeNativeBackendAdapter = KimiCodeBackendAdapter

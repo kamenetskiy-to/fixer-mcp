@@ -16,9 +16,13 @@ from .catalog import load_backend_entry
 
 JUNIE_CANONICAL_KIMI_K26_MODEL = "kimi-k2.6"
 JUNIE_CANONICAL_GLM_51_MODEL = "glm-5.1"
+JUNIE_CANONICAL_DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash-0731"
 JUNIE_CUSTOM_MODEL_IDS = {
     JUNIE_CANONICAL_KIMI_K26_MODEL: f"custom:{JUNIE_CANONICAL_KIMI_K26_MODEL}",
     JUNIE_CANONICAL_GLM_51_MODEL: f"custom:{JUNIE_CANONICAL_GLM_51_MODEL}",
+    JUNIE_CANONICAL_DEEPSEEK_V4_FLASH_MODEL: (
+        f"custom:{JUNIE_CANONICAL_DEEPSEEK_V4_FLASH_MODEL}"
+    ),
 }
 JUNIE_FIXER_MCP_LOCATION = ".junie/fixer-runtime/mcp"
 JUNIE_FIXER_SKILL_LOCATION = ".junie/fixer-runtime/skills"
@@ -49,6 +53,14 @@ class JunieBackendAdapter(BackendAdapter):
             return JUNIE_CANONICAL_KIMI_K26_MODEL
         if candidate in ("glm", "glm-5.1", "z.ai glm-5.1", "z.ai glm 5.1"):
             return JUNIE_CANONICAL_GLM_51_MODEL
+        if candidate in (
+            "deepseek",
+            "deepseek v4 flash 0731",
+            "deepseek-v4-flash-0731",
+            "deepseek/deepseek-v4-flash-0731",
+            "custom:deepseek-v4-flash-0731",
+        ):
+            return JUNIE_CANONICAL_DEEPSEEK_V4_FLASH_MODEL
         return super().normalize_model(candidate)
 
     def _custom_model_id(self, model: str | None) -> str:

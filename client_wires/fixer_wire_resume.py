@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from client_wires.backends import SUPPORTED_BACKENDS, available_backend_descriptors, normalize_backend_name
+from client_wires.backends import SUPPORTED_BACKENDS, available_backend_descriptors, is_codex_backend, normalize_backend_name
 from client_wires import fixer_wire_db
 from client_wires import fixer_wire_selectors
 
@@ -56,7 +58,7 @@ def summary_provider(summary: Any) -> str:
 def format_fixer_resume_selection(provider: str, session_id: str) -> str:
     normalized = normalize_backend_name(provider)
     clean_session_id = str(session_id).strip()
-    if normalized == "codex":
+    if is_codex_backend(normalized):
         return clean_session_id
     return f"{normalized}:{clean_session_id}"
 
@@ -158,6 +160,10 @@ def prompt_resume_session_id(
 
 
 def netrunner_session_marker(session_id: int) -> str:
+    return f"Preselected compatibility session ID from fixer wire: `{session_id}`."
+
+
+def _legacy_netrunner_session_marker(session_id: int) -> str:
     return f"Preselected session ID from fixer wire: `{session_id}`."
 
 
@@ -232,20 +238,62 @@ def session_log_is_fixer_session(
     overseer_skill_markers: Sequence[str],
     max_lines: int = 240,
 ) -> bool:
-    fixer_line = first_any_marker_line(log_path, fixer_skill_markers, max_lines=max_lines)
+    user_texts = _session_user_message_texts(log_path, max_lines=max_lines)
+    if user_texts:
+        fixer_line = _first_marker_position(user_texts, fixer_skill_markers)
+        competing_lines = [
+            position
+            for position in (
+                _first_marker_position(user_texts, netrunner_skill_markers),
+                _first_marker_position(user_texts, overseer_skill_markers),
+            )
+            if position is not None
+        ]
+    else:
+        fixer_line = first_any_marker_line(log_path, fixer_skill_markers, max_lines=max_lines)
+        competing_lines = [
+            line
+            for line in (
+                first_any_marker_line(log_path, netrunner_skill_markers, max_lines=max_lines),
+                first_any_marker_line(log_path, overseer_skill_markers, max_lines=max_lines),
+            )
+            if line is not None
+        ]
     if fixer_line is None:
         return False
-    competing_lines = [
-        line
-        for line in (
-            first_any_marker_line(log_path, netrunner_skill_markers, max_lines=max_lines),
-            first_any_marker_line(log_path, overseer_skill_markers, max_lines=max_lines),
-        )
-        if line is not None
-    ]
     if not competing_lines:
         return True
     return fixer_line <= min(competing_lines)
+
+
+def _session_user_message_texts(log_path: Path, *, max_lines: int) -> list[str]:
+    texts: list[str] = []
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for index, raw_line in enumerate(handle):
+                if index >= max_lines:
+                    break
+                try:
+                    record = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict) or payload.get("type") != "message":
+                    continue
+                if payload.get("role") != "user":
+                    continue
+                content = payload.get("content", [])
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    texts.extend(
+                        str(item.get("text", ""))
+                        for item in content
+                        if isinstance(item, dict) and item.get("text")
+                    )
+    except OSError:
+        return []
+    return texts
 
 
 def session_log_is_overseer_session(
@@ -283,7 +331,13 @@ def session_log_has_netrunner_marker(
         return False
     if session_id is None:
         return True
-    return session_log_has_markers(log_path, [netrunner_session_marker(session_id)], max_lines=max_lines)
+    return any(
+        session_log_has_markers(log_path, [marker], max_lines=max_lines)
+        for marker in (
+            netrunner_session_marker(session_id),
+            _legacy_netrunner_session_marker(session_id),
+        )
+    )
 
 
 def load_cwd_session_summaries(cwd: Path, *, limit: int, minimum_scan_limit: int = 80) -> tuple[Any, list[Any]]:
@@ -507,7 +561,7 @@ _ANTIGRAVITY_CONVERSATION_FALLBACK_PREVIEW = "(antigravity conversation)"
 def _antigravity_skill_marker_variants(skill_name: str) -> tuple[str, ...]:
     return (
         f"/{skill_name}",
-        f"Activate skill `${skill_name}` immediately.",
+        f"Activate skill ${skill_name} immediately.",
         f"Use the `{skill_name}` skill immediately.",
         f"Use the {skill_name} skill immediately.",
     )
@@ -520,7 +574,7 @@ _ANTIGRAVITY_FIXER_MARKERS = tuple(
 )
 _ANTIGRAVITY_NETRUNNER_MARKERS = tuple(
     marker
-    for skill_name in ("run-manual-netrunner", "run-manual-acceptance-netrunner", "start-netrunner")
+    for skill_name in ("hands-netrunner", "start-netrunner")
     for marker in _antigravity_skill_marker_variants(skill_name)
 )
 _ANTIGRAVITY_OVERSEER_MARKERS = tuple(
@@ -531,10 +585,19 @@ _ANTIGRAVITY_OVERSEER_MARKERS = tuple(
 _ANTIGRAVITY_PREVIEW_MARKER_SNIPPETS = (
     "skill immediately",
     "MCP selection",
+    "Preselected compatibility session ID",
     "Preselected session ID",
     "Autonomous fixer Codex session ID",
 )
 _PRINTABLE_BYTES_RE = re.compile(rb"[\t\r\n -~]{4,}")
+
+
+_ANTIGRAVITY_HANDS_MARKERS = (
+    "Use its Project Hands Channel Mode for the current project.",
+    "Project Hands Channel Mode",
+    "disposable client of the one permanent project actor `Руки`",
+    "disposable client of the one permanent project actor 'Руки'",
+)
 
 
 def _antigravity_store_root() -> Path:
@@ -586,6 +649,11 @@ def _iter_antigravity_conversation_ids_for_cwd(store_root: Path, cwd: Path) -> l
 
 
 def _antigravity_conversation_file(store_root: Path, conversation_id: str) -> Path | None:
+    transcript_path = (
+        store_root / "brain" / conversation_id / ".system_generated" / "logs" / "transcript.jsonl"
+    )
+    if transcript_path.is_file():
+        return transcript_path
     conversation_dir = store_root / "conversations"
     candidates = [
         conversation_dir / f"{conversation_id}.db",
@@ -610,6 +678,43 @@ def _printable_strings_from_binary_file(path: Path, *, max_bytes: int = 64_000_0
     return strings
 
 
+def _antigravity_role_texts(path: Path) -> list[str]:
+    """Read role markers from conversation steps, not embedded global skill metadata."""
+    if path.suffix.lower() == ".jsonl":
+        texts: list[str] = []
+        for record in _iter_jsonl_records(path, max_lines=10):
+            content = str(record.get("content", "") or "")
+            if content:
+                texts.append(content)
+        if texts:
+            return texts
+    if path.suffix.lower() == ".db":
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT step_payload, metadata FROM steps ORDER BY idx LIMIT 3"
+                ).fetchall()
+            texts: list[str] = []
+            for payload, metadata in rows:
+                for blob in (payload, metadata):
+                    if blob:
+                        texts.extend(_printable_strings_from_binary_file_bytes(blob))
+            if texts:
+                return texts
+        except (OSError, sqlite3.Error):
+            pass
+    return _printable_strings_from_binary_file(path)
+
+
+def _printable_strings_from_binary_file_bytes(data: bytes) -> list[str]:
+    strings: list[str] = []
+    for match in _PRINTABLE_BYTES_RE.finditer(data):
+        clean = " ".join(match.group(0).decode("utf-8", errors="ignore").split())
+        if clean:
+            strings.append(clean)
+    return strings
+
+
 def _first_marker_position(texts: Sequence[str], markers: Sequence[str]) -> int | None:
     joined = "\n".join(texts)
     positions = [position for marker in markers if (position := joined.find(marker)) >= 0]
@@ -617,11 +722,19 @@ def _first_marker_position(texts: Sequence[str], markers: Sequence[str]) -> int 
 
 
 def _antigravity_conversation_has_role(texts: Sequence[str], role: str) -> bool | None:
+    hands_pos = _first_marker_position(texts, _ANTIGRAVITY_HANDS_MARKERS)
+    if hands_pos is not None:
+        return role == "hands"
+    if role == "hands":
+        return False
+
     marker_sets = {
         "fixer": _ANTIGRAVITY_FIXER_MARKERS,
         "netrunner": _ANTIGRAVITY_NETRUNNER_MARKERS,
         "overseer": _ANTIGRAVITY_OVERSEER_MARKERS,
     }
+    if role not in marker_sets:
+        return None
     selected_markers = marker_sets[role]
     selected_position = _first_marker_position(texts, selected_markers)
     competing_positions = [
@@ -688,15 +801,14 @@ def _load_antigravity_fixer_resume_summaries(
         return []
 
     fixer_summaries: list[ResumeSessionSummary] = []
-    unknown_role_summaries: list[ResumeSessionSummary] = []
     for conversation_id in conversation_ids:
         conversation_file = _antigravity_conversation_file(resolved_store_root, conversation_id)
         if conversation_file is None:
             continue
 
-        texts = _printable_strings_from_binary_file(conversation_file)
+        texts = _antigravity_role_texts(conversation_file)
         role_is_fixer = _antigravity_conversation_is_fixer(texts)
-        if role_is_fixer is False:
+        if role_is_fixer is not True:
             continue
 
         created = _file_birth_time(conversation_file)
@@ -713,14 +825,10 @@ def _load_antigravity_fixer_resume_summaries(
             preview=preview,
             log_path=conversation_file,
         )
-        if role_is_fixer is True:
-            fixer_summaries.append(summary)
-        else:
-            unknown_role_summaries.append(summary)
+        fixer_summaries.append(summary)
 
-    summaries = fixer_summaries or unknown_role_summaries
-    summaries.sort(key=lambda summary: summary.updated, reverse=True)
-    return summaries[:limit]
+    fixer_summaries.sort(key=lambda summary: summary.updated, reverse=True)
+    return fixer_summaries[:limit]
 
 
 def _load_antigravity_overseer_resume_summaries(
@@ -738,7 +846,7 @@ def _load_antigravity_overseer_resume_summaries(
         conversation_file = _antigravity_conversation_file(resolved_store_root, conversation_id)
         if conversation_file is None:
             continue
-        texts = _printable_strings_from_binary_file(conversation_file)
+        texts = _antigravity_role_texts(conversation_file)
         if _antigravity_conversation_has_role(texts, "overseer") is not True:
             continue
         summaries.append(
@@ -1030,38 +1138,17 @@ def _kimi_store_root() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".kimi"
 
 
-def _kimi_native_store_root() -> Path:
-    configured = os.environ.get("KIMI_CODE_SHARE_DIR", "").strip()
-    return Path(configured).expanduser() if configured else Path.home() / ".kimi-code"
-
-
-def _kimi_native_workdir_name(cwd: Path) -> str:
-    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", cwd.resolve().name).strip("_") or "workspace"
-    digest = hashlib.sha256(str(cwd.resolve()).encode("utf-8")).hexdigest()[:12]
-    return f"wd_{safe_name}_{digest}"
-
-
 def _iter_kimi_session_dirs(
     cwd: Path,
     *,
     store_root: Path | None = None,
-    include_native: bool = False,
 ) -> list[tuple[str, Path, Path]]:
     roots: list[tuple[str, Path]] = [("kimi-code", store_root or _kimi_store_root())]
-    if include_native:
-        roots.append(("kimi-code-native", _kimi_native_store_root()))
 
     found: list[tuple[str, Path, Path]] = []
     for provider, root in roots:
         sessions_root = root / "sessions"
-        if provider == "kimi-code-native":
-            workdir_root = sessions_root / _kimi_native_workdir_name(cwd)
-            workdir_roots = [workdir_root]
-            if not workdir_root.is_dir() and sessions_root.is_dir():
-                digest = _kimi_native_workdir_name(cwd).rsplit("_", 1)[-1]
-                workdir_roots = sorted(sessions_root.glob(f"wd_*_{digest}"))
-        else:
-            workdir_roots = [sessions_root / _kimi_workdir_hash(cwd)]
+        workdir_roots = [sessions_root / _kimi_workdir_hash(cwd)]
 
         for workdir_root in workdir_roots:
             if not workdir_root.is_dir():
@@ -1079,7 +1166,6 @@ def _load_kimi_role_resume_summaries(
     limit: int,
     session_is_role: Callable[[Path], bool],
     store_root: Path | None = None,
-    include_native: bool = False,
 ) -> list[ResumeSessionSummary]:
     if limit <= 0:
         return []
@@ -1088,7 +1174,6 @@ def _load_kimi_role_resume_summaries(
     for provider, session_dir, context_path in _iter_kimi_session_dirs(
         cwd,
         store_root=store_root,
-        include_native=include_native,
     ):
         if not session_is_role(context_path):
             continue
@@ -1150,7 +1235,6 @@ def _load_kimi_fixer_resume_summaries(
         limit=limit,
         session_is_role=session_is_fixer,
         store_root=store_root,
-        include_native=True,
     )
 
 
@@ -1208,9 +1292,7 @@ def load_fixer_resume_summaries(
         _load_kimi_fixer_resume_summaries,
     )
     for provider_loader in provider_loaders:
-        remaining = max(limit - len(fixer_summaries), 0)
-        if remaining <= 0:
-            break
+        remaining = limit
         if provider_loader is _load_antigravity_fixer_resume_summaries:
             fixer_summaries.extend(provider_loader(cwd, limit=remaining))
         else:
@@ -1227,6 +1309,21 @@ def load_fixer_resume_summaries(
 
     fixer_summaries.sort(key=lambda summary: getattr(summary, "updated"), reverse=True)
     return fixer_summaries[:limit]
+
+
+def codex_session_log_has_active_writer(log_path: Path | str | None) -> bool:
+    if not log_path:
+        return False
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", str(log_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def load_overseer_resume_summaries(
@@ -1310,10 +1407,22 @@ def resolve_latest_fixer_resume_session_id(
     *,
     load_fixer_resume_summaries: Callable[..., list[Any]],
 ) -> str:
-    summaries = load_fixer_resume_summaries(cwd, limit=1)
+    summaries = load_fixer_resume_summaries(cwd, limit=8)
     if not summaries:
         raise RuntimeError("No existing Fixer sessions were found for this project cwd.")
-    return format_fixer_resume_selection(summary_provider(summaries[0]), str(summaries[0].session_id))
+    active_codex_count = 0
+    for summary in summaries:
+        provider = summary_provider(summary)
+        if is_codex_backend(provider) and codex_session_log_has_active_writer(getattr(summary, "log_path", None)):
+            active_codex_count += 1
+            continue
+        return format_fixer_resume_selection(provider, str(summary.session_id))
+    if active_codex_count:
+        raise RuntimeError(
+            "All discovered Codex Fixer sessions are currently active. "
+            "Close the existing Codex writer or pass --fixer-session-id for a different session."
+        )
+    raise RuntimeError("No existing Fixer sessions were found for this project cwd.")
 
 
 def select_netrunner_resume_session_interactive(
@@ -1345,7 +1454,7 @@ def resolve_netrunner_resume_session_id(
 ) -> str:
     backend = normalize_backend_name(selected_session.cli_backend)
     stored_session_id = selected_session.external_session_id.strip()
-    if backend != "codex":
+    if not is_codex_backend(backend):
         if stored_session_id:
             return stored_session_id
         manual_session_id = prompt_resume_session_id(selected_session.session_id, backend)

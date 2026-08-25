@@ -149,7 +149,7 @@ const overseerBackendOptions = <OverseerBackendOption>[
   OverseerBackendOption(
     id: 'kimi-code',
     label: 'Kimi Code',
-    models: ['kimi-k2.7-code', 'kimi-k3'],
+    models: ['kimi-k2.7-code', 'kimi-k3-256k'],
     reasoningOptions: ['default', 'low', 'medium', 'high', 'xhigh'],
   ),
 ];

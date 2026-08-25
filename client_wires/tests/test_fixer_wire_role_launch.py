@@ -18,7 +18,7 @@ from client_wires.backends.droid_adapter import DroidBackendAdapter
 
 
 class _DummyOption:
-    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False) -> None:
+    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False, **kwargs: object) -> None:
         self.label = label
         self.value = value
         self.disabled = disabled
@@ -76,6 +76,7 @@ def _fake_codex_main_module() -> types.ModuleType:
 
 
 class _FakeAdapter:
+    name = "codex"
     command = "codex"
     supports_resume = True
 
@@ -90,7 +91,7 @@ class _FakeAdapter:
 
     @staticmethod
     def build_interactive_execution_args(execution_prefs: object) -> list[str]:
-        return _FakeAdapter.build_execution_args(execution_prefs)
+        return ["--remote", "ws://127.0.0.1:14243", *_FakeAdapter.build_execution_args(execution_prefs)]
 
     @staticmethod
     def build_mcp_flags(selected_servers: dict[str, object], _available: dict[str, object]) -> list[str]:
@@ -185,7 +186,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
     def test_launch_new_fixer_chat_forwards_all_supported_provider_selections(self) -> None:
         provider_matrix = (
             ("codex", "gpt-5.6-sol", "high"),
-            ("agy", "Gemini 3.5 Flash", "thinking"),
+            ("agy", "Gemini 3.6 Flash", "high"),
             ("claude", "sonnet", "medium"),
             ("kimi-code", "kimi-k2.7-code", "high"),
             ("droid", "kimi-k2.7-code", "high"),
@@ -311,6 +312,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         cmd = mock_call.call_args.args[0]
         self.assertEqual(cmd[0], "codex")
+        self.assertNotIn("--remote", cmd)
         self.assertNotIn("resume", cmd)
         self.assertIn("--prompt", cmd)
         self.assertIn("--mcp=fixer_mcp", cmd)
@@ -383,7 +385,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
         self.assertEqual(call_kwargs["cwd"], str(scratch_cwd.resolve()))
         self.assertIn("--prompt", cmd)
         prompt = cmd[cmd.index("--prompt") + 1]
-        self.assertIn("Activate skill `$init-unattached-fixer` immediately.", prompt)
+        self.assertIn("Activate skill $init-unattached-fixer immediately.", prompt)
         self.assertIn("Unattached Fixer mode", prompt)
         self.assertIn(str(scratch_cwd.resolve()), prompt)
         self.assertEqual(captured["runtime_cwd"], scratch_cwd.resolve())
@@ -440,7 +442,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
                 "_select_fresh_launch_selection",
                 return_value=fixer_wire.SessionLaunchSelection(
                     "antigravity",
-                    "Gemini 3.5 Flash (High)",
+                    "Gemini 3.6 Flash (High)",
                     "default",
                 ),
             ),
@@ -460,14 +462,14 @@ class LaunchFixerFlowTests(unittest.TestCase):
         cmd = mock_call.call_args.args[0]
         self.assertEqual(cmd[0], "agy")
         self.assertIn("--model", cmd)
-        self.assertEqual(cmd[cmd.index("--model") + 1], "Gemini 3.5 Flash (High)")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "Gemini 3.6 Flash (High)")
         self.assertIn("--dangerously-skip-permissions", cmd)
         self.assertNotIn("-p", cmd)
         self.assertNotIn("--print", cmd)
         self.assertIn("--prompt-interactive", cmd)
         prompt = cmd[cmd.index("--prompt-interactive") + 1]
         self.assertTrue(prompt.startswith("/init-fixer\n"))
-        self.assertNotIn("Activate skill `$init-fixer` immediately.", prompt)
+        self.assertNotIn("Activate skill $init-fixer immediately.", prompt)
 
     def test_launch_fixer_resume_builds_resume_codex_command(self) -> None:
         summary = types.SimpleNamespace(
@@ -511,7 +513,8 @@ class LaunchFixerFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         cmd = mock_call.call_args.args[0]
         self.assertEqual(cmd[0], "codex")
-        self.assertEqual(cmd[1], "fork")
+        self.assertEqual(cmd[1], "resume")
+        self.assertNotIn("--remote", cmd)
         self.assertEqual(cmd[-1], "resume-456")
         self.assertNotIn("--prompt", cmd)
         self.assertNotIn("--model", cmd)
@@ -535,6 +538,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         class ClaudeAdapter(_FakeAdapter):
+            name = "claude"
             command = "claude"
             default_model = "sonnet"
             default_reasoning = "default"
@@ -616,7 +620,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
         mock_select_mode.assert_not_called()
         cmd = mock_call.call_args.args[0]
         self.assertEqual(cmd[0], "codex")
-        self.assertEqual(cmd[1], "fork")
+        self.assertEqual(cmd[1], "resume")
         self.assertEqual(cmd[-1], "resume-latest-1")
 
     def test_role_preset_server_names_excludes_react_native_guide_for_fixer(self) -> None:
@@ -782,7 +786,7 @@ class LaunchOverseerFlowTests(unittest.TestCase):
         self.assertEqual(code, 0)
         cmd = mock_call.call_args.args[0]
         self.assertEqual(cmd[0], "codex")
-        self.assertEqual(cmd[1], "fork")
+        self.assertEqual(cmd[1], "resume")
         self.assertEqual(cmd[-1], "overseer-789")
         self.assertIn("--mcp=fixer_mcp,project_tool", cmd)
 

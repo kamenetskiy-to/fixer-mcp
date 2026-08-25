@@ -23,6 +23,11 @@ name: init-fixer
 description: Claude materialization.
 ---
 `)
+	writeFixtureSkill(t, repo.currentProjectCWD, ".kimi-code/skills", "init-fixer", `---
+name: init-fixer
+description: Kimi Code materialization.
+---
+`)
 	writeFixtureSkill(t, repo.currentProjectCWD, ".agents/skills", "personal-skill", `---
 name: personal-skill
 description: Must remain outside Fixer management.
@@ -48,7 +53,7 @@ description: A corrupt managed copy.
 	if skill.Name != "init-fixer" || skill.Description != "Initialize a project Fixer." {
 		t.Fatalf("unexpected skill metadata: %+v", skill)
 	}
-	if len(skill.Locations) != 2 || skill.Locations[0].RootID != "agents" || skill.Locations[1].RootID != "claude" {
+	if len(skill.Locations) != 3 || skill.Locations[0].RootID != "agents" || skill.Locations[1].RootID != "claude" || skill.Locations[2].RootID != "kimi-code" {
 		t.Fatalf("expected ordered materializations, got %+v", skill.Locations)
 	}
 	if len(skill.RelatedSkills) != 1 || skill.RelatedSkills[0] != "run-netrunner-wave" {

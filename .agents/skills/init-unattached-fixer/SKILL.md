@@ -34,12 +34,9 @@ This is still a normal locked `fixer` role internally, but it is bound to an int
 ## Constraints
 
 - Delegate implementation, research, and automation execution to Netrunners.
+- When you discover a clear Fixer MCP runtime/tooling bug, immediately call `submit_fixer_mcp_feedback` with a concise repro and impact, even if you can continue through a workaround.
 - Prepare a clean Git base when workers are needed, then launch them only through waves. Never substitute a serial autonomous launcher.
 
 ## Worker Model Policy
 
-For Netrunner workers, choose:
-- simplest tasks: `codex` + `gpt-5.6-luna` + `high`
-- medium-complexity tasks: `codex` + `gpt-5.6-terra` + `high`
-- complex tasks: `codex` + `gpt-5.6-sol` + `medium`
-- hardest tasks: `codex` + `gpt-5.6-sol` + `xhigh`
+Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill. Read it before launching workers; it contains the current quota gate, temporary provider overrides, and model-specific reasoning constraints.

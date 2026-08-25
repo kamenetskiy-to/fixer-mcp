@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 /// The downstream dashboard composition can map bridge responses into this
 /// self-contained module without coupling the card to the larger dashboard
 /// model tree.
+enum ProjectActivitySourceFilter { all, fixer, hands, autonomous, project }
+
 class HubProjectCard {
   const HubProjectCard({
     required this.projectId,
@@ -13,6 +15,10 @@ class HubProjectCard {
     required this.cwd,
     required this.activeWaveCount,
     required this.lastActivityAt,
+    this.primaryActivitySource = '',
+    this.hasFixerActivity = false,
+    this.hasHandsActivity = false,
+    this.hasAutonomousActivity = false,
   });
 
   final int projectId;
@@ -20,6 +26,10 @@ class HubProjectCard {
   final String cwd;
   final int activeWaveCount;
   final String lastActivityAt;
+  final String primaryActivitySource;
+  final bool hasFixerActivity;
+  final bool hasHandsActivity;
+  final bool hasAutonomousActivity;
 
   factory HubProjectCard.fromJson(Map<String, dynamic> json) {
     final project = _asMap(json['project']);
@@ -35,7 +45,29 @@ class HubProjectCard {
             json['latest_activity_at'] ??
             json['activity_timestamp'],
       ),
+      primaryActivitySource: _asString(json['primary_activity_source']),
+      hasFixerActivity: _asBool(json['has_fixer_activity']),
+      hasHandsActivity: _asBool(json['has_hands_activity']),
+      hasAutonomousActivity: _asBool(json['has_autonomous_activity']),
     );
+  }
+
+  bool hasSource(ProjectActivitySourceFilter filter) {
+    switch (filter) {
+      case ProjectActivitySourceFilter.fixer:
+        return hasFixerActivity;
+      case ProjectActivitySourceFilter.hands:
+        return hasHandsActivity;
+      case ProjectActivitySourceFilter.autonomous:
+        return hasAutonomousActivity;
+      case ProjectActivitySourceFilter.project:
+        return !hasFixerActivity &&
+            !hasHandsActivity &&
+            !hasAutonomousActivity &&
+            primaryActivitySource == 'project';
+      case ProjectActivitySourceFilter.all:
+        return true;
+    }
   }
 
   static List<HubProjectCard> sortByActivity(Iterable<HubProjectCard> cards) {
@@ -43,8 +75,19 @@ class HubProjectCard {
     sorted.sort((left, right) {
       final leftActivity = left.lastActivityAt.trim();
       final rightActivity = right.lastActivityAt.trim();
+      final leftParsed = _parseActivityTimestamp(leftActivity);
+      final rightParsed = _parseActivityTimestamp(rightActivity);
+
       if (leftActivity.isEmpty && rightActivity.isNotEmpty) return 1;
       if (leftActivity.isNotEmpty && rightActivity.isEmpty) return -1;
+      if (leftParsed != null && rightParsed != null) {
+        final byActivity = rightParsed.compareTo(leftParsed);
+        if (byActivity != 0) {
+          return byActivity;
+        }
+      }
+      if (leftParsed == null && rightParsed != null) return 1;
+      if (leftParsed != null && rightParsed == null) return -1;
       final byActivity = rightActivity.compareTo(leftActivity);
       if (byActivity != 0) return byActivity;
       return left.projectId.compareTo(right.projectId);
@@ -53,21 +96,34 @@ class HubProjectCard {
   }
 }
 
+DateTime? _parseActivityTimestamp(String raw) {
+  final normalized = raw.trim();
+  if (normalized.isEmpty) {
+    return null;
+  }
+  return DateTime.tryParse(normalized);
+}
+
 class ProjectCards extends StatelessWidget {
   const ProjectCards({
     super.key,
     required this.projects,
     required this.onProjectTap,
     this.emptyLabel = 'No projects available',
+    this.sourceFilter = ProjectActivitySourceFilter.all,
   });
 
   final List<HubProjectCard> projects;
   final ValueChanged<int> onProjectTap;
   final String emptyLabel;
+  final ProjectActivitySourceFilter sourceFilter;
 
   @override
   Widget build(BuildContext context) {
-    final sorted = HubProjectCard.sortByActivity(projects);
+    final visible = projects
+        .where((project) => project.hasSource(sourceFilter))
+        .toList(growable: false);
+    final sorted = HubProjectCard.sortByActivity(visible);
     if (sorted.isEmpty) {
       return Center(child: Text(emptyLabel));
     }
@@ -169,3 +225,11 @@ int _asInt(Object? value) {
 }
 
 String _asString(Object? value) => value is String ? value : '${value ?? ''}';
+
+bool _asBool(Object? value) {
+  if (value is bool) return value;
+  if (value is int) return value != 0;
+  if (value is num) return value != 0;
+  final normalized = '$value'.trim().toLowerCase();
+  return normalized == '1' || normalized == 'true' || normalized == 'yes';
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -34,6 +35,7 @@ class ProviderThreadMessage:
 
 _PROVIDER_THREAD_CAPABILITIES = {
     "codex": ProviderThreadCapability("codex", "jsonl", True, "headless_resume"),
+    "commandcode": ProviderThreadCapability("commandcode", "jsonl", True, "headless_resume"),
     "droid": ProviderThreadCapability("droid", "jsonl", True, "headless_resume"),
     "claude": ProviderThreadCapability(
         "claude",
@@ -62,6 +64,13 @@ _PROVIDER_THREAD_CAPABILITIES = {
         False,
         "unsupported",
         "Junie session metadata can be retained, but dashboard continuation is not implemented yet.",
+    ),
+    "grok": ProviderThreadCapability(
+        "grok",
+        "metadata_only",
+        False,
+        "unsupported",
+        "Grok session metadata can be retained, but dashboard continuation is not implemented yet.",
     ),
 }
 
@@ -270,6 +279,10 @@ def _codex_sessions_root() -> Path:
     return Path.home() / ".codex" / "sessions"
 
 
+def _commandcode_sessions_root() -> Path:
+    return Path(os.environ.get("COMMANDCODE_HOME", str(Path.home() / ".commandcode"))) / "projects"
+
+
 def _antigravity_cli_log_root() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "log"
 
@@ -415,6 +428,45 @@ def _find_new_codex_session_id_from_transcript_store(
     root = sessions_root if sessions_root is not None else codex_sessions_root_fn()
     for path in _candidate_codex_transcript_paths(root, launch_started_at=launch_started_at):
         session_id = _codex_session_id_from_transcript(path, cwd)
+        if session_id:
+            return session_id
+    return None
+
+
+def _commandcode_session_id_from_transcript(path: Path, cwd: Path) -> str | None:
+    expected_cwd = str(cwd.resolve())
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                payload_cwd = _extract_codex_cwd_from_payload(payload)
+                if not payload_cwd:
+                    continue
+                try:
+                    payload_cwd = str(Path(payload_cwd).resolve())
+                except OSError:
+                    pass
+                if payload_cwd != expected_cwd:
+                    continue
+                return _extract_codex_session_id_from_payload(payload) or path.stem
+    except OSError:
+        return None
+    return None
+
+
+def _find_new_commandcode_session_id_from_transcript_store(
+    cwd: Path,
+    *,
+    launch_started_at: float | None,
+    sessions_root: Path | None = None,
+    commandcode_sessions_root_fn: Callable[[], Path] = _commandcode_sessions_root,
+) -> str | None:
+    root = sessions_root if sessions_root is not None else commandcode_sessions_root_fn()
+    for path in _candidate_codex_transcript_paths(root, launch_started_at=launch_started_at):
+        session_id = _commandcode_session_id_from_transcript(path, cwd)
         if session_id:
             return session_id
     return None
@@ -609,6 +661,26 @@ def _wait_for_new_codex_session_id(
     return None
 
 
+def _wait_for_new_commandcode_session_id(
+    cwd: Path,
+    before: str | None,
+    *,
+    launch_started_at: float | None = None,
+    timeout_sec: float = 8.0,
+) -> str | None:
+    del before
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        session_id = _find_new_commandcode_session_id_from_transcript_store(
+            cwd,
+            launch_started_at=launch_started_at,
+        )
+        if session_id:
+            return session_id
+        time.sleep(0.5)
+    return None
+
+
 def _wait_for_new_external_session_id(
     backend: str,
     cwd: Path,
@@ -619,11 +691,19 @@ def _wait_for_new_external_session_id(
     timeout_sec: float = 8.0,
     normalize_backend_name_fn: Callable[[str], str],
     wait_for_new_codex_session_id_fn: Callable[..., str | None],
+    wait_for_new_commandcode_session_id_fn: Callable[..., str | None],
     wait_for_new_droid_session_id_fn: Callable[..., str | None],
     wait_for_new_antigravity_conversation_id_fn: Callable[..., str | None],
 ) -> str | None:
     normalized_backend = normalize_backend_name_fn(backend)
-    if normalized_backend == "codex":
+    if normalized_backend in {"codex", "commandcode"}:
+        if normalized_backend == "commandcode":
+            return wait_for_new_commandcode_session_id_fn(
+                cwd,
+                before,
+                launch_started_at=launch_started_at,
+                timeout_sec=timeout_sec,
+            )
         return wait_for_new_codex_session_id_fn(cwd, before, timeout_sec=timeout_sec)
     if normalized_backend == "droid":
         return wait_for_new_droid_session_id_fn(

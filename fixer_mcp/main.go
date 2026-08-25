@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -29,10 +30,89 @@ var execCommand = exec.Command
 var codexSessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".codex", "sessions")
 var droidSessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".factory", "sessions")
 
+const (
+	schemaBootstrapArg  = "--bootstrap-schema"
+	schemaBootstrapName = "project-workroom-v1"
+)
+
+type schemaBootstrapResult struct {
+	Status            string `json:"status"`
+	Schema            string `json:"schema"`
+	ProjectCount      int    `json:"project_count"`
+	ProjectHandsCount int    `json:"project_hands_count"`
+}
+
+func schemaBootstrapRequested(args []string) bool {
+	return len(args) == 1 && args[0] == schemaBootstrapArg
+}
+
+func helpRequested(args []string) bool {
+	return len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "-help")
+}
+
+func runSchemaBootstrap(output io.Writer) (returnErr error) {
+	initDB()
+	bootstrapDB := db
+	defer func() {
+		if bootstrapDB != nil {
+			if closeErr := bootstrapDB.Close(); returnErr == nil && closeErr != nil {
+				returnErr = fmt.Errorf("close bootstrapped database: %w", closeErr)
+			}
+		}
+		if db == bootstrapDB {
+			db = nil
+		}
+	}()
+
+	var tableCount int
+	if err := bootstrapDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table'
+		  AND name = 'project_hands'
+	`).Scan(&tableCount); err != nil {
+		return fmt.Errorf("verify Project Hands table: %w", err)
+	}
+	if tableCount != 1 {
+		return fmt.Errorf("verify Project Hands table: expected 1, found %d", tableCount)
+	}
+
+	result := schemaBootstrapResult{Status: "ready", Schema: schemaBootstrapName}
+	if err := bootstrapDB.QueryRow(`SELECT COUNT(*) FROM project`).Scan(&result.ProjectCount); err != nil {
+		return fmt.Errorf("count projects after schema bootstrap: %w", err)
+	}
+	if err := bootstrapDB.QueryRow(`SELECT COUNT(*) FROM project_hands`).Scan(&result.ProjectHandsCount); err != nil {
+		return fmt.Errorf("count Project Hands identities after schema bootstrap: %w", err)
+	}
+	if result.ProjectCount != result.ProjectHandsCount {
+		return fmt.Errorf(
+			"incomplete Project Hands bootstrap: projects=%d identities=%d",
+			result.ProjectCount,
+			result.ProjectHandsCount,
+		)
+	}
+
+	if err := json.NewEncoder(output).Encode(result); err != nil {
+		return fmt.Errorf("encode schema bootstrap result: %w", err)
+	}
+	return nil
+}
+
 func main() {
 	if err := loadOptionalDotEnv(".env.local", ".env", "../.env.local", "../.env"); err != nil {
 		fmt.Fprintf(os.Stderr, "error loading .env files: %v", err)
 		os.Exit(1)
+	}
+	if helpRequested(os.Args[1:]) {
+		fmt.Println("Usage: fixer_mcp [--bootstrap-schema]")
+		return
+	}
+	if schemaBootstrapRequested(os.Args[1:]) {
+		if err := runSchemaBootstrap(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "error bootstrapping Fixer MCP schema: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Configure logging to a file since stdio is used for MCP JSON-RPC

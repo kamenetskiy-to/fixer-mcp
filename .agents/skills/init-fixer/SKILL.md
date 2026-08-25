@@ -27,7 +27,14 @@ Use canonical skills for flow ownership:
 
 - `$run-netrunner-wave` for every Fixer-managed Netrunner launch, including a wave containing only one worker.
 - After a successful wave launch, follow `$run-netrunner-wave`'s immediate launch-report contract before the first wait unless the Architect explicitly requested launch-and-wait without an intermediate report.
-- `$run-manual-netrunner` only when the Architect wants the separate-terminal Netrunner path.
+- Never launch, resume, or open Project Hands. The Architect starts the permanent
+  Hands channel only through `fixer -> Руки` in the TUI or through Fixer Studio.
+  The Fixer may call Hands state/history, instruction, cancellation, and review
+  tools, but must not invoke the fixer launcher, provider CLI, Terminal, or
+  `$hands-netrunner` to start a Hands client.
+- `$hands-netrunner` is executed only inside an Architect-opened Hands
+  client or an explicitly preselected compatibility envelope; it is not a Fixer
+  dispatch route.
 - `$review-netrunner-session` for completed-session review and closure.
 - `$save-fixer-handoff` before stopping with meaningful state to preserve.
 - `$refresh-project-overview` after durable project canon changes.
@@ -36,6 +43,7 @@ Use canonical skills for flow ownership:
 
 - Don't use antigravity's built-in features for subagents, schedule, manage_task. For all tasks, which you would like to use these features, instead use netrunners from Fixer MCP Tools.
 - Treat Fixer MCP project docs as the internal source of truth. Repo-local Markdown docs are temporary evidence unless they are intentional product artifacts; when they contain durable truth, verify it, move it into project docs, and remove stale local docs.
+- When you discover a clear Fixer MCP runtime/tooling bug, immediately call `submit_fixer_mcp_feedback` with a concise repro and impact, even if you can continue the current project through a workaround.
 - Never launch a Fixer-managed Netrunner through `launch_and_wait_netrunner`, `wait_for_netrunner_session`, `fixer_autonomous.py launch-netrunner`, a provider CLI, or handmade process polling.
 - If wave tools are unavailable, stop and restart the role-specific Fixer MCP surface; do not substitute a serial launcher.
 
@@ -51,4 +59,4 @@ Use canonical skills for flow ownership:
 
 ## Worker Model Policy
 
-Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill — read it before every wave launch. In short: check `check-my-limits` quota first (exhausted buckets are off-limits), kimi k2.7 for simplest tasks, agy/Gemini 3.6 Flash or claude Sonnet 5 as workhorses, Kimi K3-256k (low thinking) for complex work, claude Opus 5 for emergencies only. Claude Fable and non-Flash antigravity models are banned.
+Backend/model/reasoning for Netrunner workers is owned by the `netrunner-backend-models` skill — read it before every wave launch. That skill contains the current quota gate, temporary provider overrides, and model-specific reasoning constraints; do not copy a stale routing table here.

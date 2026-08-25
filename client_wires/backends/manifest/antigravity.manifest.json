@@ -4,25 +4,29 @@
   "description": "Google Antigravity CLI (agy) provider for the Fixer MCP provider-adapter abstraction. Reasoning is encoded in model display names; MCP isolation relies on project-local config overriding global entries by name.",
   "models": {
     "options": [
-      "Gemini 3.5 Flash (Low)",
-      "Gemini 3.5 Flash (Medium)",
-      "Gemini 3.5 Flash (High)",
+      "Gemini 3.7 Flash (Low)",
+      "Gemini 3.7 Flash (Medium)",
+      "Gemini 3.7 Flash (High)",
+      "Gemini 3.6 Flash (Low)",
+      "Gemini 3.6 Flash (Medium)",
+      "Gemini 3.6 Flash (High)",
       "Gemini 3.1 Pro (Low)",
       "Gemini 3.1 Pro (High)",
       "Claude Sonnet 4.6 (Thinking)",
-      "Claude Opus 4.6 (Thinking)",
-      "GPT-OSS 120B (Medium)"
+      "Claude Opus 4.6 (Thinking)"
     ],
-    "default": "Gemini 3.5 Flash (High)",
+    "default": "Gemini 3.7 Flash (Medium)",
     "internal_id_map": {
-      "Gemini 3.5 Flash (Low)": "Gemini 3.5 Flash (Low)",
-      "Gemini 3.5 Flash (Medium)": "Gemini 3.5 Flash (Medium)",
-      "Gemini 3.5 Flash (High)": "Gemini 3.5 Flash (High)",
+      "Gemini 3.7 Flash (Low)": "Gemini 3.7 Flash (Low)",
+      "Gemini 3.7 Flash (Medium)": "Gemini 3.7 Flash (Medium)",
+      "Gemini 3.7 Flash (High)": "Gemini 3.7 Flash (High)",
+      "Gemini 3.6 Flash (Low)": "Gemini 3.6 Flash (Low)",
+      "Gemini 3.6 Flash (Medium)": "Gemini 3.6 Flash (Medium)",
+      "Gemini 3.6 Flash (High)": "Gemini 3.6 Flash (High)",
       "Gemini 3.1 Pro (Low)": "Gemini 3.1 Pro (Low)",
       "Gemini 3.1 Pro (High)": "Gemini 3.1 Pro (High)",
       "Claude Sonnet 4.6 (Thinking)": "Claude Sonnet 4.6 (Thinking)",
-      "Claude Opus 4.6 (Thinking)": "Claude Opus 4.6 (Thinking)",
-      "GPT-OSS 120B (Medium)": "GPT-OSS 120B (Medium)"
+      "Claude Opus 4.6 (Thinking)": "Claude Opus 4.6 (Thinking)"
     },
     "byok": false,
     "auth": "subscription"
@@ -31,10 +35,9 @@
     "options": [
       "low",
       "medium",
-      "high",
-      "thinking"
+      "high"
     ],
-    "default": "medium",
+    "default": "high",
     "pass_mechanism": "none",
     "headless_auto_approve_justification": "Antigravity encodes reasoning in the model display-name suffix (Low, Medium, High, Thinking). There is no separate --effort or --reasoning flag."
   },
@@ -63,8 +66,8 @@
   },
   "launch": {
     "interactive_cmd_template": "agy --model \"[model]\" --dangerously-skip-permissions --prompt-interactive \"[prompt]\"",
-    "headless_cmd_template": "agy --print --model \"[model]\" --dangerously-skip-permissions \"[prompt]\"",
+    "headless_cmd_template": "agy --print --output-format json --model \"[model]\" --dangerously-skip-permissions \"[prompt]\"",
     "resume_interactive": "agy --conversation [external_session_id] --dangerously-skip-permissions --prompt-interactive \"[prompt]\"",
-    "resume_headless": "agy --print --conversation [external_session_id] --model \"[model]\" --dangerously-skip-permissions \"[prompt]\""
+    "resume_headless": "agy --print --output-format json --conversation [external_session_id] --model \"[model]\" --dangerously-skip-permissions \"[prompt]\""
   }
 }

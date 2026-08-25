@@ -216,7 +216,7 @@ func netrunnerContinuationCapability(backend string, externalID string) Netrunne
 		return NetrunnerContinuationCapability{Mode: "unavailable", Reason: "The provider session has no stored external-session linkage yet."}
 	}
 	switch backend {
-	case "codex", "droid":
+	case "codex", "commandcode", "droid":
 		return NetrunnerContinuationCapability{Supported: true, Mode: "headless_resume"}
 	case "claude":
 		return NetrunnerContinuationCapability{Mode: "unsupported", Reason: "Claude resume needs a scoped MCP runtime config that the dashboard does not yet materialize."}
@@ -234,7 +234,7 @@ func netrunnerContinuationCapability(backend string, externalID string) Netrunne
 func loadNetrunnerProviderTranscript(backend string, externalID string, projectCWD string) (string, string, []NetrunnerThreadMessage) {
 	var root string
 	switch backend {
-	case "codex":
+	case "codex", "commandcode":
 		root = strings.TrimSpace(os.Getenv("FIXER_CODEX_SESSION_ROOT"))
 		if root == "" {
 			if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
@@ -363,7 +363,44 @@ func netrunnerMessageFromPayload(payload map[string]any, backend string, lineNum
 	if createdAt == "<nil>" {
 		createdAt = ""
 	}
-	return NetrunnerThreadMessage{ID: id, Role: role, Text: text, CreatedAt: createdAt, Source: "provider_transcript"}, true
+	source := "provider_transcript"
+	if backend == "claude" {
+		message, _ := record["message"].(map[string]any)
+		content, _ := message["content"].([]any)
+		isToolResult := false
+		for _, item := range content {
+			block, _ := item.(map[string]any)
+			if block["type"] == "tool_result" {
+				isToolResult = true
+				break
+			}
+		}
+		toolUseResult, _ := record["toolUseResult"].(map[string]any)
+		commandName, hasCommandName := toolUseResult["commandName"].(string)
+		origin, _ := record["origin"].(map[string]any)
+		originKind, _ := origin["kind"].(string)
+		switch {
+		case record["isCompactSummary"] == true:
+			source = "provider_transcript:compaction"
+		case hasCommandName && strings.TrimSpace(commandName) != "":
+			source = "provider_transcript:skill_activation"
+		case isToolResult || record["sourceToolAssistantUUID"] != nil || record["toolUseResult"] != nil:
+			source = "provider_transcript:tool_result"
+		case record["interruptedMessageId"] != nil:
+			source = "provider_transcript:interruption"
+		case record["isApiErrorMessage"] == true:
+			source = "provider_transcript:api_error"
+		case originKind == "task-notification":
+			source = "provider_transcript:task_notification"
+		case strings.TrimSpace(fmt.Sprint(message["stop_reason"])) == "tool_use":
+			source = "provider_transcript:assistant_progress"
+		case record["isMeta"] == true || record["isVisibleInTranscriptOnly"] == true:
+			source = "provider_transcript:meta"
+		case role == "user" && originKind != "human":
+			source = "provider_transcript:command"
+		}
+	}
+	return NetrunnerThreadMessage{ID: id, Role: role, Text: text, CreatedAt: createdAt, Source: source}, true
 }
 
 func normalizeNetrunnerMessageRole(raw any, recordType string) string {
@@ -464,7 +501,7 @@ func (r *Repository) ContinueNetrunnerThread(ctx context.Context, sessionID int,
 
 func netrunnerContinuationCommand(thread NetrunnerThreadResponse, message string) ([]string, error) {
 	switch thread.Backend {
-	case "codex":
+	case "codex", "commandcode":
 		return []string{"codex", "exec", "resume", thread.ExternalSessionID, message}, nil
 	case "droid":
 		command := []string{"droid", "exec", "-s", thread.ExternalSessionID}

@@ -7,7 +7,7 @@ import importlib
 import re
 from typing import Any, Callable, Sequence
 
-from client_wires.backends import normalize_backend_name
+from client_wires.backends import is_codex_backend, normalize_backend_name
 from client_wires.backends.antigravity_adapter import normalize_antigravity_reasoning_alias
 from client_wires import fixer_wire_db
 
@@ -33,7 +33,7 @@ def _ensure_passthrough_dangerous_sandbox(passthrough_args: Sequence[str]) -> li
 
 
 def _is_codex_adapter(adapter: Any) -> bool:
-    return normalize_backend_name(getattr(adapter, "name", "")) == "codex"
+    return is_codex_backend(getattr(adapter, "name", ""))
 
 
 def _maybe_configure_playwright_runtime_mode(
@@ -175,7 +175,16 @@ def _resolve_netrunner_launch_selection(
     elif started or dry_run:
         model = descriptor.default_model
     else:
-        model = callbacks.select_model_interactive(backend, descriptor.default_model, Option, single_select_items)
+        model_kwargs = {}
+        if is_codex_backend(backend):
+            model_kwargs["require_codex_model_family"] = True
+        model = callbacks.select_model_interactive(
+            backend,
+            descriptor.default_model,
+            Option,
+            single_select_items,
+            **model_kwargs,
+        )
 
     if preset_reasoning and preset_reasoning.strip():
         reasoning = preset_reasoning.strip()
@@ -219,7 +228,16 @@ def _select_fresh_launch_selection(
     if preset_model and preset_model.strip():
         model = preset_model.strip()
     else:
-        model = callbacks.select_model_interactive(backend, descriptor.default_model, Option, single_select_items)
+        model_kwargs = {}
+        if is_codex_backend(backend):
+            model_kwargs["require_codex_model_family"] = True
+        model = callbacks.select_model_interactive(
+            backend,
+            descriptor.default_model,
+            Option,
+            single_select_items,
+            **model_kwargs,
+        )
 
     if preset_reasoning and preset_reasoning.strip():
         reasoning = preset_reasoning.strip()

@@ -1,0 +1,8 @@
+class: FixerTurnReceipt
+immutable: true
+fields:
+  status: String
+  threadId: String, jsonKey=thread_id
+  turnId: String, jsonKey=turn_id
+  ordinal: int
+  projectSeq: int, jsonKey=project_seq

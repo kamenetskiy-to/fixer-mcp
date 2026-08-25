@@ -1,0 +1,6 @@
+class: ProjectUiHeartbeatFrame
+extends: ProjectUiFrame
+immutable: true
+fields:
+  serverTime: String
+  currentJournalHead: int

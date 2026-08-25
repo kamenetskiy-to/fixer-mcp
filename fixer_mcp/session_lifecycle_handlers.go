@@ -85,6 +85,15 @@ func CheckoutTask(ctx context.Context, req *mcp.CallToolRequest, input CheckoutT
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CheckoutTaskOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
+	if _, isHandsSession, err := handsInstructionForCompatibilitySession(ctx, globalSessionID, authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, CheckoutTaskOutput{}, fmt.Errorf("DB query error: %v", err)
+	} else if isHandsSession {
+		if err := checkoutHandsCompatibilitySession(ctx, globalSessionID, authorizedProjectId); err != nil {
+			return &mcp.CallToolResult{IsError: true}, CheckoutTaskOutput{}, err
+		}
+		authorizedSessionId = globalSessionID
+		return nil, CheckoutTaskOutput{Status: "success"}, nil
+	}
 
 	res, err := db.Exec("UPDATE session SET status = 'in_progress' WHERE id = ? AND project_id = ? AND status = 'pending'", globalSessionID, authorizedProjectId)
 	if err != nil {
@@ -320,17 +329,61 @@ func CompleteTask(ctx context.Context, req *mcp.CallToolRequest, input CompleteT
 		)
 	}
 
-	_, normalizedReport, err := decodeStructuredFinalReport(input.FinalReport)
+	report, normalizedReport, err := decodeStructuredFinalReport(input.FinalReport)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, err
+	}
+	if handled, err := completeHandsCompatibilitySession(ctx, globalSessionID, authorizedProjectId, report, normalizedReport); err != nil {
+		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, err
+	} else if handled {
+		return nil, CompleteTaskOutput{Status: "success"}, nil
 	}
 
 	_, err = db.Exec("UPDATE session SET status = 'review', report = ? WHERE id = ? AND project_id = ?", normalizedReport, globalSessionID, authorizedProjectId)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("DB update error: %v", err)
 	}
+	if err := reconcileCompletedParallelWaveSession(globalSessionID, authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("wave worker reconciliation failed: %v", err)
+	}
 
 	return nil, CompleteTaskOutput{Status: "success"}, nil
+}
+
+func reconcileCompletedParallelWaveSession(globalSessionID, projectID int) error {
+	if !dbTableHasColumn("parallel_wave_worker", "wave_id") {
+		return nil
+	}
+	var waveID int
+	err := db.QueryRow(
+		`SELECT wave_id FROM parallel_wave_worker
+		 WHERE session_id = ? AND project_id = ?
+		 ORDER BY id DESC LIMIT 1`,
+		globalSessionID, projectID,
+	).Scan(&waveID)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	wave, err := fetchNetrunnerWaveSnapshot(waveID, projectID)
+	if err != nil {
+		return err
+	}
+	for _, worker := range wave.Workers {
+		if worker.SessionId != globalSessionID {
+			continue
+		}
+		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
+			return nil
+		}
+		if _, err := finalizeParallelWaveWorker(wave.ProjectCwd, wave, worker, parallelWaveWorkerStatusReviewReady, ""); err != nil {
+			return err
+		}
+		return refreshParallelWaveAggregateStatus(waveID, projectID)
+	}
+	return nil
 }
 
 type UpdateTaskInput struct {

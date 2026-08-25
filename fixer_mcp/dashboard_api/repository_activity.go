@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+const (
+	activitySourceProject    = "project"
+	activitySourceFixer      = "fixer"
+	activitySourceHands      = "hands"
+	activitySourceAutonomous = "autonomous"
+)
+
 // projectActivity is the durable activity data used by the home project rail.
 // Keep this separate from the legacy ProjectCard shape so the ordering logic
 // can be adopted by the new project-card module without changing project
@@ -13,41 +20,153 @@ import (
 type projectActivity struct {
 	LastActivityAt  string
 	ActiveWaveCount int
+	PrimarySource   string
+	HasFixer        bool
+	HasHands        bool
+	HasAutonomous   bool
 }
 
 func (r *Repository) loadProjectActivity(ctx context.Context) (map[int]projectActivity, error) {
 	activity := map[int]projectActivity{}
 
-	// Each source is optional for compatibility with older fixer databases and
-	// the small dashboard fixtures used by repository tests.
-	queries := []string{}
-	if r.tableExists(ctx, "netrunner_session_log") {
-		queries = append(queries, `
-			SELECT project_id, MAX(COALESCE(created_at, ''))
-			FROM netrunner_session_log
-			GROUP BY project_id`)
-	}
-	if r.tableExists(ctx, "autonomous_run_status") {
-		queries = append(queries, `
-			SELECT project_id, MAX(COALESCE(updated_at, ''))
-			FROM autonomous_run_status
-			GROUP BY project_id`)
-	}
-	if r.tableExists(ctx, "worker_process") {
-		queries = append(queries, `
-			SELECT project_id, MAX(COALESCE(updated_at, ''))
-			FROM worker_process
-			GROUP BY project_id`)
-	}
-	if r.tableExists(ctx, "parallel_wave") {
-		queries = append(queries, `
-			SELECT project_id, MAX(COALESCE(updated_at, ''))
-			FROM parallel_wave
-			GROUP BY project_id`)
+	latestActivityExpr := func(tableName string, columns ...string) string {
+		candidates := make([]string, 0, len(columns))
+		for _, columnName := range columns {
+			if !r.tableHasColumn(ctx, tableName, columnName) {
+				continue
+			}
+			candidates = append(candidates, columnName)
+		}
+		if len(candidates) == 0 {
+			return "MAX('')"
+		}
+		return fmt.Sprintf("MAX(COALESCE(%s, ''))", strings.Join(candidates, ", "))
 	}
 
-	for _, query := range queries {
-		rows, err := r.db.QueryContext(ctx, query)
+	// Each source is optional for compatibility with older fixer databases and
+	// the small dashboard fixtures used by repository tests.
+	type sourceQuery struct {
+		source string
+		query  string
+	}
+	queries := []sourceQuery{}
+	if r.tableExists(ctx, "netrunner_session_log") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceProject,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("netrunner_session_log", "created_at") + `
+			FROM netrunner_session_log
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "autonomous_run_status") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceAutonomous,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("autonomous_run_status", "updated_at", "created_at") + `
+			FROM autonomous_run_status
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "worker_process") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceProject,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("worker_process", "updated_at", "created_at") + `
+			FROM worker_process
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "parallel_wave") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceProject,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("parallel_wave", "updated_at", "created_at") + `
+			FROM parallel_wave
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "fixer_turn") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("fixer_turn", "completed_at", "created_at") + `
+			FROM fixer_turn
+			WHERE role = 'fixer'
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "fixer_thread") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("fixer_thread", "updated_at", "created_at") + `
+			FROM fixer_thread
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "overseer_fixer_message") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("overseer_fixer_message", "created_at") + `
+			FROM overseer_fixer_message
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "overseer_fixer_run_state") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("overseer_fixer_run_state", "updated_at", "created_at") + `
+			FROM overseer_fixer_run_state
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "project_handoff") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("project_handoff", "updated_at", "created_at") + `
+			FROM project_handoff
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "fixer_resume_session_alias") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceFixer,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("fixer_resume_session_alias", "created_at", "updated_at") + `
+			FROM fixer_resume_session_alias
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "hands_instruction") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceHands,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("hands_instruction", "updated_at", "created_at") + `
+			FROM hands_instruction
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "hands_generation") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceHands,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("hands_generation", "updated_at", "created_at") + `
+			FROM hands_generation
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "session") {
+		sessionActivityExpr := latestActivityExpr("session", "updated_at", "created_at")
+		queries = append(queries, sourceQuery{
+			source: activitySourceProject,
+			query: `
+			SELECT project_id, ` + sessionActivityExpr + `
+			FROM session
+			GROUP BY project_id`})
+	}
+	if r.tableExists(ctx, "project_ui_event") {
+		queries = append(queries, sourceQuery{
+			source: activitySourceProject,
+			query: `
+			SELECT project_id, ` + latestActivityExpr("project_ui_event", "created_at") + `
+			FROM project_ui_event
+			GROUP BY project_id`})
+	}
+
+	for _, sourceQuery := range queries {
+		rows, err := r.db.QueryContext(ctx, sourceQuery.query)
 		if err != nil {
 			return nil, err
 		}
@@ -58,11 +177,24 @@ func (r *Repository) loadProjectActivity(ctx context.Context) (map[int]projectAc
 				_ = rows.Close()
 				return nil, err
 			}
-			if timestamp > activity[projectID].LastActivityAt {
-				entry := activity[projectID]
-				entry.LastActivityAt = timestamp
+			entry := activity[projectID]
+			if timestamp == "" {
 				activity[projectID] = entry
+				continue
 			}
+			switch sourceQuery.source {
+			case activitySourceFixer:
+				entry.HasFixer = true
+			case activitySourceHands:
+				entry.HasHands = true
+			case activitySourceAutonomous:
+				entry.HasAutonomous = true
+			}
+			if timestamp > entry.LastActivityAt {
+				entry.LastActivityAt = timestamp
+				entry.PrimarySource = sourceQuery.source
+			}
+			activity[projectID] = entry
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()

@@ -74,22 +74,6 @@ make docker-smoke
 
 `docker-smoke` is the deterministic clean check used in CI. `docker-bootstrap-e2e` is an optional manual end-to-end path that depends on Docker, network access, and authenticated Codex CLI state.
 
-## DeepSeek in Codex
-
-Fixer can launch interactive Codex sessions and Netrunner wave workers with
-DeepSeek V4 Flash through either OpenCode Go or OpenRouter. Put the applicable
-key in `~/.codex/llm.env`:
-
-```dotenv
-OPENCODE_GO_API_KEY=your-opencode-go-key
-OPENROUTER_API_KEY=your-openrouter-key
-```
-
-Then select `opencode-go/deepseek-v4-flash` or
-`deepseek/deepseek-v4-flash-0731` as the Codex model. The launcher supplies the
-provider endpoint and bundled model metadata automatically; no manual edits to
-`~/.codex/config.toml` or `~/.codex/models.json` are required.
-
 ## Current State
 
 Fixer MCP is local-first and designed for a single operator. The primary interface is terminal/TUI oriented, with a desktop workspace under active development. The public repo intentionally avoids cloud coordination claims, auto-merge claims, and unattended production promises.

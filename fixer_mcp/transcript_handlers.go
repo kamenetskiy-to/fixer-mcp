@@ -468,7 +468,7 @@ func GetNetrunnerTranscriptPath(ctx context.Context, req *mcp.CallToolRequest, i
 		diagnostics = append(diagnostics, "no external session id persisted yet; scanning transcript store by project cwd")
 		var discoveredSessionID string
 		switch backend {
-		case "codex":
+		case "codex", "commandcode":
 			transcriptPath, discoveredSessionID = findCodexTranscriptPathByProjectCWD(projectCWD, &diagnostics)
 		case "droid":
 			transcriptPath, discoveredSessionID = findDroidTranscriptPathByProjectCWD(projectCWD, &diagnostics)
@@ -485,7 +485,7 @@ func GetNetrunnerTranscriptPath(ctx context.Context, req *mcp.CallToolRequest, i
 		}
 	} else {
 		switch backend {
-		case "codex":
+		case "codex", "commandcode":
 			transcriptPath = findCodexTranscriptPath(externalSessionID, &diagnostics)
 		case "droid":
 			transcriptPath = findDroidTranscriptPath(projectCWD, externalSessionID, &diagnostics)

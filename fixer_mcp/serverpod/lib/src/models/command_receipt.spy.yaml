@@ -1,0 +1,8 @@
+class: CommandReceipt
+immutable: true
+fields:
+  status: String
+  instructionId: String?, jsonKey=instruction_id
+  state: String?
+  revision: int?
+  projectSeq: int, jsonKey=project_seq

@@ -11,8 +11,9 @@
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
 import 'package:serverpod_client/serverpod_client.dart' as _i1;
+import 'package:fixer_dashboard_client/src/protocol/protocol.dart' as _i2;
 
-/// A client-owned revision of an order.
+/// A client-submitted revision of an order.
 abstract class Revision implements _i1.SerializableModel {
   Revision._({
     this.id,
@@ -21,8 +22,8 @@ abstract class Revision implements _i1.SerializableModel {
     required this.revisionText,
     this.attachmentUrls,
     this.resultSummary,
-    required this.description,
     required this.status,
+    required this.description,
     this.branchName,
     this.previewUrl,
     required this.createdAt,
@@ -36,8 +37,8 @@ abstract class Revision implements _i1.SerializableModel {
     required String revisionText,
     List<String>? attachmentUrls,
     String? resultSummary,
-    required String description,
     required String status,
+    required String description,
     String? branchName,
     String? previewUrl,
     required DateTime createdAt,
@@ -50,12 +51,14 @@ abstract class Revision implements _i1.SerializableModel {
       orderId: jsonSerialization['orderId'] as int,
       revisionNumber: jsonSerialization['revisionNumber'] as int,
       revisionText: jsonSerialization['revisionText'] as String,
-      attachmentUrls: (jsonSerialization['attachmentUrls'] as List?)
-          ?.map((value) => value as String)
-          .toList(),
+      attachmentUrls: jsonSerialization['attachmentUrls'] == null
+          ? null
+          : _i2.Protocol().deserialize<List<String>>(
+              jsonSerialization['attachmentUrls'],
+            ),
       resultSummary: jsonSerialization['resultSummary'] as String?,
-      description: jsonSerialization['description'] as String,
       status: jsonSerialization['status'] as String,
+      description: jsonSerialization['description'] as String,
       branchName: jsonSerialization['branchName'] as String?,
       previewUrl: jsonSerialization['previewUrl'] as String?,
       createdAt: _i1.DateTimeJsonExtension.fromJson(
@@ -82,9 +85,9 @@ abstract class Revision implements _i1.SerializableModel {
 
   String? resultSummary;
 
-  String description;
-
   String status;
+
+  String description;
 
   String? branchName;
 
@@ -104,8 +107,8 @@ abstract class Revision implements _i1.SerializableModel {
     String? revisionText,
     List<String>? attachmentUrls,
     String? resultSummary,
-    String? description,
     String? status,
+    String? description,
     String? branchName,
     String? previewUrl,
     DateTime? createdAt,
@@ -119,10 +122,10 @@ abstract class Revision implements _i1.SerializableModel {
       'orderId': orderId,
       'revisionNumber': revisionNumber,
       'revisionText': revisionText,
-      if (attachmentUrls != null) 'attachmentUrls': attachmentUrls,
+      if (attachmentUrls != null) 'attachmentUrls': attachmentUrls?.toJson(),
       if (resultSummary != null) 'resultSummary': resultSummary,
-      'description': description,
       'status': status,
+      'description': description,
       if (branchName != null) 'branchName': branchName,
       if (previewUrl != null) 'previewUrl': previewUrl,
       'createdAt': createdAt.toJson(),
@@ -146,8 +149,8 @@ class _RevisionImpl extends Revision {
     required String revisionText,
     List<String>? attachmentUrls,
     String? resultSummary,
-    required String description,
     required String status,
+    required String description,
     String? branchName,
     String? previewUrl,
     required DateTime createdAt,
@@ -159,8 +162,8 @@ class _RevisionImpl extends Revision {
          revisionText: revisionText,
          attachmentUrls: attachmentUrls,
          resultSummary: resultSummary,
-         description: description,
          status: status,
+         description: description,
          branchName: branchName,
          previewUrl: previewUrl,
          createdAt: createdAt,
@@ -178,8 +181,8 @@ class _RevisionImpl extends Revision {
     String? revisionText,
     Object? attachmentUrls = _Undefined,
     Object? resultSummary = _Undefined,
-    String? description,
     String? status,
+    String? description,
     Object? branchName = _Undefined,
     Object? previewUrl = _Undefined,
     DateTime? createdAt,
@@ -192,12 +195,12 @@ class _RevisionImpl extends Revision {
       revisionText: revisionText ?? this.revisionText,
       attachmentUrls: attachmentUrls is List<String>?
           ? attachmentUrls
-          : this.attachmentUrls,
+          : this.attachmentUrls?.map((e0) => e0).toList(),
       resultSummary: resultSummary is String?
           ? resultSummary
           : this.resultSummary,
-      description: description ?? this.description,
       status: status ?? this.status,
+      description: description ?? this.description,
       branchName: branchName is String? ? branchName : this.branchName,
       previewUrl: previewUrl is String? ? previewUrl : this.previewUrl,
       createdAt: createdAt ?? this.createdAt,

@@ -43,6 +43,12 @@ func defaultCliModelForBackend(backend string) string {
 	if backend == "kimi-code" {
 		return defaultKimiCodeCliModel
 	}
+	if backend == "commandcode" {
+		return defaultCommandCodeCliModel
+	}
+	if backend == "grok" {
+		return defaultGrokCliModel
+	}
 	return defaultCliModel
 }
 
@@ -58,6 +64,9 @@ func defaultCliReasoningForBackend(backend string) string {
 	}
 	if backend == "junie" {
 		return defaultJunieCliReasoning
+	}
+	if backend == "grok" {
+		return defaultGrokCliReasoning
 	}
 	return defaultCliReasoning
 }
@@ -75,6 +84,15 @@ func validateCliModelForBackend(backend string, model string) error {
 	if trimmedModel == "" {
 		return nil
 	}
+	if backend == "commandcode" {
+		if strings.HasPrefix(trimmedModel, "commandcode/") {
+			return nil
+		}
+		return fmt.Errorf("unsupported %s model %q; expected a commandcode/* model", backend, trimmedModel)
+	}
+	if backend == "codex" && (trimmedModel == "opencode-go/deepseek-v4-pro" || trimmedModel == "deepseek-v4-pro") {
+		return fmt.Errorf("OpenCode Go DeepSeek V4 Pro is disabled for Fixer launches; use deepseek-v4-flash or another approved model")
+	}
 	if backend == "droid" || backend == "junie" {
 		if _, ok := supportedDroidCliModels[trimmedModel]; ok {
 			return nil
@@ -85,7 +103,13 @@ func validateCliModelForBackend(backend string, model string) error {
 		if _, ok := supportedKimiCodeCliModels[trimmedModel]; ok {
 			return nil
 		}
-		return fmt.Errorf("unsupported %s model %q; supported models: kimi-k2.7-code, kimi-k3", backend, trimmedModel)
+		return fmt.Errorf("unsupported %s model %q; supported models: kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k3, kimi-k3-256k", backend, trimmedModel)
+	}
+	if backend == "grok" {
+		if _, ok := supportedGrokCliModels[trimmedModel]; ok {
+			return nil
+		}
+		return fmt.Errorf("unsupported %s model %q; supported models: grok-4.6, grok-4.5", backend, trimmedModel)
 	}
 	return nil
 }

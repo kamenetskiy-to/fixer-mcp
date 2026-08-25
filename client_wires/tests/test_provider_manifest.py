@@ -13,7 +13,14 @@ def test_claude_manifest_exposes_opus_5_and_supported_effort_levels() -> None:
     manifest = load_manifest(CLAUDE_MANIFEST)
 
     assert manifest.models.default == "sonnet"
-    assert manifest.models.options == ["sonnet", "opus", "claude-opus-5", "haiku"]
-    assert manifest.models.internal_id_map["claude-opus-5"] == "claude-opus-5"
+    assert manifest.models.options == [
+        "sonnet",
+        "opus",
+        "kimi/k3",
+        "kimi/k3-256k",
+        "kimi/kimi-for-coding",
+        "kimi/kimi-for-coding-highspeed",
+    ]
+    assert manifest.models.internal_id_map["kimi/k3"] == "kimi/k3"
     assert manifest.reasoning.options == ["low", "medium", "high", "xhigh", "max"]
     assert manifest.reasoning.flag_or_key == "--effort"

@@ -1,0 +1,14 @@
+class: GenuiActionRequest
+immutable: true
+fields:
+  projectId: int
+  protocolVersion: int
+  surfaceId: String
+  surfaceRevision: int
+  actionId: String
+  actionVersion: int
+  targetType: String
+  targetId: String
+  inputJson: String
+  confirmed: bool
+  idempotencyKey: String

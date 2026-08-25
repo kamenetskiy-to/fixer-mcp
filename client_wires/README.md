@@ -28,17 +28,20 @@ This directory is more than a launch convenience layer. It is where the repo con
 ## Flow Map
 
 - `Fixer-managed worker flow`: every autonomous Netrunner is created, launched, awaited, and cleaned up through Fixer MCP wave tools, including one-worker waves.
-- `manual separate-terminal`: use `$run-manual-netrunner` when the Architect wants to launch or resume the Netrunner personally in another terminal.
+- `project Hands`: the `Руки (Project Hands)` role opens the current project's one
+  durable mailbox. The terminal provider process is disposable and reloads
+  history from Fixer MCP instead of becoming a permanent session.
+- `compatibility execution`: waves, the Hands dispatcher, and explicit governed
+  acceptance may launch a preselected session envelope; the operator does not
+  create or browse ad-hoc sessions.
 - `review and closure`: use `$review-netrunner-session` when a completed session needs Fixer review, acceptance, rejection, or lifecycle closure.
 
 ## Netrunner Worker Model Policy
 
-Choose the Netrunner worker configuration by task complexity:
-
-- simplest tasks: `codex` + `gpt-5.6-luna` + `high`
-- medium-complexity tasks: `codex` + `gpt-5.6-terra` + `high`
-- complex tasks: `codex` + `gpt-5.6-sol` + `medium`
-- hardest tasks: `codex` + `gpt-5.6-sol` + `xhigh`
+Backend/model/reasoning for Netrunner workers is owned by the
+`netrunner-backend-models` skill. Read it before recommending or launching
+workers; it contains the current quota gate, temporary provider overrides, and
+model-specific reasoning constraints.
 
 ## Fixer Wire
 
@@ -46,12 +49,21 @@ Choose the Netrunner worker configuration by task complexity:
 - Purpose: launch role flows for `fixer`, `netrunner`, and `overseer`.
 - Runtime source: uses the vendored `client_wires.codex_compat` launcher helpers.
 - Repo-local MCP additions for this project should live in the root `mcp_config.json` so the base launcher path discovers them automatically; `client_wires/fixer_wire.py` also overlays optional root `webMCP.toml` entries after that base discovery pass for wire-specific additions.
-- Manual Netrunner launch now injects `$run-manual-netrunner` with a preselected session and MCP set, then stops after the initialization checklist unless the Architect explicitly pre-approved immediate execution.
-- Netrunner UX:
-  - Uses keyboard-friendly interactive selectors (arrow keys + enter).
-  - Enforces two dialogs in sequence (session picker, then MCP checklist).
-  - Session picker shows only `in_progress` by default; `+` toggles archived statuses.
-  - MCP checklist hides `fixer_mcp` (forced always-on) and persists manual overrides back to `fixer.db`.
+- Project Hands UX:
+  - `--role netrunner` without a session ID opens the current project's one
+    permanent `Руки` channel.
+  - The lane selector displays `codex`/`claude`/`kimi`/`antigravity` as
+    available lanes of the same actor.
+  - Kimi Code in Project Hands is interactive-only. Never add `-p`, `--print`,
+    native prompt submission, or a headless smoke path; use the same manual
+    Kimi TUI flow as `fixer -> fixer`.
+  - Each open starts a fresh disposable provider client, then reads mailbox and
+    history through Fixer MCP. Provider transcript resume is not channel
+    identity.
+  - No task/session picker, task-scoped MCP checklist, model picker, or reasoning
+    picker is part of the public Hands path.
+  - Repository-write instructions remain governed and await explicit Fixer
+    review.
 - MVP scaffold UX:
   - `fixer --scaffold-mvp <project_slug>` creates a fresh Serverpod + Flutter + `llm_pipeline` starter from any cwd.
   - Optional `--scaffold-target-dir <parent_dir>` chooses where the new project root is created.
@@ -63,7 +75,7 @@ Choose the Netrunner worker configuration by task complexity:
   - `create_netrunner_wave`, `launch_netrunner_wave`, `wait_for_netrunner_wave`, and `cleanup_netrunner_wave` are the only autonomous worker lifecycle.
   - `wait_for_netrunner_wave.timeout_seconds` defaults to 300 seconds; every explicit value must be between 300 and 21600 seconds inclusive. Use 300 seconds for ordinary polling, raise it up to 21600 for an expected very heavy or long-running Netrunner, and never exceed 21600.
   - `launch_netrunner_wave.worker_configs` assigns per-session backend/model/reasoning overrides while top-level launch fields remain defaults.
-  - Codex Fixer launches mount a second `fixer_netrunner_gate` MCP namespace whose server-level surface contains only `launch_netrunner_wave` and `wait_for_netrunner_wave`. The primary `fixer_mcp` copy hides those duplicates while preserving the full Fixer tool catalog through Code Mode.
+  - Codex Fixer launches mount a second `fixer_netrunner_gate` MCP namespace whose server-level surface contains only `wait_for_netrunner_wave` and `wait_for_netrunner_waves`, keeping long blocking waits direct-only. Launch tools stay on the primary authenticated `fixer_mcp` surface.
   - The gate process auto-authenticates only when it is simultaneously locked to `fixer`, bound to a registered project CWD, explicitly opted into auto-auth, and started with the `netrunner_gate` tool profile. Ordinary Fixer MCP processes retain normal `assume_role` authentication.
   - The repo-managed wire forces the attached `fixer_mcp` server timeout floor to `21600s`, matching long wave waits.
   - Claude Code launch materialization writes `.mcp.json` per-server `timeout` in milliseconds, using `per_tool_timeout_ms` first and otherwise converting the wire's second-based timeout fields.
@@ -83,13 +95,15 @@ Choose the Netrunner worker configuration by task complexity:
   - Unknown cwd onboarding happens through the launcher path, so normal role startup does not require a manual Overseer `register_project` call first.
 - Overseer UX:
   - Overseer launch also defaults to `--sandbox danger-full-access` unless an explicit sandbox flag is passed through.
-- Session resume:
+- Compatibility execution resume:
   - Tracks `codex` session IDs in `session_codex_link`.
-  - Selecting an archived session (`review`/`completed`) auto-resumes `codex` by stored session ID.
+  - Resumes only an explicitly supplied internal compatibility envelope; it
+    never represents the permanent Hands mailbox.
 - Session lifecycle closure: Fixer/Overseer now finalize reviewed work via `set_session_status` (typically `review` -> `completed`), with optional rollback to `pending`/`in_progress` when rework is needed.
-- Netrunner supports non-interactive verification flags:
+- Compatibility execution supports non-interactive verification flags:
   - `--netrunner-session-id <id>`
   - `--netrunner-mcp <name[,name...]>` (repeatable)
+  - `--netrunner-acceptance` (requires `--netrunner-session-id`)
   - `--dry-run` (prints resolved launch command without running Codex)
 
 ## Compatibility Bridge

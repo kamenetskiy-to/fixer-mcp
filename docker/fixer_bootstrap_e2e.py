@@ -198,7 +198,7 @@ def deterministic_onboarding() -> dict[str, Any]:
 def build_fixer_prompt() -> str:
     return textwrap.dedent(
         f"""\
-        Activate skill `$init-fixer` immediately if it is available.
+        Activate skill $init-fixer immediately if it is available.
 
         You are the real Codex-backed Fixer for the Docker bootstrap E2E.
         This is a clean Linux container with only the forced `fixer_mcp` server mounted.

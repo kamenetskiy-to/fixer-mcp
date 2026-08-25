@@ -7,7 +7,9 @@ const MESSAGE_ROLES = new Set(["user", "assistant"]);
 const DEFAULT_SESSION_SCAN_LIMIT = 240;
 
 function sessionsDir() {
-  const raw = process.env.CODEX_SESSIONS_DIR?.trim();
+  const raw =
+    process.env.CODEX_SESSIONS_DIR?.trim() ||
+    process.env.FIXER_CODEX_SESSION_ROOT?.trim();
   return raw || DEFAULT_CODEX_SESSIONS_DIR;
 }
 
@@ -135,6 +137,8 @@ export function parseCodexSessionLog(filePath, { limit = 120 } = {}) {
   let cwd = "";
   let startedAt = "";
   let lastActivityAt = "";
+  let model = "";
+  let reasoning = "";
 
   const raw = fs.readFileSync(filePath, "utf8");
   const lines = raw.split(/\r?\n/);
@@ -156,6 +160,14 @@ export function parseCodexSessionLog(filePath, { limit = 120 } = {}) {
       if (typeof envelope.payload.id === "string") threadId = envelope.payload.id;
       if (typeof envelope.payload.cwd === "string") cwd = envelope.payload.cwd;
       if (typeof envelope.payload.timestamp === "string") startedAt = envelope.payload.timestamp;
+      continue;
+    }
+
+    if (envelope?.type === "turn_context" && envelope.payload) {
+      if (typeof envelope.payload.model === "string") model = envelope.payload.model.trim();
+      if (typeof envelope.payload.effort === "string") {
+        reasoning = envelope.payload.effort.trim();
+      }
       continue;
     }
 
@@ -232,6 +244,8 @@ export function parseCodexSessionLog(filePath, { limit = 120 } = {}) {
     cwd,
     startedAt,
     lastActivityAt,
+    model,
+    reasoning,
     messages: limit > 0 && messages.length > limit ? messages.slice(messages.length - limit) : messages,
   };
 }
@@ -315,6 +329,168 @@ function extractLegacyEnvelopeText(payload) {
   return extractMessageText(payload.content);
 }
 
+const DEFAULT_ANTIGRAVITY_ROOT = path.join(os.homedir(), ".gemini", "antigravity-cli");
+
+export function findAntigravitySessionLogPath(threadId) {
+  const normalized = String(threadId ?? "").trim();
+  if (!normalized) return null;
+  const agyRoot = process.env.ANTIGRAVITY_ROOT?.trim() || DEFAULT_ANTIGRAVITY_ROOT;
+  const transcriptPath = path.join(
+    agyRoot,
+    "brain",
+    normalized,
+    ".system_generated",
+    "logs",
+    "transcript.jsonl",
+  );
+  if (fs.existsSync(transcriptPath)) return transcriptPath;
+  return null;
+}
+
+function extractAntigravityUserText(content) {
+  if (typeof content !== "string") return "";
+  let text = content.trim();
+  const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+  if (reqMatch) {
+    text = reqMatch[1].trim();
+  }
+  return text;
+}
+
+export function parseAntigravitySessionLog(filePath, threadId, { limit = 120 } = {}) {
+  const messages = [];
+  let cwd = "";
+  let startedAt = "";
+  let lastActivityAt = "";
+  let model = "Gemini 3.7 Flash";
+  let reasoning = "medium";
+
+  const agyRoot = process.env.ANTIGRAVITY_ROOT?.trim() || DEFAULT_ANTIGRAVITY_ROOT;
+  try {
+    const historyPath = path.join(agyRoot, "history.jsonl");
+    if (fs.existsSync(historyPath)) {
+      const historyRaw = fs.readFileSync(historyPath, "utf8");
+      for (const line of historyRaw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const rec = JSON.parse(line);
+          if (rec.conversationId === threadId) {
+            if (rec.workspace) cwd = rec.workspace;
+            if (typeof rec.timestamp === "number" && rec.timestamp > 0) {
+              startedAt = new Date(rec.timestamp).toISOString();
+              lastActivityAt = startedAt;
+            } else if (typeof rec.timestamp === "string") {
+              startedAt = rec.timestamp;
+              lastActivityAt = rec.timestamp;
+            }
+            if (rec.model) model = rec.model;
+            if (rec.reasoning) reasoning = rec.reasoning;
+            break;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  const raw = fs.readFileSync(filePath, "utf8");
+  const lines = raw.split(/\r?\n/);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let step;
+    try {
+      step = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const timestamp = typeof step.created_at === "string" ? step.created_at : "";
+    if (timestamp) lastActivityAt = timestamp;
+    if (!startedAt && timestamp) startedAt = timestamp;
+
+    if (step.type === "USER_INPUT" || step.source === "USER_EXPLICIT") {
+      const text = extractAntigravityUserText(step.content);
+      if (!text) continue;
+      const meta = messageMeta("user", text);
+      messages.push({
+        id: `${path.basename(filePath)}:${i}`,
+        role: "user",
+        text,
+        kind: meta.kind,
+        summary: meta.summary,
+        collapsed: meta.collapsed,
+        createdAt: timestamp,
+        source: "antigravity_jsonl",
+      });
+      continue;
+    }
+
+    if (step.type === "PLANNER_RESPONSE") {
+      if (Array.isArray(step.tool_calls) && step.tool_calls.length > 0) {
+        for (const tc of step.tool_calls) {
+          const name = tc.name || "tool";
+          const args = typeof tc.args === "object" ? JSON.stringify(tc.args) : String(tc.args || "");
+          const label = `Called ${name}(${compactToolArguments(args)})`;
+          const text = args ? `${label}\n\nArguments:\n${formatToolArguments(args)}` : label;
+          messages.push({
+            id: `${path.basename(filePath)}:${i}:${name}`,
+            role: "tool",
+            text,
+            kind: "tool_call",
+            summary: label,
+            collapsed: true,
+            createdAt: timestamp,
+            source: "antigravity_jsonl",
+          });
+        }
+      }
+      if (typeof step.content === "string" && step.content.trim()) {
+        const text = step.content.trim();
+        const meta = messageMeta("assistant", text);
+        messages.push({
+          id: `${path.basename(filePath)}:${i}`,
+          role: "assistant",
+          text,
+          kind: meta.kind,
+          summary: meta.summary,
+          collapsed: meta.collapsed,
+          createdAt: timestamp,
+          source: "antigravity_jsonl",
+        });
+      }
+      continue;
+    }
+
+    if (step.source === "MODEL" && step.type !== "PLANNER_RESPONSE") {
+      const content = typeof step.content === "string" ? step.content.trim() : "";
+      if (content) {
+        messages.push({
+          id: `${path.basename(filePath)}:${i}`,
+          role: "tool",
+          text: content,
+          kind: "tool_result",
+          summary: `${step.type} result`,
+          collapsed: true,
+          createdAt: timestamp,
+          source: "antigravity_jsonl",
+        });
+      }
+      continue;
+    }
+  }
+
+  return {
+    threadId,
+    cwd,
+    startedAt,
+    lastActivityAt,
+    model,
+    reasoning,
+    messages: limit > 0 && messages.length > limit ? messages.slice(messages.length - limit) : messages,
+  };
+}
+
 export function readThreadTranscript(threadId, options = {}) {
   const normalized = String(threadId ?? "").trim();
   if (!normalized) {
@@ -327,13 +503,34 @@ export function readThreadTranscript(threadId, options = {}) {
     };
   }
 
+  const agyPath = findAntigravitySessionLogPath(normalized);
+  if (agyPath) {
+    const parsed = parseAntigravitySessionLog(agyPath, normalized, options);
+    return {
+      threadId: parsed.threadId || normalized,
+      transcriptAvailable: parsed.messages.length > 0,
+      availability: parsed.messages.length > 0 ? "antigravity_jsonl" : "metadata_only",
+      unsupportedReason:
+        parsed.messages.length > 0
+          ? ""
+          : "The Antigravity transcript exists, but no messages were extractable.",
+      sessionLogPath: agyPath,
+      cwd: parsed.cwd,
+      startedAt: parsed.startedAt,
+      lastActivityAt: parsed.lastActivityAt,
+      model: parsed.model,
+      reasoning: parsed.reasoning,
+      messages: parsed.messages,
+    };
+  }
+
   const filePath = findCodexSessionLogPath(normalized, options);
   if (!filePath) {
     return {
       threadId: normalized,
       transcriptAvailable: false,
       availability: "not_found",
-      unsupportedReason: "No local Codex JSONL rollout log was found for this thread.",
+      unsupportedReason: "No local Codex or Antigravity JSONL rollout log was found for this thread.",
       messages: [],
     };
   }
@@ -351,6 +548,8 @@ export function readThreadTranscript(threadId, options = {}) {
     cwd: parsed.cwd,
     startedAt: parsed.startedAt,
     lastActivityAt: parsed.lastActivityAt,
+    model: parsed.model,
+    reasoning: parsed.reasoning,
     messages: parsed.messages,
   };
 }

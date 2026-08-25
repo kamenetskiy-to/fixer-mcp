@@ -1,0 +1,11 @@
+### One durable Fixer conversation thread in a Project Workroom snapshot.
+class: WorkroomFixerThread
+immutable: true
+fields:
+  threadId: String, jsonKey=id
+  provider: String
+  externalSessionId: String?, jsonKey=external_session_id
+  headline: String
+  state: String
+  createdAt: String, jsonKey=created_at
+  updatedAt: String, jsonKey=updated_at

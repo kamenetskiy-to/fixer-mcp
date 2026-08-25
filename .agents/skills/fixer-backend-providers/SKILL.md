@@ -20,6 +20,28 @@ reasoning, tool registration, launch modes, or permissions map to a provider.
   decisions, the 7th entity (permissions/interactive questions), and the
   mirror-docs mandate.
 
+## Fixer MCP skill catalog
+
+The canonical Fixer MCP skill catalog is `.agents/skills/` in this repository.
+It is the only place where managed skill content may be edited. Provider
+directories such as `.claude/skills/`, `.factory/skills/`,
+`.junie/fixer-runtime/skills/`, and `.kimi-code/skills/` are generated runtime
+materializations; never edit them by hand and never treat them as a source.
+
+Every provider adapter must materialize the same managed skill names from that
+catalog during its runtime-file preparation:
+
+- Codex and Antigravity: `.agents/skills/`;
+- Claude: `.claude/skills/`;
+- Droid: `.factory/skills/`;
+- Junie: `.junie/fixer-runtime/skills/`;
+- Kimi Code: `.kimi-code/skills/`.
+
+When adding or changing a managed skill, edit only the canonical catalog, keep
+the name in `FIXER_ROLE_SKILL_NAMES`, and verify a fresh launch for every
+provider materializes the same content. Do not recreate either retired
+manual-runner skill; use the single `hands-netrunner` skill.
+
 ## Required workflow
 
 1. **Refresh the mirror** for the provider you are touching.

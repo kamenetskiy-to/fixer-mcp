@@ -45,10 +45,11 @@ def _build_autonomous_netrunner_prompt(
         else []
     )
     lines = [
-        "Activate skill `$run-manual-netrunner` immediately.",
-        "Use its Netrunner separate-terminal mode for this headless durable worker.",
+        "Activate skill $hands-netrunner immediately.",
+        "Use its Netrunner execution-envelope mode for this headless durable worker.",
         "",
-        f"Preselected session ID from fixer autonomous flow: `{session_id}`.",
+        f"Preselected compatibility session ID from fixer autonomous flow: `{session_id}`.",
+        "This session is a disposable execution envelope, not a permanent project Hands identity.",
         f"Assigned MCP selection from fixer autonomous flow: {mcp_text}.",
         *fixer_session_lines,
         "Attached MCP how-to guidance:",
@@ -58,7 +59,7 @@ def _build_autonomous_netrunner_prompt(
         *_implementation_test_discipline_lines(),
         "If the operator needs an out-of-band status update, use `fixer_mcp.send_operator_telegram_notification`; do not rely on a separate `telegram_notify` MCP for routine Fixer flows.",
         *completion_lines,
-        "Use this session ID for checkout unless Architect explicitly overrides.",
+        "Use this compatibility session ID for checkout unless Architect explicitly overrides.",
     ]
     return "\n".join(lines)
 
@@ -92,10 +93,11 @@ def _build_wave_netrunner_prompt(
         else []
     )
     lines = [
-        "Activate skill `$run-manual-netrunner` immediately.",
-        "Use its Netrunner separate-terminal mode for this headless durable worker.",
+        "Activate skill $hands-netrunner immediately.",
+        "Use its Netrunner execution-envelope mode for this headless durable worker.",
         "",
-        f"Preselected session ID from fixer autonomous flow: `{session_id}`.",
+        f"Preselected compatibility session ID from fixer autonomous flow: `{session_id}`.",
+        "This session is a disposable execution envelope, not a permanent project Hands identity.",
         f"Assigned MCP selection from fixer autonomous flow: {mcp_text}.",
         *fixer_session_lines,
         "Attached MCP how-to guidance:",
@@ -118,7 +120,7 @@ def _build_wave_netrunner_prompt(
         *_implementation_test_discipline_lines(),
         "If the operator needs an out-of-band status update, use `fixer_mcp.send_operator_telegram_notification`; do not rely on a separate `telegram_notify` MCP for routine Fixer flows.",
         "When the work is finished, submit the mandatory doc proposal and completion report, then stop without waking the Fixer from this worker.",
-        "Use this session ID for checkout unless Architect explicitly overrides.",
+        "Use this compatibility session ID for checkout unless Architect explicitly overrides.",
     ]
     return "\n".join(lines)
 
@@ -126,7 +128,7 @@ def _build_wave_netrunner_prompt(
 def _build_autonomous_fixer_resume_prompt(completed_session_id: int, summary: str) -> str:
     return "\n".join(
         [
-            "Activate skill `$review-netrunner-session` immediately.",
+            "Activate skill $review-netrunner-session immediately.",
             f"Target completed session ID: `{completed_session_id}`.",
             f"Netrunner handoff summary: {summary or '(none)'}",
             "Review only the named completed session unless the registered autonomous run state explicitly says a serial run is active.",

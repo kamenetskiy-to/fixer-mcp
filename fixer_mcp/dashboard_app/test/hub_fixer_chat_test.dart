@@ -91,11 +91,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('fixer-provider-select')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Factory Droid').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('fixer-model-select')));
+    await tester.tap(find.text('Factory Droid CLI').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('kimi-k2.7-code').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('high').last);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('launch-fixer-chat')));
     await tester.pumpAndSettle();

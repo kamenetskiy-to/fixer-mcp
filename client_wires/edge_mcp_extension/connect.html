@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Connecting Edge MCP</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 3rem auto; max-width: 42rem; padding: 0 1.5rem; }
+      p { line-height: 1.55; }
+      #status { font-weight: 650; }
+      .warning { opacity: .78; }
+    </style>
+  </head>
+  <body>
+    <h1>Edge MCP — All Tabs</h1>
+    <p id="status">Connecting to the local Playwright relay…</p>
+    <p class="warning">While Edge MCP is enabled, the agent can inspect and operate all ordinary tabs in this Edge profile. Closing the MCP connection detaches the debugger from every tab.</p>
+    <script src="connect.js"></script>
+  </body>
+</html>

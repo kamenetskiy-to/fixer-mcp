@@ -1,6 +1,3 @@
-import 'dart:async';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
@@ -10,6 +7,7 @@ import 'src/architect_cockpit.dart';
 import 'src/client_order_app.dart';
 import 'src/dashboard_repository.dart';
 import 'src/dashboard_view.dart';
+import 'src/fixer_studio_backend_bootstrap.dart';
 import 'src/hub/backlog/backlog_repository.dart';
 import 'src/hub/fixer_chat/fixer_chat_service.dart';
 import 'src/hub/netrunner_thread/netrunner_thread_repository.dart';
@@ -17,6 +15,7 @@ import 'src/hub/netrunners/netrunner_repository.dart';
 import 'src/hub/overseer/overseer_repository.dart';
 import 'src/hub/skills/skills_repository.dart';
 import 'src/mission_control/mission_control_repository.dart';
+import 'src/workroom/workroom_repository.dart';
 
 const _manageBundledBackend = bool.fromEnvironment(
   'FIXER_STUDIO_MANAGE_BACKEND',
@@ -42,77 +41,18 @@ class _BackendBootstrap extends StatefulWidget {
 }
 
 class _BackendBootstrapState extends State<_BackendBootstrap> {
-  Process? _backendProcess;
-  late Future<void> _ready = _startBackend();
-
-  Future<void> _startBackend() async {
-    if (await _backendReady()) return;
-    if (widget.projectRoot.trim().isEmpty) {
-      throw StateError('The Fixer Studio project root is not configured.');
-    }
-
-    final script = File(
-      '${widget.projectRoot}/fixer_mcp/scripts/'
-      'fixer_studio_backend_service.sh',
-    );
-    if (!script.existsSync()) {
-      throw StateError('Backend launcher not found: ${script.path}');
-    }
-
-    final process = await Process.start(script.path, ['run', '$pid']);
-    _backendProcess = process;
-    unawaited(process.stdout.drain<void>());
-    unawaited(process.stderr.drain<void>());
-
-    final exited = process.exitCode.then<void>((code) {
-      throw StateError('Backend launcher exited with code $code.');
-    });
-    await Future.any<void>([_waitUntilReady(), exited]);
-  }
-
-  Future<void> _waitUntilReady() async {
-    final deadline = DateTime.now().add(const Duration(seconds: 90));
-    while (DateTime.now().isBefore(deadline)) {
-      if (await _backendReady()) return;
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-    }
-    throw TimeoutException('The local backend did not become ready in time.');
-  }
-
-  Future<bool> _backendReady() async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(milliseconds: 500);
-    try {
-      for (final endpoint in const [
-        'http://127.0.0.1:18090/health',
-        'http://127.0.0.1:14242/health',
-        'http://127.0.0.1:28080/livez',
-      ]) {
-        final request = await client.getUrl(Uri.parse(endpoint));
-        final response = await request.close().timeout(
-          const Duration(seconds: 1),
-        );
-        await response.drain<void>();
-        if (response.statusCode != HttpStatus.ok) return false;
-      }
-      return true;
-    } on Object {
-      return false;
-    } finally {
-      client.close(force: true);
-    }
-  }
+  late final _backend = FixerStudioBackendBootstrap(
+    projectRoot: widget.projectRoot,
+  );
+  late Future<void> _ready = _backend.ensureReady();
 
   void _retry() {
-    _backendProcess?.kill(ProcessSignal.sigterm);
-    _backendProcess = null;
-    setState(() => _ready = _startBackend());
-  }
-
-  @override
-  void dispose() {
-    _backendProcess?.kill(ProcessSignal.sigterm);
-    super.dispose();
+    setState(() {
+      _ready = Future<void>.delayed(
+        Duration.zero,
+        _backend.ensureReady,
+      );
+    });
   }
 
   @override
@@ -192,6 +132,7 @@ class FixerDashboardApp extends StatefulWidget {
     this.skillsRepository,
     this.overseerRepository,
     this.missionControlRepository,
+    this.workroomRepository,
   });
 
   final DashboardRepository? repository;
@@ -204,6 +145,7 @@ class FixerDashboardApp extends StatefulWidget {
   final SkillsRepository? skillsRepository;
   final OverseerManagerRepository? overseerRepository;
   final MissionControlRepository? missionControlRepository;
+  final ProjectWorkroomRepository? workroomRepository;
 
   @override
   State<FixerDashboardApp> createState() => _FixerDashboardAppState();
@@ -256,6 +198,7 @@ class _FixerDashboardAppState extends State<FixerDashboardApp> {
             skillsRepository: widget.skillsRepository,
             overseerRepository: widget.overseerRepository,
             missionControlRepository: widget.missionControlRepository,
+            workroomRepository: widget.workroomRepository,
           ),
         ),
       ),

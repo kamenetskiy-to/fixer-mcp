@@ -91,11 +91,16 @@ class ClientAuthService {
     );
 
     // Keep the failure indistinguishable for unknown emails and bad passwords.
-    if (client == null ||
-        !await passwordHasher.validateHashFromString(
-          secret: password,
-          hashString: client.hashedPassword,
-        )) {
+    if (client == null) {
+      throw ClientAuthException(
+        'Invalid email or password',
+        allowAutoRegister: true,
+      );
+    }
+    if (!await passwordHasher.validateHashFromString(
+      secret: password,
+      hashString: client.hashedPassword,
+    )) {
       throw ClientAuthException('Invalid email or password');
     }
 
@@ -159,9 +164,10 @@ abstract final class ClientAuthValidation {
 
 /// A safe, non-sensitive authentication failure returned by client endpoints.
 class ClientAuthException implements Exception {
-  const ClientAuthException(this.message);
+  const ClientAuthException(this.message, {this.allowAutoRegister = false});
 
   final String message;
+  final bool allowAutoRegister;
 
   @override
   String toString() => message;

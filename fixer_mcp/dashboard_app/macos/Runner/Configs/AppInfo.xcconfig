@@ -4,11 +4,16 @@
 // future. If not, the values below would default to using the project name when this becomes a
 // 'flutter create' template.
 
-// The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = fixer_dashboard_app
+// The checked-in macOS build is the Experimental channel. Stable is promoted
+// from a verified Experimental bundle by scripts/fixer_studio_channels, which
+// rewrites channel metadata and re-signs the promoted local artifact.
+PRODUCT_NAME = Fixer Studio Experimental
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = dev.fixermcp.fixerDashboardApp
+PRODUCT_BUNDLE_IDENTIFIER = dev.fixermcp.fixerStudio.experimental
+
+// Included in Info.plist so unpackaged builds still identify their channel.
+FIXER_STUDIO_CHANNEL = experimental
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 dev.fixermcp. All rights reserved.

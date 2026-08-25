@@ -510,6 +510,10 @@ class ProjectCardRecord {
     required this.autonomous,
     required this.hasPendingReview,
     required this.hasActiveWorkers,
+    this.primaryActivitySource = '',
+    this.hasFixerActivity = false,
+    this.hasHandsActivity = false,
+    this.hasAutonomousActivity = false,
     this.activeWaveCount = 0,
     this.lastActivityAt = '',
   });
@@ -522,6 +526,10 @@ class ProjectCardRecord {
   final AutonomousStatusRecord? autonomous;
   final bool hasPendingReview;
   final bool hasActiveWorkers;
+  final String primaryActivitySource;
+  final bool hasFixerActivity;
+  final bool hasHandsActivity;
+  final bool hasAutonomousActivity;
   final int activeWaveCount;
   final String lastActivityAt;
 
@@ -543,6 +551,10 @@ class ProjectCardRecord {
           : null,
       hasPendingReview: _asBool(json['has_pending_review']),
       hasActiveWorkers: _asBool(json['has_active_workers']),
+      primaryActivitySource: _asString(json['primary_activity_source']),
+      hasFixerActivity: _asBool(json['has_fixer_activity']),
+      hasHandsActivity: _asBool(json['has_hands_activity']),
+      hasAutonomousActivity: _asBool(json['has_autonomous_activity']),
       activeWaveCount: _asInt(json['active_wave_count']),
       lastActivityAt: _asString(json['last_activity_at']),
     );

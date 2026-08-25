@@ -9,7 +9,7 @@ from client_wires import fixer_wire_launch_support
 
 
 class _DummyOption:
-    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False) -> None:
+    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False, **kwargs: object) -> None:
         self.label = label
         self.value = value
         self.disabled = disabled

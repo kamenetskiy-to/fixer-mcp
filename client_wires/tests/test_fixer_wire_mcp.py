@@ -41,6 +41,9 @@ class FixerWireMcpExtractionTests(unittest.TestCase):
         codex_pro_package = types.ModuleType("client_wires.codex_compat")
         codex_pro_package.main = main_module
         codex_pro_package.config_loader = config_loader
+        runtime_module = types.ModuleType("client_wires.codex_compat.runtime")
+        runtime_module._ensure_sqlite_scaffold = lambda *_args, **_kwargs: None
+        codex_pro_package.runtime = runtime_module
 
         def inject_research(servers: dict[str, dict[str, object]], _cwd: Path) -> dict[str, dict[str, object]]:
             merged = dict(servers)
@@ -64,6 +67,7 @@ class FixerWireMcpExtractionTests(unittest.TestCase):
                     "client_wires.codex_compat": codex_pro_package,
                     "client_wires.codex_compat.llm": main_module,
                     "client_wires.codex_compat.config": config_loader,
+                    "client_wires.codex_compat.runtime": runtime_module,
                 },
             ),
             patch.object(fixer_wire, "_inject_research_query_server", side_effect=inject_research) as research,
@@ -228,7 +232,17 @@ class ForcedFixerSpecTests(unittest.TestCase):
             override_path.parent.mkdir(parents=True, exist_ok=True)
             override_path.write_text("override", encoding="utf-8")
             config_path.write_text(
-                json.dumps({"mcpServers": {"fixer_mcp": {"command": str(configured_path)}}}) + "\n",
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "fixer_mcp": {
+                                "command": "/usr/bin/env",
+                                "args": ["-u", "FIXER_MCP_TOOL_PROFILE", str(configured_path)],
+                            }
+                        }
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             rebuild_calls: list[Path] = []
@@ -246,6 +260,7 @@ class ForcedFixerSpecTests(unittest.TestCase):
 
         self.assertEqual(spec["command"], str(override_path.resolve()))
         self.assertEqual(spec["cwd"], str(override_path.parent.resolve()))
+        self.assertEqual(spec["args"], [])
         self.assertEqual(rebuild_calls, [override_path.resolve()])
 
     def test_load_forced_fixer_spec_keeps_existing_configured_path(self) -> None:
@@ -644,7 +659,7 @@ class FixerMcpEnvBindingTests(unittest.TestCase):
 
 
 class _DummyOption:
-    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False) -> None:
+    def __init__(self, label: str, value: object | None = None, *, disabled: bool = False, is_header: bool = False, **kwargs: object) -> None:
         self.label = label
         self.value = value
         self.disabled = disabled

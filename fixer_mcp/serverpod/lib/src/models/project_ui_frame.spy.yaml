@@ -1,0 +1,8 @@
+### Exhaustive Serverpod stream frame hierarchy. Only event frames consume a
+### durable project sequence.
+class: ProjectUiFrame
+sealed: true
+immutable: true
+fields:
+  projectId: int
+  protocolVersion: int
