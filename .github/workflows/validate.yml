@@ -16,6 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python3 -m pip install pytest
       - run: python3 -m unittest discover -s client_wires/tests
       - run: make test-go
       - run: FIXER_INSTALL_PREFIX="$RUNNER_TEMP/fixer" make install-verify
