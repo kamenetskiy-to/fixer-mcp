@@ -351,6 +351,17 @@ func parallelWaveFailureLike(status string) bool {
 	}
 }
 
+func parallelWaveProviderFailureLike(status string) bool {
+	switch status {
+	case parallelWaveWorkerStatusFailed,
+		parallelWaveWorkerStatusStopped,
+		parallelWaveWorkerStatusStaleEpoch:
+		return true
+	default:
+		return false
+	}
+}
+
 func parallelWaveScheduledCohort(wave NetrunnerWaveSnapshot) []NetrunnerWaveWorkerSnapshot {
 	cohort := []NetrunnerWaveWorkerSnapshot{}
 	for _, worker := range wave.Workers {
@@ -366,13 +377,37 @@ func parallelWaveScheduledCohort(wave NetrunnerWaveSnapshot) []NetrunnerWaveWork
 }
 
 func parallelWaveFailedLikeCohortCount(wave NetrunnerWaveSnapshot) int {
-	count := 0
-	for _, worker := range parallelWaveScheduledCohort(wave) {
-		if parallelWaveFailureLike(worker.Status) {
-			count++
+	cohort := parallelWaveScheduledCohort(wave)
+	providerFailures := 0
+	blocked := 0
+	for _, worker := range cohort {
+		if parallelWaveProviderFailureLike(worker.Status) {
+			providerFailures++
+		} else if worker.Status == parallelWaveWorkerStatusBlocked {
+			blocked++
 		}
 	}
-	return count
+	if providerFailures > 0 {
+		return providerFailures
+	}
+	return blocked
+}
+
+func parallelWavePolicyFailureWorkers(wave NetrunnerWaveSnapshot) []NetrunnerWaveWorkerSnapshot {
+	cohort := parallelWaveScheduledCohort(wave)
+	providerFailures := make([]NetrunnerWaveWorkerSnapshot, 0, len(cohort))
+	blocked := make([]NetrunnerWaveWorkerSnapshot, 0, len(cohort))
+	for _, worker := range cohort {
+		if parallelWaveProviderFailureLike(worker.Status) {
+			providerFailures = append(providerFailures, worker)
+		} else if worker.Status == parallelWaveWorkerStatusBlocked {
+			blocked = append(blocked, worker)
+		}
+	}
+	if len(providerFailures) > 0 {
+		return providerFailures
+	}
+	return blocked
 }
 
 const parallelWaveArchitectApprovedReasonPrefix = "architect_approved:ack_failed="
@@ -415,12 +450,9 @@ func decideParallelWaveFailurePolicy(wave NetrunnerWaveSnapshot) parallelWaveFai
 	if workerCount == 0 {
 		return parallelWaveFailureDecision{State: parallelWaveFailurePolicyNone}
 	}
-	failed := []NetrunnerWaveWorkerSnapshot{}
+	failed := parallelWavePolicyFailureWorkers(wave)
 	allTerminal := true
 	for _, worker := range cohort {
-		if parallelWaveFailureLike(worker.Status) {
-			failed = append(failed, worker)
-		}
 		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); !terminal {
 			allTerminal = false
 		}
@@ -836,7 +868,7 @@ func parallelWaveDeclaredWriteScopeContainsPath(scope []string, path string) boo
 // declares an overlapping scope (for example a dependency-gated child that
 // inherits its parent's scope), so the release never opens a fence that a live
 // worker still relies on.
-func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
+func releaseParallelWaveWorkerScopeLeasesTx(tx *sql.Tx, wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
 	if len(worker.DeclaredWriteScope) == 0 {
 		return nil
 	}
@@ -860,7 +892,7 @@ func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker Net
 		if _, keep := blocked[scopePath]; keep {
 			continue
 		}
-		if _, err := db.Exec(
+		if _, err := tx.Exec(
 			`UPDATE parallel_wave_scope_lease
 			 SET active = 0,
 			     released_at = COALESCE(released_at, CURRENT_TIMESTAMP)
@@ -870,6 +902,115 @@ func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker Net
 			scopePath,
 		); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := releaseParallelWaveWorkerScopeLeasesTx(tx, wave, worker); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// blockParallelWaveWorker closes a dependency-gated worker and releases its
+// lease in the same transaction. A blocked child is an execution consequence
+// of an already failed parent, not an additional provider failure.
+func blockParallelWaveWorker(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot, reason string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?,
+		     terminal_outcome = CASE WHEN COALESCE(TRIM(terminal_outcome), '') = '' THEN ? ELSE terminal_outcome END,
+		     failure_reason = ?,
+		     terminal_at = COALESCE(terminal_at, CURRENT_TIMESTAMP),
+		     updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND project_id = ? AND status IN (?, ?)`,
+		parallelWaveWorkerStatusBlocked,
+		parallelWaveWorkerStatusBlocked,
+		reason,
+		worker.Id,
+		wave.ProjectId,
+		parallelWaveWorkerStatusCreated,
+		parallelWaveWorkerStatusWorktreeReady,
+	)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return nil
+	}
+	if err := releaseParallelWaveWorkerScopeLeasesTx(tx, wave, worker); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// blockParallelWaveWorkersWithFailedParents is safe to call before the main
+// wait gate. It closes dependency descendants even when a previous wait ended
+// at a repair gate before the scheduler got a chance to inspect them.
+func blockParallelWaveWorkersWithFailedParents(wave NetrunnerWaveSnapshot) error {
+	workersBySessionID := make(map[int]NetrunnerWaveWorkerSnapshot, len(wave.Workers))
+	for _, worker := range wave.Workers {
+		workersBySessionID[worker.SessionId] = worker
+	}
+	parentsByChild := make(map[int][]int64, len(wave.Dependencies))
+	for _, dependency := range wave.Dependencies {
+		parentsByChild[int(dependency.Child)] = append(parentsByChild[int(dependency.Child)], dependency.Parents...)
+	}
+	for _, worker := range wave.Workers {
+		if worker.Status != parallelWaveWorkerStatusCreated {
+			continue
+		}
+		for _, parentSessionID := range parentsByChild[worker.SessionId] {
+			parent, found := workersBySessionID[int(parentSessionID)]
+			if !found {
+				if err := blockParallelWaveWorker(wave, worker, "blocked: parent dependency missing"); err != nil {
+					return err
+				}
+				worker.Status = parallelWaveWorkerStatusBlocked
+				workersBySessionID[worker.SessionId] = worker
+				for i := range wave.Workers {
+					if wave.Workers[i].Id == worker.Id {
+						wave.Workers[i] = worker
+						break
+					}
+				}
+				break
+			}
+			if !parallelWaveFailureLike(parent.Status) {
+				continue
+			}
+			reason := fmt.Sprintf("blocked: parent session %d: %s", parent.SessionId, parent.Status)
+			if strings.TrimSpace(parent.FailureReason) != "" {
+				reason = fmt.Sprintf("blocked: parent session %d: %s", parent.SessionId, parent.FailureReason)
+			}
+			if err := blockParallelWaveWorker(wave, worker, reason); err != nil {
+				return err
+			}
+			worker.Status = parallelWaveWorkerStatusBlocked
+			workersBySessionID[worker.SessionId] = worker
+			for i := range wave.Workers {
+				if wave.Workers[i].Id == worker.Id {
+					wave.Workers[i] = worker
+					break
+				}
+			}
+			break
 		}
 	}
 	return nil

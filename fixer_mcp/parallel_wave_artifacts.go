@@ -59,12 +59,21 @@ func gitCommandInWorktreeBytesAllowExitCodes(worktreePath string, allowedExitCod
 
 func splitGitPathLines(raw string) []string {
 	paths := []string{}
+	if strings.Contains(raw, "\x00") {
+		for _, record := range strings.Split(raw, "\x00") {
+			if record == "" {
+				continue
+			}
+			paths = append(paths, filepath.ToSlash(record))
+		}
+		return paths
+	}
 	for _, line := range strings.Split(raw, "\n") {
-		trimmed := filepath.ToSlash(strings.TrimSpace(line))
-		if trimmed == "" {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
 			continue
 		}
-		paths = append(paths, trimmed)
+		paths = append(paths, filepath.ToSlash(line))
 	}
 	return paths
 }
@@ -74,7 +83,7 @@ func mergeGitChangedPaths(groups ...[]string) []string {
 	paths := []string{}
 	for _, group := range groups {
 		for _, path := range group {
-			normalized := filepath.ToSlash(strings.TrimSpace(path))
+			normalized := filepath.ToSlash(path)
 			if normalized == "" {
 				continue
 			}
@@ -87,6 +96,54 @@ func mergeGitChangedPaths(groups ...[]string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func gitTreeGitlinks(raw []byte) map[string]string {
+	gitlinks := make(map[string]string)
+	for _, record := range strings.Split(string(raw), "\x00") {
+		if record == "" {
+			continue
+		}
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(record[:tab])
+		if len(fields) < 3 || fields[0] != "160000" {
+			continue
+		}
+		path := filepath.ToSlash(record[tab+1:])
+		if path != "" {
+			gitlinks[path] = fields[2]
+		}
+	}
+	return gitlinks
+}
+
+func validateChangedParallelWaveSubmodules(worktreePath string, baseSHA string, headSHA string) error {
+	headTree, err := gitCommandInWorktreeBytes(worktreePath, "ls-tree", "-r", "-z", headSHA, "--")
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker HEAD gitlinks: %w", err)
+	}
+	baseTree, err := gitCommandInWorktreeBytes(worktreePath, "ls-tree", "-r", "-z", baseSHA, "--")
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker base gitlinks: %w", err)
+	}
+	headGitlinks := gitTreeGitlinks(headTree)
+	baseGitlinks := gitTreeGitlinks(baseTree)
+	for path, objectID := range headGitlinks {
+		if objectID == baseGitlinks[path] {
+			continue
+		}
+		submodulePath := filepath.Join(worktreePath, filepath.FromSlash(path))
+		if _, err := os.Stat(submodulePath); err != nil {
+			return fmt.Errorf("submodule gitlink %q points to %s but its worktree is unavailable: %w", path, objectID, err)
+		}
+		if _, err := gitCommandInWorktree(submodulePath, "cat-file", "-e", objectID+"^{commit}"); err != nil {
+			return fmt.Errorf("submodule gitlink %q points to unreachable commit %s: %w", path, objectID, err)
+		}
+	}
+	return nil
 }
 
 func parallelWavePatchArtifactPath(projectCWD string, waveID int, localSessionID int) (string, error) {
@@ -149,15 +206,15 @@ func captureParallelWaveWorkerDiff(projectCWD string, wave NetrunnerWaveSnapshot
 	if err != nil {
 		return "", nil, "", "", fmt.Errorf("failed to capture head_sha: %w", err)
 	}
-	trackedNames, err := gitCommandInWorktree(worktreePath, "diff", "--name-only", baseSHA, "--")
+	trackedNamesRaw, err := gitCommandInWorktreeBytes(worktreePath, "diff", "--name-only", "-z", baseSHA, "--")
 	if err != nil {
 		return "", nil, "", "", fmt.Errorf("failed to capture changed paths: %w", err)
 	}
-	untrackedNames, err := gitCommandInWorktree(worktreePath, "ls-files", "--others", "--exclude-standard")
+	untrackedNamesRaw, err := gitCommandInWorktreeBytes(worktreePath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return "", nil, "", "", fmt.Errorf("failed to capture untracked paths: %w", err)
 	}
-	untrackedPaths := splitGitPathLines(untrackedNames)
+	untrackedPaths := splitGitPathLines(string(untrackedNamesRaw))
 	diffStat, err := gitCommandInWorktree(worktreePath, "diff", "--stat", baseSHA, "--")
 	if err != nil {
 		return "", nil, "", "", fmt.Errorf("failed to capture diff stat: %w", err)
@@ -187,7 +244,7 @@ func captureParallelWaveWorkerDiff(projectCWD string, wave NetrunnerWaveSnapshot
 	}
 	patch = combineParallelWavePatchPayloads(patchPayloads...)
 
-	changedPaths := mergeGitChangedPaths(splitGitPathLines(trackedNames), untrackedPaths)
+	changedPaths := mergeGitChangedPaths(splitGitPathLines(string(trackedNamesRaw)), untrackedPaths)
 
 	patchPath, err := parallelWavePatchArtifactPath(projectCWD, wave.Id, worker.SessionId)
 	if err != nil {

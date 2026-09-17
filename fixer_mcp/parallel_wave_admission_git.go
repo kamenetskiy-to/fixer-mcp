@@ -51,7 +51,7 @@ const (
 	parallelWaveReviewPolicyManual        = "manual"
 	defaultParallelWaveReviewPolicy       = parallelWaveReviewPolicyManual
 	defaultParallelWaveReviewBackend      = "codex"
-	defaultParallelWaveReviewModel        = "opencode-go/deepseek-v4-flash"
+	defaultParallelWaveReviewModel        = "gpt-5.6-luna"
 	defaultParallelWaveReviewReasoning    = "high"
 )
 
@@ -59,6 +59,7 @@ var parallelWaveBranchPattern = regexp.MustCompile(`^fixer/wave-[1-9][0-9]*/sess
 var parallelWaveFoundationWriteScopePaths = []string{
 	"fixer_mcp/main.go",
 	"client_wires/fixer_wire.py",
+	"client_wires/fixer_autonomous.py",
 	"AGENTS.md",
 	".codex",
 	".mcp.json",
@@ -93,6 +94,25 @@ type gitCommandSpec struct {
 }
 
 func waveDeclaredWriteScopeFoundationMatch(entry string) (string, bool) {
+	normalized, err := normalizeWriteScopePath(entry)
+	if err != nil {
+		return "", false
+	}
+	for _, forbidden := range parallelWaveFoundationWriteScopePaths {
+		if writeScopePathsOverlap(normalized, forbidden) {
+			return forbidden, true
+		}
+	}
+	for _, forbiddenPrefix := range parallelWaveFoundationWriteScopePrefixes {
+		forbiddenRoot := strings.TrimSuffix(forbiddenPrefix, "/")
+		if normalized == forbiddenRoot || strings.HasPrefix(normalized, forbiddenPrefix) {
+			return forbiddenRoot, true
+		}
+	}
+	base := filepath.Base(normalized)
+	if strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") {
+		return base, true
+	}
 	return "", false
 }
 

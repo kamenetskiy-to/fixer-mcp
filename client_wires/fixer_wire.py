@@ -32,6 +32,7 @@ from client_wires import fixer_wire_db
 from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_launch_support
 from client_wires import fixer_wire_mcp
+from client_wires import fixer_wire_navigation
 from client_wires import fixer_wire_netrunner_launch
 from client_wires import fixer_wire_prompts
 from client_wires import fixer_wire_resume
@@ -108,7 +109,7 @@ PRIMARY_FIXER_DB_FILENAME = "fixer.db"
 WEB_MCP_CONFIG_FILENAME = fixer_wire_mcp.WEB_MCP_CONFIG_FILENAME
 FIXER_MCP_AUTOBUILD_SKIP_ENV = fixer_wire_mcp.FIXER_MCP_AUTOBUILD_SKIP_ENV
 FIXER_WIRE_MODEL = "gpt-5.6-luna"
-FIXER_WIRE_REASONING_EFFORT = "xhigh"
+FIXER_WIRE_REASONING_EFFORT = "high"
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC = fixer_wire_mcp.FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_MS = fixer_wire_mcp.FORCED_FIXER_MCP_TIMEOUT_FLOOR_MS
 _FIXER_MCP_BUILD_CHECKED = fixer_wire_mcp._FIXER_MCP_BUILD_CHECKED
@@ -177,17 +178,37 @@ def _repo_root() -> Path:
 def _ensure_architect_tool_path(env: dict[str, str]) -> None:
     """Make user-installed helper executables visible to MCP child processes."""
     home = Path.home()
-    preferred = [
+    helpers = [
         home / "bin",
         home / ".codex" / "fixer_unattached" / "bin",
     ]
     current = [part for part in env.get("PATH", "").split(os.pathsep) if part]
     ordered: list[str] = []
-    for path in [*(str(item) for item in preferred if item.is_dir()), *current]:
+    # Keep the caller's executable selection; helper wrappers must not shadow it.
+    for path in [*current, *(str(item) for item in helpers if item.is_dir())]:
         if path not in ordered:
             ordered.append(path)
     if ordered:
         env["PATH"] = os.pathsep.join(ordered)
+
+
+# Backends whose provider process authenticates from the process environment
+# instead of a stored login of their own. Codex does this through the LLM env
+# file; Pi reads provider keys from the `$VAR` names declared in
+# ~/.pi/agent/models.json, so without the same merge a key that only lives in
+# ~/.codex/llm.env never reaches the provider and Pi refuses to start with
+# "No API key found for <provider>".
+LLM_ENV_BACKENDS: frozenset[str] = frozenset({"pi"})
+
+# Provider keys the LLM env file carries. An explicitly exported shell value
+# stays authoritative for these names, matching the codex-pro route.
+AUTHORITATIVE_LLM_ENV_KEYS: tuple[str, ...] = (
+    "OPENROUTER_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "COMMANDCODE_API_KEY",
+    "GEMINI_API_KEY",
+    "KIMI_API_KEY",
+)
 
 
 def _build_backend_launch_env(
@@ -199,13 +220,13 @@ def _build_backend_launch_env(
     merge_env_with_os: Any | None = None,
 ) -> dict[str, str]:
     normalized_backend = normalize_backend_name(getattr(adapter, "name", ""))
-    if is_codex_backend(normalized_backend):
+    if is_codex_backend(normalized_backend) or normalized_backend in LLM_ENV_BACKENDS:
         if load_llm_env is None or merge_env_with_os is None:
-            raise RuntimeError("Codex launches require LLM env helpers.")
+            raise RuntimeError(f"{normalized_backend} launches require LLM env helpers.")
         env = merge_env_with_os(load_llm_env())
-        # Match codex-pro: an explicitly exported shell key is authoritative.
-        if os.environ.get("OPENROUTER_API_KEY"):
-            env["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
+        for key in AUTHORITATIVE_LLM_ENV_KEYS:
+            if os.environ.get(key):
+                env[key] = os.environ[key]
     else:
         env = dict(os.environ)
     adapter.prepare_env(env, llm_selection)
@@ -582,6 +603,14 @@ def _load_project_allowed_mcp_names(conn: sqlite3.Connection, project_id: int) -
         bootstrap_project_mcp_bindings=_bootstrap_project_mcp_bindings,
         load_registry_mcp_names=_load_registry_mcp_names,
     )
+
+
+def _load_hands_mcp_names(conn: sqlite3.Connection, project_id: int) -> list[str]:
+    return fixer_wire_db._load_hands_mcp_names(conn, project_id)
+
+
+def _load_hands_doc_ids(conn: sqlite3.Connection, project_id: int) -> list[int]:
+    return fixer_wire_db._load_hands_doc_ids(conn, project_id)
 
 
 def _allowed_runtime_mcp_names(
@@ -1072,6 +1101,8 @@ def _select_reasoning_interactive(
     preferred_reasoning: str,
     Option: Any,
     single_select_items: Any,
+    *,
+    model: str | None = None,
 ) -> str:
     return fixer_wire_selectors._select_reasoning_interactive(
         backend,
@@ -1079,6 +1110,7 @@ def _select_reasoning_interactive(
         Option,
         single_select_items,
         backend_descriptor=_backend_descriptor,
+        model=model,
     )
 
 
@@ -1214,6 +1246,21 @@ def _maybe_configure_playwright_runtime_mode(
         available_servers,
         interactive=interactive,
         runtime_mode=runtime_mode,
+    )
+
+
+def _maybe_configure_playwright_mesh_target(
+    adapter: Any,
+    selected_servers: dict[str, dict[str, object]],
+    available_servers: dict[str, dict[str, object]],
+    *,
+    interactive: bool,
+) -> str | None:
+    return fixer_wire_launch_support._maybe_configure_playwright_mesh_target(
+        adapter,
+        selected_servers,
+        available_servers,
+        interactive=interactive,
     )
 
 
@@ -1430,6 +1477,7 @@ def _netrunner_launch_callbacks() -> fixer_wire_netrunner_launch.NetrunnerLaunch
         backend_descriptor=_backend_descriptor,
         resolve_netrunner_resume_session_id=_resolve_netrunner_resume_session_id,
         maybe_configure_playwright_runtime_mode=_maybe_configure_playwright_runtime_mode,
+        maybe_configure_playwright_mesh_target=_maybe_configure_playwright_mesh_target,
         bind_fixer_db_path_to_server_env=_bind_fixer_db_path_to_server_env,
         bind_netrunner_stateless_auth_to_server_env=_bind_netrunner_stateless_auth_to_server_env,
         bind_locked_role_to_server_env=_bind_locked_role_to_server_env,
@@ -1551,87 +1599,70 @@ def _launch_project_hands(
     with closing(sqlite3.connect(db_path)) as conn:
         _ensure_wire_schema(conn)
         project_id = _ensure_project_registered(conn, cwd)
-        saved_contexts = fixer_wire_db._list_hands_launch_contexts(conn, project_id)
         doc_tree = fixer_wire_hands_context.load_project_doc_tree(conn, project_id)
 
-    launch_mode = fixer_wire_selectors._select_hands_launch_action_interactive(
-        Option, single_select_items, has_resume=bool(saved_contexts)
-    )
-    if launch_mode == fixer_wire_selectors.HANDS_LAUNCH_RESUME and saved_contexts:
-        return _resume_project_hands_context(
-            passthrough_args,
-            state=state,
-            saved_contexts=saved_contexts,
-            doc_tree=doc_tree,
-            db_path=db_path,
-            project_id=project_id,
-            callbacks=callbacks,
-            dry_run=dry_run,
+    nav = fixer_wire_navigation.FixerTuiNavigator()
+
+    def _pick_workspace() -> str:
+        return fixer_wire_selectors._select_hands_workspace_mode_interactive(Option, single_select_items)
+
+    def _pick_lane() -> Any:
+        picked = fixer_wire_netrunner_launch.resolve_project_hands_lane(
+            state,
+            preset_backend=preset_backend,
             Option=Option,
             single_select_items=single_select_items,
+            select_lane_interactive=_select_project_hands_lane_interactive,
         )
+        if not picked.model.strip() or not picked.reasoning.strip():
+            raise RuntimeError(f"Project Hands lane {picked.provider!r} is marked ready without an explicit model/reasoning selection.")
+        return picked
 
-    workspace_mode = fixer_wire_selectors._select_hands_workspace_mode_interactive(
-        Option, single_select_items
-    )
+    def _pick_mcp() -> list[str]:
+        lane_local: Any = nav.state["lane"]
+        available_servers, _config_env_vars, _adapter, _ensure_sqlite = callbacks.load_available_servers(cwd, backend=lane_local.backend)
+        with closing(sqlite3.connect(db_path)) as conn:
+            _ensure_wire_schema(conn)
+            callbacks.sync_registry_names(conn, list(available_servers.keys()))
+            registry_meta = callbacks.load_registry_mcp_metadata(conn)
+            allowed_names = callbacks.load_project_allowed_mcp_names(conn, project_id)
+            proposed_hands_mcp = _load_hands_mcp_names(conn, project_id)
+        pool_names = callbacks.allowed_runtime_mcp_names(allowed_names, available_servers)
+        pool_names = [n for n in pool_names if n != callbacks.computer_use_mcp_name]
+        previous_mcp = [n for n in proposed_hands_mcp if n in pool_names]
+        picked = _select_mcp_interactive(pool_names, previous_mcp, registry_meta, available_servers, Option, multi_select_items)
+        out = list(picked)
+        if FORCED_MCP_SERVER in available_servers:
+            out = _normalize_names([*out, FORCED_MCP_SERVER])
+        return out
+
+    def _pick_docs() -> list[Any]:
+        with closing(sqlite3.connect(db_path)) as conn:
+            _ensure_wire_schema(conn)
+            proposed_hands_docs = _load_hands_doc_ids(conn, project_id)
+        previous_doc_ids = [doc_id for doc_id in proposed_hands_docs if any(entry.doc_id == doc_id for entry in doc_tree)]
+        selected_doc_ids = fixer_wire_selectors._select_hands_docs_interactive(doc_tree, previous_doc_ids, Option, multi_select_items)
+        return [entry for entry in doc_tree if entry.doc_id in set(selected_doc_ids)]
+
+    nav.add("workspace", _pick_workspace)
+    nav.add("lane", _pick_lane)
+    nav.add("mcp", _pick_mcp)
+    nav.add("docs", _pick_docs)
+
+    try:
+        nav.run()
+    except fixer_wire_navigation.BackNavigation:
+        raise
+    except Exception as exc:
+        if exc.__class__.__name__ == "BackNavigation":
+            raise fixer_wire_navigation.BackNavigation() from exc
+        raise
+
+    workspace_mode = nav.state["workspace"]
+    lane = nav.state["lane"]
+    selected_mcp_names = nav.state["mcp"]
+    selected_docs = nav.state["docs"]
     hotfix_mode = workspace_mode == fixer_wire_selectors.HANDS_WORKSPACE_HOTFIX
-
-    lane = fixer_wire_netrunner_launch.resolve_project_hands_lane(
-        state,
-        preset_backend=preset_backend,
-        Option=Option,
-        single_select_items=single_select_items,
-        select_lane_interactive=_select_project_hands_lane_interactive,
-    )
-    if not lane.model.strip() or not lane.reasoning.strip():
-        raise RuntimeError(
-            f"Project Hands lane {lane.provider!r} is marked ready without an explicit model/reasoning selection."
-        )
-
-    # Step 1: Architect-picked MCP servers for this Hands client (fixer_mcp is
-    # always forced on top; the picker covers the project-allowed pool).
-    available_servers, _config_env_vars, _adapter, _ensure_sqlite = callbacks.load_available_servers(
-        cwd,
-        backend=lane.backend,
-    )
-    with closing(sqlite3.connect(db_path)) as conn:
-        _ensure_wire_schema(conn)
-        callbacks.sync_registry_names(conn, list(available_servers.keys()))
-        registry_meta = callbacks.load_registry_mcp_metadata(conn)
-        allowed_names = callbacks.load_project_allowed_mcp_names(conn, project_id)
-    pool_names = callbacks.allowed_runtime_mcp_names(allowed_names, available_servers)
-    pool_names = [name for name in pool_names if name != callbacks.computer_use_mcp_name]
-    previous_mcp = (
-        [name for name in saved_contexts[0].mcp_names if name in pool_names]
-        if saved_contexts
-        else []
-    )
-    picked_mcp_names = _select_mcp_interactive(
-        pool_names,
-        previous_mcp,
-        registry_meta,
-        available_servers,
-        Option,
-        multi_select_items,
-    )
-    selected_mcp_names = list(picked_mcp_names)
-    if FORCED_MCP_SERVER in available_servers:
-        selected_mcp_names = _normalize_names([*selected_mcp_names, FORCED_MCP_SERVER])
-    else:
-        print(
-            f"[warning] {FORCED_MCP_SERVER} not found in launcher MCP set; continuing without forced attach",
-            file=sys.stderr,
-        )
-
-    # Step 2: Architect-picked project documentation (tree multi-select).
-    previous_doc_ids = saved_contexts[0].doc_ids if saved_contexts else ()
-    selected_doc_ids = fixer_wire_selectors._select_hands_docs_interactive(
-        doc_tree,
-        previous_doc_ids,
-        Option,
-        multi_select_items,
-    )
-    selected_docs = [entry for entry in doc_tree if entry.doc_id in set(selected_doc_ids)]
 
     # Step 3: isolated Safe worktree or explicit live-worktree Hotfix mode.
     if dry_run:
@@ -1648,19 +1679,6 @@ def _launch_project_hands(
     else:
         worktree_path, branch_name = fixer_wire_hands_context.create_hands_worktree(cwd)
         attached_doc_files = fixer_wire_hands_context.materialize_hands_docs(worktree_path, selected_docs)
-        with closing(sqlite3.connect(db_path)) as conn:
-            _ensure_wire_schema(conn)
-            fixer_wire_db._save_hands_launch_context(
-                conn,
-                project_id,
-                worktree_path=str(worktree_path),
-                branch_name=branch_name,
-                provider=lane.provider,
-                model=lane.model,
-                reasoning=lane.reasoning,
-                mcp_names=picked_mcp_names,
-                doc_ids=selected_doc_ids,
-            )
         print(f"[fixer-wire] Руки worktree: {worktree_path} (branch {branch_name})")
         if attached_doc_files:
             print(f"[fixer-wire] Руки attached docs: {len(attached_doc_files)} file(s) under .hands/project_docs/")
@@ -1708,107 +1726,13 @@ def _launch_project_hands(
             else "disposable Project Hands mailbox client"
         ),
     )
-    if not dry_run and not hotfix_mode:
-        external_session_id = _capture_hands_external_session_id(
-            worktree_path,
-            backend=lane.backend,
-            before_session_id=before_session_id,
-            launch_result=result,
-            callbacks=callbacks,
-        )
-        if external_session_id:
-            with closing(sqlite3.connect(db_path)) as conn:
-                _ensure_wire_schema(conn)
-                fixer_wire_db._save_hands_launch_external_id(
-                    conn,
-                    project_id,
-                    str(worktree_path),
-                    external_session_id,
-                )
-    return result
-
-
-def _resume_project_hands_context(
-    passthrough_args: Sequence[str],
-    *,
-    state: fixer_wire_netrunner_launch.ProjectHandsState,
-    saved_contexts: Sequence[fixer_wire_db.HandsLaunchContext],
-    doc_tree: Sequence[fixer_wire_hands_context.HandsDocEntry],
-    db_path: Path,
-    project_id: int,
-    callbacks: Any,
-    dry_run: bool,
-    Option: Any,
-    single_select_items: Any,
-) -> int:
-    context = fixer_wire_selectors._select_hands_resume_context_interactive(
-        saved_contexts, Option, single_select_items
-    )
-    worktree_path = Path(context.worktree_path)
-    if not dry_run and not worktree_path.is_dir():
-        raise RuntimeError(
-            f"Saved Руки worktree is missing: {worktree_path}. Start a new Руки client instead."
-        )
-    lane = next((item for item in state.lanes if item.provider == context.provider), None)
-    if lane is None:
-        raise RuntimeError(
-            f"The saved Руки context provider {context.provider!r} is no longer registered; start a new client instead."
-        )
-
-    # Refresh the attached docs snapshot inside the existing worktree so a
-    # resumed client sees current doc content for the same selection.
-    selected_docs = [entry for entry in doc_tree if entry.doc_id in set(context.doc_ids)]
-    attached_doc_files: list[str] = []
-    if not dry_run and selected_docs:
-        attached_doc_files = fixer_wire_hands_context.materialize_hands_docs(worktree_path, list(selected_docs))
-
-    selected_mcp_names = _normalize_names([*context.mcp_names, FORCED_MCP_SERVER])
-    resume_external_session_id = context.external_session_id.strip() or None
-    prompt = ""
-    if resume_external_session_id is None:
-        prompt = _build_project_hands_prompt(
-            provider_lane=lane.provider,
-            worktree_path=str(worktree_path),
-            branch_name=context.branch_name,
-            attached_doc_files=attached_doc_files,
-        )
-    else:
-        prompt = _build_project_hands_prompt(provider_lane=lane.provider)
-    print(f"[fixer-wire] Руки worktree: {worktree_path} (branch {context.branch_name})")
-    result = fixer_wire_role_launch.launch_fresh_role_session(
-        "netrunner",
-        prompt,
-        passthrough_args,
-        launch_cwd=worktree_path,
-        selected_mcp_names=selected_mcp_names,
-        resume_external_session_id=resume_external_session_id,
-        dry_run=dry_run,
-        preset_backend=lane.backend,
-        preset_model=context.model or lane.model,
-        preset_reasoning=context.reasoning or lane.reasoning,
-        dangerous_sandbox=True,
-        Option=Option,
-        single_select_items=single_select_items,
-        callbacks=_role_launch_callbacks(),
-        launch_label="resumed Project Hands mailbox client",
-    )
-    if not dry_run and resume_external_session_id is None:
-        external_session_id = _capture_hands_external_session_id(
-            worktree_path,
-            backend=lane.backend,
-            before_session_id=None,
-            launch_result=result,
-            callbacks=callbacks,
-        )
-        if external_session_id:
-            with closing(sqlite3.connect(db_path)) as conn:
-                _ensure_wire_schema(conn)
-                fixer_wire_db._save_hands_launch_external_id(
-                    conn,
-                    project_id,
-                    str(worktree_path),
-                    external_session_id,
-                )
+    _ = _capture_hands_external_session_id(
+        worktree_path,
+        backend=lane.backend,
+        before_session_id=before_session_id,
+        launch_result=result,
+        callbacks=callbacks,
+    ) if (not dry_run and not hotfix_mode) else None
     return result
 
 
@@ -1859,41 +1783,111 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from client_wires.codex_compat.ui import Option, multi_select_items, single_select_items
 
-    role = wire_args.role or _select_role_interactive(Option, single_select_items)
-    if role == SCAFFOLD_MVP_ACTION:
-        try:
-            return _launch_scaffold_interactive(Option, single_select_items)
-        except RuntimeError as exc:
-            print(f"[fixer-wire] {exc}", file=sys.stderr)
-            return 2
+    main_nav = fixer_wire_navigation.FixerTuiNavigator()
 
-    if role == UNATTACHED_FIXER_ACTION:
-        try:
-            return _launch_unattached_fixer(
+    def _pick_role() -> str:
+        return wire_args.role or _select_role_interactive(Option, single_select_items)
+
+    def _run_netrunner_branch() -> int:
+        if wire_args.netrunner_session_id is None:
+            return _launch_project_hands(
                 passthrough_args,
+                preset_backend=wire_args.netrunner_backend,
+                preset_model=wire_args.netrunner_model,
+                preset_reasoning=wire_args.netrunner_reasoning,
+                preset_mcp_names=wire_args.netrunner_mcp,
+                acceptance=wire_args.netrunner_acceptance,
                 dry_run=wire_args.dry_run,
                 Option=Option,
                 single_select_items=single_select_items,
+                multi_select_items=multi_select_items,
             )
-        except RuntimeError as exc:
-            print(f"[fixer-wire] {exc}", file=sys.stderr)
-            return 2
+        return _launch_netrunner(
+            passthrough_args,
+            preset_session_id=wire_args.netrunner_session_id,
+            preset_backend=wire_args.netrunner_backend,
+            preset_model=wire_args.netrunner_model,
+            preset_reasoning=wire_args.netrunner_reasoning,
+            preset_mcp_names=wire_args.netrunner_mcp,
+            dry_run=wire_args.dry_run,
+            Option=Option,
+            single_select_items=single_select_items,
+            multi_select_items=multi_select_items,
+            netrunner_kind=(
+                NETRUNNER_KIND_ACCEPTANCE if wire_args.netrunner_acceptance else NETRUNNER_KIND_MANUAL
+            ),
+        )
+
+    def _run_fixer_branch() -> int:
+        if wire_args.fixer_resume_latest and wire_args.fixer_session_id:
+            raise RuntimeError("Use only one of --fixer-resume-latest or --fixer-session-id.")
+        return _launch_fixer(
+            passthrough_args,
+            dry_run=wire_args.dry_run,
+            preset_resume_latest=wire_args.fixer_resume_latest,
+            preset_resume_session_id=wire_args.fixer_session_id,
+            Option=Option,
+            single_select_items=single_select_items,
+        )
+
+    def _run_overseer_branch() -> int:
+        return _launch_overseer(
+            passthrough_args,
+            dry_run=wire_args.dry_run,
+            Option=Option,
+            single_select_items=single_select_items,
+        )
+
+    main_nav.add("role", _pick_role)
+    main_nav.add("netrunner", _run_netrunner_branch)
+    main_nav.add("fixer", _run_fixer_branch)
+    main_nav.add("overseer", _run_overseer_branch)
+
+    try:
+        main_nav.run()
+    except fixer_wire_navigation.BackNavigation:
+        print("Cancelled.")
+        raise SystemExit(130)
+    except Exception as exc:
+        if exc.__class__.__name__ == "BackNavigation":
+            print("Cancelled.")
+            raise SystemExit(130)
+        raise
+    role = main_nav.state["role"]
+    if main_nav.state.get("netrunner") is not None:
+        return int(main_nav.state["netrunner"] or 0)
+    if main_nav.state.get("fixer") is not None:
+        return int(main_nav.state["fixer"] or 0)
+    if main_nav.state.get("overseer") is not None:
+        return int(main_nav.state["overseer"] or 0)
+    if role == SCAFFOLD_MVP_ACTION:
+        return _launch_scaffold_interactive(Option, single_select_items)
+    if role == UNATTACHED_FIXER_ACTION:
+        return _launch_unattached_fixer(
+            passthrough_args,
+            dry_run=wire_args.dry_run,
+            Option=Option,
+            single_select_items=single_select_items,
+        )
 
     if role == "netrunner":
-        try:
-            if wire_args.netrunner_session_id is None:
-                return _launch_project_hands(
-                    passthrough_args,
-                    preset_backend=wire_args.netrunner_backend,
-                    preset_model=wire_args.netrunner_model,
-                    preset_reasoning=wire_args.netrunner_reasoning,
-                    preset_mcp_names=wire_args.netrunner_mcp,
-                    acceptance=wire_args.netrunner_acceptance,
-                    dry_run=wire_args.dry_run,
-                    Option=Option,
-                    single_select_items=single_select_items,
-                    multi_select_items=multi_select_items,
-                )
+        top_nav = fixer_wire_navigation.FixerTuiNavigator()
+
+        def _run_hands() -> int:
+            return _launch_project_hands(
+                passthrough_args,
+                preset_backend=wire_args.netrunner_backend,
+                preset_model=wire_args.netrunner_model,
+                preset_reasoning=wire_args.netrunner_reasoning,
+                preset_mcp_names=wire_args.netrunner_mcp,
+                acceptance=wire_args.netrunner_acceptance,
+                dry_run=wire_args.dry_run,
+                Option=Option,
+                single_select_items=single_select_items,
+                multi_select_items=multi_select_items,
+            )
+
+        def _run_compat() -> int:
             return _launch_netrunner(
                 passthrough_args,
                 preset_session_id=wire_args.netrunner_session_id,
@@ -1906,14 +1900,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 single_select_items=single_select_items,
                 multi_select_items=multi_select_items,
                 netrunner_kind=(
-                    NETRUNNER_KIND_ACCEPTANCE
-                    if wire_args.netrunner_acceptance
-                    else NETRUNNER_KIND_MANUAL
+                    NETRUNNER_KIND_ACCEPTANCE if wire_args.netrunner_acceptance else NETRUNNER_KIND_MANUAL
                 ),
             )
-        except RuntimeError as exc:
+
+        top_nav.add("role", lambda: role)
+        if wire_args.netrunner_session_id is None:
+            top_nav.add("hands", _run_hands)
+        else:
+            top_nav.add("compat", _run_compat)
+
+        try:
+            top_nav.run()
+        except fixer_wire_navigation.BackNavigation:
+            raise fixer_wire_navigation.BackNavigation()
+        except Exception as exc:
+            if exc.__class__.__name__ == "BackNavigation":
+                raise fixer_wire_navigation.BackNavigation() from exc
+            if not isinstance(exc, RuntimeError):
+                raise
             print(f"[fixer-wire] {exc}", file=sys.stderr)
             return 2
+        return int(top_nav.state.get("hands", top_nav.state.get("compat", 0)) or 0)
 
     if role == "fixer":
         try:

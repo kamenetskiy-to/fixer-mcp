@@ -134,7 +134,7 @@ def main() -> int:
             assert db_path.is_file(), "server did not initialize a fresh SQLite DB"
             assert_no_host_paths(db_path)
 
-            overseer = client.call_tool("assume_role", {"role": "overseer", "token": "supersecret"})
+            overseer = client.call_tool("assume_role", {"role": "overseer"})
             assert overseer["status"] == "success", overseer
 
             alpha = client.call_tool(
@@ -171,7 +171,7 @@ def main() -> int:
 
             fixer = client.call_tool(
                 "assume_role",
-                {"role": "fixer", "cwd": str(alpha_dir), "token": "supersecret"},
+                {"role": "fixer", "cwd": str(alpha_dir)},
             )
             assert fixer["status"] == "success", fixer
 

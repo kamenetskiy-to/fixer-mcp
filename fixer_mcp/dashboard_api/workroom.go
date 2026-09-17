@@ -191,11 +191,29 @@ var dashboardHandsProviderSpecs = map[string]dashboardHandsProviderSpec{
 			"gpt-5.3-codex",
 			"gpt-5.3-codex-spark",
 			"gpt-5.2",
+			"opencode-go/glm-5.3-flash",
 			"deepseek/deepseek-v4-flash-0731",
 			"deepseek-v4-flash",
 			"deepseek/deepseek-v4-pro-0813",
 		},
 		reasoningOptions: []string{"low", "medium", "high", "xhigh", "max", "ultra"},
+	},
+	"commandcode": {
+		defaultModel:     "commandcode/zai-org/glm-5.3-flash",
+		defaultReasoning: "medium",
+		modelOptions: []string{
+			"commandcode/meta/muse-spark-1.2-contributor",
+			"commandcode/deepseek/deepseek-v4-flash",
+			"commandcode/deepseek/deepseek-v4-flash-vision-exp",
+			"commandcode/deepseek/deepseek-v4-pro",
+			"commandcode/zai-org/glm-5.3-flash",
+			"commandcode/gpt-5.6-sol",
+			"commandcode/minimaxai/minimax-m3",
+			"commandcode/moonshotai/kimi-k3",
+			"commandcode/qwen/qwen3.8-27b",
+			"commandcode/qwen/qwen3.8-max",
+		},
+		reasoningOptions: []string{"low", "medium", "high"},
 	},
 	"claude": {
 		defaultModel:     "sonnet",
@@ -540,7 +558,7 @@ func (r *Repository) ProjectWorkroomSnapshot(ctx context.Context, projectID int,
 		&output.HandsActorID, &output.HandsDisplayName, &output.HandsAuthorityState, &output.HandsDefaultLane); err != nil {
 		return ProjectWorkroomSnapshot{}, err
 	}
-	for _, provider := range []string{"codex", "claude", "kimi-code", "antigravity"} {
+	for _, provider := range []string{"codex", "commandcode", "claude", "kimi-code", "antigravity"} {
 		model, reasoning, _ := dashboardHandsProviderConfig(provider)
 		output.HandsLanes = append(output.HandsLanes, WorkroomHandsLane{
 			Provider: provider, Model: model, Reasoning: reasoning,

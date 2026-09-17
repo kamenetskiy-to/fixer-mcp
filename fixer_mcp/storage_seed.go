@@ -699,6 +699,15 @@ var liveMcpMarketplaceCatalog = []mcpMarketplaceCatalogSpec{
 		Portability:      "portable",
 		InstallHint:      "npx -y @z_ai/mcp-server; needs Z_AI_API_KEY and Z_AI_MODE=ZAI.",
 	},
+	{
+		Name:             "quern",
+		ShortDescription: "Local mobile debug server: iOS/Android simulator & device control, mitmproxy interception, UI automation, and log capture.",
+		Category:         "Coding",
+		HowTo:            "Use for mobile UI testing, network request interception/mocking, log inspection, and simulator/device automation.",
+		Portability:      "local-only",
+		InstallHint:      "curl -fsSL https://quern.dev/install.sh | bash; start with `quern start`.",
+		IsDefault:        boolPtr(true),
+	},
 }
 
 func applyMcpMarketplaceCatalog() error {

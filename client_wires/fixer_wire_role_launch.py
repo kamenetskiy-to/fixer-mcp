@@ -11,6 +11,8 @@ import sys
 from typing import Any, Callable, Sequence
 
 from client_wires.backends import is_codex_backend, normalize_backend_name
+from client_wires.backends.codex_adapter import codex_default_model_for_family
+from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_prompts
 from client_wires import fixer_wire_resume
 from client_wires import fixer_wire_selectors
@@ -245,7 +247,12 @@ def launch_fresh_role_session(
     )
     execution_prefs = ExecutionPreferences(dangerous_sandbox=dangerous_sandbox, auto_approve=True)
     codex_args: list[str] = []
-    if not resume_external_session_id:
+    resume_needs_codex_provider_config = (
+        bool(resume_external_session_id)
+        and normalize_backend_name(getattr(adapter, "name", "")) == "codex"
+        and str(launch_selection.model).startswith("commandcode/")
+    )
+    if not resume_external_session_id or resume_needs_codex_provider_config:
         codex_args.extend(adapter.build_llm_args(llm_selection))
     codex_args.extend(_role_interactive_execution_args(adapter, execution_prefs, role=role))
     codex_args = callbacks.append_codex_apps_gate(codex_args, adapter, allow_computer_use=False)
@@ -263,11 +270,17 @@ def launch_fresh_role_session(
         backend=launch_selection.backend,
         mcp_names=selected_mcp_names,
     )
+    auto_submitted_interactive_prompt = False
     if launch_prompt:
         # Kimi Code must stay interactive in every Project Hands launch. Never
         # add -p/--print here: the Architect enters the prompt in the Kimi TUI,
         # exactly like fixer -> fixer.
-        command.extend(adapter.build_prompt_args(launch_prompt))
+        build_interactive_command = getattr(adapter, "build_interactive_command", None)
+        if callable(build_interactive_command) and not resume_external_session_id:
+            command = list(build_interactive_command(option_args, launch_prompt))
+            auto_submitted_interactive_prompt = True
+        else:
+            command.extend(adapter.build_prompt_args(launch_prompt))
 
     env = callbacks.build_backend_launch_env(
         adapter,
@@ -276,6 +289,7 @@ def launch_fresh_role_session(
         load_llm_env=_load_llm_env,
         merge_env_with_os=_merge_env_with_os,
     )
+    env = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(env, selected_servers)
     _apply_selected_config_paths(
         env,
         selected_config_paths=selected_config_paths,
@@ -295,9 +309,10 @@ def launch_fresh_role_session(
     if (
         launch_selection.backend in {"kimi-code", "commandcode"}
         and launch_prompt
+        and not auto_submitted_interactive_prompt
         and not dry_run
     ):
-        print("[fixer-wire] kimi shell mode cannot auto-submit; paste the following into the Kimi TUI:")
+        print("[fixer-wire] provider shell mode cannot auto-submit; paste the following into the provider TUI:")
         print(launch_prompt)
     if dry_run:
         return 0
@@ -328,10 +343,12 @@ def launch_fixer(
     cwd = (launch_cwd or Path.cwd()).resolve()
     callbacks.assert_project_is_registered(cwd)
     resume_provider = "codex"
+    resume_subscription_provider = "openai"
     resume_session_id: str | None = None
     if preset_resume_session_id:
         resume_selection = fixer_wire_resume.parse_fixer_resume_selection(str(preset_resume_session_id))
         resume_provider = resume_selection.provider
+        resume_subscription_provider = resume_selection.subscription_provider or "openai"
         resume_session_id = resume_selection.session_id
         if not resume_session_id:
             raise RuntimeError("Explicit fixer session id must be non-empty.")
@@ -340,6 +357,7 @@ def launch_fixer(
             callbacks.resolve_latest_fixer_resume_session_id(cwd)
         )
         resume_provider = resume_selection.provider
+        resume_subscription_provider = resume_selection.subscription_provider or "openai"
         resume_session_id = resume_selection.session_id
     else:
         launch_mode = callbacks.select_fixer_launch_action_interactive(Option, single_select_items)
@@ -354,6 +372,7 @@ def launch_fixer(
             )
             resume_selection = fixer_wire_resume.parse_fixer_resume_selection(raw_selection)
             resume_provider = resume_selection.provider
+            resume_subscription_provider = resume_selection.subscription_provider or "openai"
             resume_session_id = resume_selection.session_id
         else:
             available_servers, _config_env_vars, _adapter, _ensure_sqlite_scaffold = callbacks.load_available_servers(cwd)
@@ -387,6 +406,8 @@ def launch_fixer(
     )
 
     model = str(getattr(adapter, "default_model", callbacks.fixer_wire_model))
+    if resume_provider == "codex" and resume_subscription_provider in {"opencode-go", "commandcode"}:
+        model = codex_default_model_for_family(resume_subscription_provider)
     effort = str(getattr(adapter, "default_reasoning", callbacks.fixer_wire_reasoning_effort))
     llm_selection = LLMSelection(
         display_model=model,
@@ -399,7 +420,12 @@ def launch_fixer(
     execution_prefs = ExecutionPreferences(dangerous_sandbox=True, auto_approve=True)
 
     codex_args: list[str] = []
-    if not resume_session_id:
+    resume_needs_codex_provider_config = (
+        bool(resume_session_id)
+        and resume_provider == "codex"
+        and resume_subscription_provider in {"opencode-go", "commandcode"}
+    )
+    if not resume_session_id or resume_needs_codex_provider_config:
         codex_args.extend(adapter.build_llm_args(llm_selection))
     codex_args.extend(_role_interactive_execution_args(adapter, execution_prefs, role="fixer"))
     codex_args = callbacks.append_codex_apps_gate(codex_args, adapter, allow_computer_use=False)
@@ -421,6 +447,7 @@ def launch_fixer(
         load_llm_env=_load_llm_env,
         merge_env_with_os=_merge_env_with_os,
     )
+    env = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(env, selected_servers)
     _apply_selected_config_paths(
         env,
         selected_config_paths=selected_config_paths,

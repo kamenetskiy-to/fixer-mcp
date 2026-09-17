@@ -127,7 +127,7 @@ func TestCreateTask_FixerRole_NoRegression(t *testing.T) {
 	}
 }
 
-func TestCompleteTask_RequiresDocImpactProposal(t *testing.T) {
+func TestCompleteTask_AllowsSubmissionWithoutDocImpactProposal(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -153,32 +153,26 @@ func TestCompleteTask_RequiresDocImpactProposal(t *testing.T) {
 		t.Fatalf("seed status update failed: %v", err)
 	}
 
-	callResult, _, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
+	callResult, out, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
 		SessionId:   1,
 		FinalReport: "Attempted completion without proposal",
 	})
-	if err == nil {
-		t.Fatal("expected missing doc-impact proposal error")
+	if err != nil {
+		t.Fatalf("expected submission to remain reviewable without proposal: %v", err)
 	}
-	if callResult == nil || !callResult.IsError {
-		t.Fatal("expected MCP error result for missing proposal")
-	}
-	if !strings.Contains(err.Error(), "missing mandatory documentation-impact proposal") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(err.Error(), "propose_doc_update") {
-		t.Fatalf("expected actionable guidance, got: %v", err)
+	if callResult != nil || out.Status != "success" {
+		t.Fatalf("unexpected complete_task output: result=%+v out=%+v", callResult, out)
 	}
 
 	var status, report string
 	if qErr := db.QueryRow("SELECT status, COALESCE(report, '') FROM session WHERE id = 1").Scan(&status, &report); qErr != nil {
 		t.Fatalf("query session state failed: %v", qErr)
 	}
-	if status != "in_progress" {
-		t.Fatalf("expected session to remain in_progress, got %q", status)
+	if status != "review" {
+		t.Fatalf("expected session to move to review, got %q", status)
 	}
-	if report != "" {
-		t.Fatalf("expected report to remain unchanged, got %q", report)
+	if report != "Attempted completion without proposal" {
+		t.Fatalf("expected raw report to be retained, got %q", report)
 	}
 }
 
@@ -768,7 +762,7 @@ func TestCheckoutProposeCompleteUsesGlobalForeignKeysForProjectScopedSession(t *
 	}
 }
 
-func TestCompleteTask_RejectsUnstructuredFinalReport(t *testing.T) {
+func TestCompleteTask_PreservesUnstructuredFinalReportForReview(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -797,18 +791,22 @@ func TestCompleteTask_RejectsUnstructuredFinalReport(t *testing.T) {
 	authorizedProjectId = 1
 	authorizedSessionId = 1
 
-	callResult, _, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
+	callResult, out, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
 		SessionId:   1,
-		FinalReport: "plain text is no longer acceptable",
+		FinalReport: "plain text is retained as review evidence",
 	})
-	if err == nil {
-		t.Fatal("expected final report schema rejection")
+	if err != nil {
+		t.Fatalf("expected unstructured report to be accepted: %v", err)
 	}
-	if callResult == nil || !callResult.IsError {
-		t.Fatal("expected MCP error result")
+	if callResult != nil || out.Status != "success" {
+		t.Fatalf("unexpected complete_task output: result=%+v out=%+v", callResult, out)
 	}
-	if !strings.Contains(err.Error(), "final_report must be valid JSON") {
-		t.Fatalf("unexpected error: %v", err)
+	var status, report string
+	if err := testDB.QueryRow("SELECT status, COALESCE(report, '') FROM session WHERE id = 1").Scan(&status, &report); err != nil {
+		t.Fatalf("query submitted report: %v", err)
+	}
+	if status != "review" || report != "plain text is retained as review evidence" {
+		t.Fatalf("expected raw report in review, status=%q report=%q", status, report)
 	}
 }
 

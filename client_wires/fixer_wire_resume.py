@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from client_wires.backends import SUPPORTED_BACKENDS, available_backend_descriptors, is_codex_backend, normalize_backend_name
+from client_wires.backends.codex_adapter import codex_default_model_for_family, codex_model_family_for_model, codex_model_family_label
 from client_wires import fixer_wire_db
 from client_wires import fixer_wire_selectors
 
@@ -30,16 +31,18 @@ class ResumeSessionSummary:
     model: str = ""
     reasoning: str = ""
     origin: str = "provider_history"
+    subscription_provider: str = ""
 
 
 @dataclass(frozen=True)
 class FixerResumeSelection:
     provider: str
     session_id: str
+    subscription_provider: str = ""
 
     @property
     def selector_value(self) -> str:
-        return format_fixer_resume_selection(self.provider, self.session_id)
+        return format_fixer_resume_selection(self.provider, self.session_id, self.subscription_provider)
 
 
 def summary_provider(summary: Any) -> str:
@@ -55,10 +58,24 @@ def summary_provider(summary: Any) -> str:
     )
 
 
-def format_fixer_resume_selection(provider: str, session_id: str) -> str:
+def summary_subscription_provider(summary: Any) -> str:
+    explicit = str(getattr(summary, "subscription_provider", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    backend = summary_provider(summary)
+    model = str(getattr(summary, "model", "") or "").strip()
+    if backend in {"codex", "commandcode"}:
+        return codex_model_family_for_model(model) if model else ("commandcode" if backend == "commandcode" else "openai")
+    return backend
+
+
+def format_fixer_resume_selection(provider: str, session_id: str, subscription_provider: str = "") -> str:
     normalized = normalize_backend_name(provider)
     clean_session_id = str(session_id).strip()
     if is_codex_backend(normalized):
+        subscription = subscription_provider.strip().lower()
+        if subscription and subscription != "openai":
+            return f"codex/{subscription}:{clean_session_id}"
         return clean_session_id
     return f"{normalized}:{clean_session_id}"
 
@@ -67,10 +84,12 @@ def parse_fixer_resume_selection(value: str) -> FixerResumeSelection:
     selected = str(value).strip()
     if ":" in selected:
         maybe_provider, maybe_session_id = selected.split(":", 1)
+        if maybe_provider.startswith("codex/") and maybe_session_id.strip():
+            return FixerResumeSelection("codex", maybe_session_id.strip(), maybe_provider.split("/", 1)[1])
         normalized = normalize_backend_name(maybe_provider)
         if normalized in SUPPORTED_BACKENDS and maybe_session_id.strip():
-            return FixerResumeSelection(normalized, maybe_session_id.strip())
-    return FixerResumeSelection("codex", selected)
+            return FixerResumeSelection(normalized, maybe_session_id.strip(), normalized if normalized != "codex" else "openai")
+    return FixerResumeSelection("codex", selected, "openai")
 
 
 def wrap_resume_summary(summary: Any, provider: str, *, log_path: Path | None = None) -> ResumeSessionSummary:
@@ -85,6 +104,7 @@ def wrap_resume_summary(summary: Any, provider: str, *, log_path: Path | None = 
         model=str(getattr(summary, "model", "") or ""),
         reasoning=str(getattr(summary, "reasoning", "") or ""),
         origin=str(getattr(summary, "origin", "provider_history") or "provider_history"),
+        subscription_provider=summary_subscription_provider(summary),
     )
 
 
@@ -108,6 +128,7 @@ def _summary_with_metadata(
     model: str = "",
     reasoning: str = "",
     origin: str,
+    subscription_provider: str = "",
 ) -> ResumeSessionSummary:
     default_model, default_reasoning = _backend_defaults(provider)
     return ResumeSessionSummary(
@@ -121,6 +142,11 @@ def _summary_with_metadata(
         model=model.strip() or default_model,
         reasoning=reasoning.strip() or default_reasoning,
         origin=origin,
+        subscription_provider=(subscription_provider.strip().lower() or (
+            codex_model_family_for_model(model)
+            if normalize_backend_name(provider) in {"codex", "commandcode"}
+            else normalize_backend_name(provider)
+        )),
     )
 
 
@@ -464,9 +490,26 @@ def _provider_metadata_from_records(records: Sequence[dict[str, Any]]) -> tuple[
     return model, reasoning
 
 
+def _subscription_provider_from_records(records: Sequence[dict[str, Any]]) -> str:
+    for record in records:
+        candidate = _first_string_for_keys(record, ("model_provider", "modelProvider", "provider")).lower()
+        if candidate in {"openai", "opencode-go", "commandcode"}:
+            return candidate
+    return ""
+
+
+def _canonical_subscription_model(model: str, subscription_provider: str) -> str:
+    clean = model.strip()
+    if not clean or subscription_provider == "openai" or clean.startswith(f"{subscription_provider}/"):
+        return clean
+    return f"{subscription_provider}/{clean}"
+
+
 def _codex_summary_with_metadata(summary: Any, log_path: Path, cwd: Path) -> ResumeSessionSummary:
     records = _iter_jsonl_records(log_path)
     model, reasoning = _provider_metadata_from_records(records)
+    subscription_provider = _subscription_provider_from_records(records) or codex_model_family_for_model(model)
+    model = _canonical_subscription_model(model, subscription_provider)
     return _summary_with_metadata(
         provider="codex",
         session_id=str(summary.session_id),
@@ -478,6 +521,7 @@ def _codex_summary_with_metadata(summary: Any, log_path: Path, cwd: Path) -> Res
         model=model,
         reasoning=reasoning,
         origin="codex_session_log",
+        subscription_provider=subscription_provider,
     )
 
 
@@ -871,6 +915,52 @@ def _load_antigravity_overseer_resume_summaries(
     return summaries[:limit]
 
 
+def _commandcode_project_store_slug(cwd: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(cwd.resolve())).strip("-").lower()
+
+
+def _load_commandcode_fixer_resume_summaries(
+    cwd: Path,
+    *,
+    limit: int,
+    session_is_fixer: Callable[[Path], bool],
+    store_root: Path | None = None,
+) -> list[ResumeSessionSummary]:
+    project_dir = (store_root or (Path.home() / ".commandcode" / "projects")) / _commandcode_project_store_slug(cwd)
+    if not project_dir.is_dir():
+        return []
+
+    summaries: list[ResumeSessionSummary] = []
+    for log_path in sorted(project_dir.glob("*.jsonl"), key=_file_time, reverse=True):
+        if log_path.name.endswith(".checkpoints.jsonl") or not session_is_fixer(log_path):
+            continue
+        records = _iter_jsonl_records(log_path)
+        header = records[0] if records else {}
+        session_id = str(header.get("id", "") or header.get("sessionId", "") or log_path.stem)
+        created, updated = _summary_times_from_records(records, fallback=_file_time(log_path))
+        model, reasoning = _provider_metadata_from_records(records)
+        subscription_provider = "commandcode"
+        model = _canonical_subscription_model(model, subscription_provider)
+        summaries.append(
+            _summary_with_metadata(
+                provider="commandcode",
+                session_id=session_id,
+                created=created,
+                updated=updated,
+                preview=_preview_from_records(records, fallback=log_path.stem),
+                log_path=log_path,
+                cwd=cwd,
+                model=model,
+                reasoning=reasoning,
+                origin="commandcode_session_store",
+                subscription_provider=subscription_provider,
+            )
+        )
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
 def _load_claude_fixer_resume_summaries(
     cwd: Path,
     *,
@@ -1238,6 +1328,118 @@ def _load_kimi_fixer_resume_summaries(
     )
 
 
+# Every role bootstrap prompt this launcher submits starts with this phrase.
+_ROLE_BOOTSTRAP_MARKERS = ("Activate skill $",)
+
+# Pi keeps one agent store directory per resolved cwd under
+# `<agent dir>/sessions/`. The directory name is Pi's own safe path from
+# `getDefaultSessionDirPath()`: drop a single leading slash, replace every `/`,
+# `\` and `:` with `-`, wrap the result in `--`. Session files inside are JSONL
+# named `<created iso>_<session id>.jsonl`, and the first record is the session
+# header that repeats the id and the cwd.
+PI_SESSION_STORE_RELATIVE_ROOT = Path(".pi") / "agent" / "sessions"
+
+
+def _pi_project_session_dir(cwd: Path, *, store_root: Path | None = None) -> Path:
+    resolved = str(cwd.resolve())
+    trimmed = resolved[1:] if resolved[:1] in {"/", "\\"} else resolved
+    safe_path = f"--{re.sub(r'[/\\:]', '-', trimmed)}--"
+    return (store_root or (Path.home() / PI_SESSION_STORE_RELATIVE_ROOT)) / safe_path
+
+
+def _pi_session_id(log_path: Path, records: Sequence[dict[str, Any]]) -> str:
+    for record in records:
+        if str(record.get("type", "")).casefold() == "session":
+            session_id = str(record.get("id", "") or "").strip()
+            if session_id:
+                return session_id
+    return log_path.stem.split("_", 1)[-1].strip() or log_path.stem
+
+
+def _pi_metadata_from_records(records: Sequence[dict[str, Any]]) -> tuple[str, str]:
+    # Pi writes the model in a `model_change` record and the reasoning level in
+    # a `thinking_level_change` record; neither uses the generic key names the
+    # other providers' metadata reader looks for.
+    model = ""
+    reasoning = ""
+    for record in records:
+        if not model:
+            model = _first_string_for_keys(record, ("modelId", "model_id"))
+        if not reasoning:
+            reasoning = _first_string_for_keys(record, ("thinkingLevel",))
+        if model and reasoning:
+            break
+    return model, reasoning
+
+
+def _pi_preview_from_records(records: Sequence[dict[str, Any]], *, fallback: str) -> str:
+    # Every provider store starts with the same launcher bootstrap prompt. Pi
+    # keeps it verbatim, so the raw first user message would make every Fixer
+    # entry in the picker look identical.
+    for record in records:
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        for text in _message_preview_texts(message):
+            clean = " ".join(str(text).split())
+            if not _is_informative_preview_text(clean):
+                continue
+            if any(marker in clean for marker in _ROLE_BOOTSTRAP_MARKERS):
+                continue
+            return clean
+    return _preview_from_records(records, fallback=fallback)
+
+
+def _load_pi_fixer_resume_summaries(
+    cwd: Path,
+    *,
+    limit: int,
+    session_is_fixer: Callable[[Path], bool],
+    store_root: Path | None = None,
+) -> list[ResumeSessionSummary]:
+    if limit <= 0:
+        return []
+
+    project_dir = _pi_project_session_dir(cwd, store_root=store_root)
+    if not project_dir.is_dir():
+        return []
+
+    summaries: list[ResumeSessionSummary] = []
+    for log_path in sorted(project_dir.glob("*.jsonl"), key=_file_time, reverse=True):
+        if not session_is_fixer(log_path):
+            continue
+        records = _iter_jsonl_records(log_path)
+        header = records[0] if records else {}
+        recorded_cwd = str(header.get("cwd", "") or "")
+        if recorded_cwd and Path(recorded_cwd).resolve() != cwd.resolve():
+            continue
+        fallback = _file_time(log_path)
+        created, updated = _summary_times_from_records(records, fallback=fallback)
+        # Pi appends to a full-transcript JSONL, so the record scan above stops
+        # well before the last turn of a long session. The file mtime is the
+        # honest last-activity time and the picker sorts on it.
+        updated = max(updated, fallback)
+        model, reasoning = _pi_metadata_from_records(records)
+        summaries.append(
+            _summary_with_metadata(
+                provider="pi",
+                session_id=_pi_session_id(log_path, records),
+                created=created,
+                updated=updated,
+                preview=_pi_preview_from_records(records, fallback=log_path.stem),
+                log_path=log_path,
+                cwd=cwd,
+                model=model,
+                reasoning=reasoning,
+                origin="pi_agent_session_store",
+                subscription_provider=_subscription_provider_from_records(records),
+            )
+        )
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
 def load_fixer_resume_alias_session_ids(
     cwd: Path,
     *,
@@ -1271,7 +1473,10 @@ def load_fixer_resume_summaries(
         explicit_session_ids = load_alias_session_ids(cwd)
         for summary in summaries:
             if str(summary.session_id) in explicit_session_ids:
-                fixer_summaries.append(wrap_resume_summary(summary, "codex"))
+                if log_path := find_session_log(summary.session_id, created=summary.created, updated=summary.updated):
+                    fixer_summaries.append(_codex_summary_with_metadata(summary, log_path, cwd))
+                else:
+                    fixer_summaries.append(wrap_resume_summary(summary, "codex"))
                 if len(fixer_summaries) >= limit:
                     break
                 continue
@@ -1280,16 +1485,18 @@ def load_fixer_resume_summaries(
                 continue
             if not session_is_fixer(log_path):
                 continue
-            fixer_summaries.append(wrap_resume_summary(summary, "codex", log_path=log_path))
+            fixer_summaries.append(_codex_summary_with_metadata(summary, log_path, cwd))
             if len(fixer_summaries) >= limit:
                 break
 
     provider_loaders = (
+        _load_commandcode_fixer_resume_summaries,
         _load_claude_fixer_resume_summaries,
         _load_droid_fixer_resume_summaries,
         _load_junie_fixer_resume_summaries,
         _load_antigravity_fixer_resume_summaries,
         _load_kimi_fixer_resume_summaries,
+        _load_pi_fixer_resume_summaries,
     )
     for provider_loader in provider_loaders:
         remaining = limit
@@ -1416,7 +1623,11 @@ def resolve_latest_fixer_resume_session_id(
         if is_codex_backend(provider) and codex_session_log_has_active_writer(getattr(summary, "log_path", None)):
             active_codex_count += 1
             continue
-        return format_fixer_resume_selection(provider, str(summary.session_id))
+        return format_fixer_resume_selection(
+            provider,
+            str(summary.session_id),
+            summary_subscription_provider(summary),
+        )
     if active_codex_count:
         raise RuntimeError(
             "All discovered Codex Fixer sessions are currently active. "

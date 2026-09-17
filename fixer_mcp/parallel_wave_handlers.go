@@ -61,7 +61,7 @@ type CreateNetrunnerWaveInput struct {
 	MaxTotalSessions        int              `json:"max_total_sessions,omitempty" jsonschema:"Root-only total session safety budget across the wave tree. Defaults to 128; maximum 2048."`
 	ReviewPolicy            string           `json:"review_policy,omitempty" jsonschema:"Review policy for the wave: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner after all workers are terminal; use only when explicitly requested by the Architect or for a very large parallel wave)."`
 	ReviewBackend           string           `json:"review_backend,omitempty" jsonschema:"Backend for an automatic reviewer. Defaults to codex."`
-	ReviewModel             string           `json:"review_model,omitempty" jsonschema:"Model for an automatic reviewer. Defaults to opencode-go/deepseek-v4-flash."`
+	ReviewModel             string           `json:"review_model,omitempty" jsonschema:"Model for an automatic reviewer. Defaults to gpt-5.6-luna."`
 	ReviewReasoning         string           `json:"review_reasoning,omitempty" jsonschema:"Reasoning level for an automatic reviewer. Defaults to high."`
 }
 
@@ -84,7 +84,7 @@ type LaunchNetrunnerWaveInput struct {
 	TimeoutSeconds  int                      `json:"timeout_seconds,omitempty" jsonschema:"Optional startup metadata wait in seconds. Default 120; max 21600."`
 	ReviewPolicy    string                   `json:"review_policy,omitempty" jsonschema:"Optional review policy override: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner only when explicitly requested)."`
 	ReviewBackend   string                   `json:"review_backend,omitempty" jsonschema:"Optional automatic reviewer backend. Defaults to codex."`
-	ReviewModel     string                   `json:"review_model,omitempty" jsonschema:"Optional automatic reviewer model. Defaults to opencode-go/deepseek-v4-flash."`
+	ReviewModel     string                   `json:"review_model,omitempty" jsonschema:"Optional automatic reviewer model. Defaults to gpt-5.6-luna."`
 	ReviewReasoning string                   `json:"review_reasoning,omitempty" jsonschema:"Optional automatic reviewer reasoning. Defaults to high."`
 }
 
@@ -980,7 +980,7 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		        COALESCE(acceptance_session_id, 0),
 		        COALESCE(review_policy, 'manual'),
 		        COALESCE(review_backend, 'codex'),
-		        COALESCE(NULLIF(review_model, 'opencode-go/deepseek-v4-pro'), 'opencode-go/deepseek-v4-flash'),
+			        COALESCE(NULLIF(review_model, 'opencode-go/deepseek-v4-pro'), 'gpt-5.6-luna'),
 		        COALESCE(review_reasoning, 'high'),
 		        `+epicDocColumn+`
 		        COALESCE(failure_reason, ''),
@@ -1596,22 +1596,21 @@ func validateWorkerCompletionState(projectCWD string, wave NetrunnerWaveSnapshot
 	if baseSHA == "" {
 		baseSHA = strings.TrimSpace(wave.BaseSha)
 	}
-
-	if wave.RepairAttemptCount > 0 {
-		if headSHA == baseSHA {
-			return fmt.Errorf("governed repair completion requires a committed HEAD distinct from base SHA %s", baseSHA)
-		}
-		if strings.TrimSpace(worker.HeadSha) != "" && headSHA == strings.TrimSpace(worker.HeadSha) {
-			return fmt.Errorf("governed repair completion requires a committed HEAD distinct from previous failed head %s", worker.HeadSha)
-		}
+	if baseSHA == "" {
+		return fmt.Errorf("worker base_sha is required for completion validation")
 	}
 
-	trackedNames, err := gitCommandInWorktree(worktreePath, "diff", "--name-only", baseSHA, "--")
-	if err == nil {
-		for _, path := range splitGitPathLines(trackedNames) {
-			if !parallelWaveDeclaredWriteScopeContainsPath(worker.DeclaredWriteScope, path) {
-				return fmt.Errorf("worker completion rejected: changed path %q is outside declared write scope %v", path, worker.DeclaredWriteScope)
-			}
+	if err := validateChangedParallelWaveSubmodules(worktreePath, baseSHA, headSHA); err != nil {
+		return err
+	}
+
+	trackedNamesRaw, err := gitCommandInWorktreeBytes(worktreePath, "diff", "--name-only", "-z", baseSHA, "--")
+	if err != nil {
+		return fmt.Errorf("failed to inspect changed paths: %w", err)
+	}
+	for _, path := range splitGitPathLines(string(trackedNamesRaw)) {
+		if !parallelWaveDeclaredWriteScopeContainsPath(worker.DeclaredWriteScope, path) {
+			return fmt.Errorf("worker completion rejected: changed path %q is outside declared write scope %v", path, worker.DeclaredWriteScope)
 		}
 	}
 
@@ -1621,8 +1620,15 @@ func validateWorkerCompletionState(projectCWD string, wave NetrunnerWaveSnapshot
 func finalizeParallelWaveWorker(projectCWD string, wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot, status string, failureReason string) (NetrunnerWaveWorkerSnapshot, error) {
 	if status == parallelWaveWorkerStatusReviewReady || status == parallelWaveWorkerStatusCompleted {
 		if valErr := validateWorkerCompletionState(projectCWD, wave, worker); valErr != nil {
-			status = parallelWaveWorkerStatusFailed
-			failureReason = valErr.Error()
+			// A dirty worktree, scope drift, or another deliverable validation
+			// issue is review evidence, not proof that the provider process
+			// failed. Keep the worker review-ready and expose the blocker.
+			status = parallelWaveWorkerStatusReviewReady
+			if strings.TrimSpace(failureReason) == "" {
+				failureReason = valErr.Error()
+			} else {
+				failureReason = strings.TrimSpace(failureReason) + "; " + valErr.Error()
+			}
 		}
 	}
 
@@ -1845,36 +1851,7 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 		candidate.CodexSessionID = externalSessionID
 	}
 
-	if reason := malformedReviewSnapshotReason(worker.SessionId, status, report, proposalIDs); reason != "" {
-		updatedWorker, err := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusFailed, reason)
-		if err != nil {
-			return parallelWaveWaitCandidate{}, false, err
-		}
-		candidate.Worker = updatedWorker
-		candidate.TerminalCondition = "failed"
-		return candidate, true, nil
-	}
-
 	if terminalCondition, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
-		candidate.TerminalCondition = terminalCondition
-		return candidate, true, nil
-	}
-
-	if status == "review" || status == "completed" {
-		targetStatus := parallelWaveWorkerStatusReviewReady
-		terminalCondition := "review_ready"
-		if status == "completed" {
-			targetStatus = parallelWaveWorkerStatusCompleted
-			terminalCondition = "completed"
-		}
-		updatedWorker, err := finalizeParallelWaveWorker(projectCWD, wave, worker, targetStatus, "")
-		if err != nil {
-			return parallelWaveWaitCandidate{}, false, err
-		}
-		candidate.Worker = updatedWorker
-		if updatedWorker.Status == parallelWaveWorkerStatusFailed {
-			terminalCondition = "failed"
-		}
 		candidate.TerminalCondition = terminalCondition
 		return candidate, true, nil
 	}
@@ -1908,6 +1885,49 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 		}
 		candidate.Worker = updatedWorker
 		candidate.TerminalCondition = "failed"
+		return candidate, true, nil
+	}
+
+	// A retry can leave review/completed state from an older attempt while the
+	// newest launcher is still writing. Never finalize or capture its worktree
+	// until that latest process has stopped.
+	process, processFound, err := latestWorkerProcessForSession(authorizedProjectId, globalSessionID)
+	if err != nil {
+		return parallelWaveWaitCandidate{}, false, err
+	}
+	if processFound && !isWorkerProcessTerminal(process) {
+		return candidate, false, nil
+	}
+
+	if reason := malformedReviewSnapshotReason(worker.SessionId, status, report, proposalIDs); reason != "" {
+		updatedWorker, err := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusReviewReady, reason)
+		if err != nil {
+			return parallelWaveWaitCandidate{}, false, err
+		}
+		candidate.Worker = updatedWorker
+		candidate.TerminalCondition = "review_ready"
+		return candidate, true, nil
+	}
+
+	if status == "review" || status == "completed" {
+		targetStatus := parallelWaveWorkerStatusReviewReady
+		terminalCondition := "review_ready"
+		if status == "completed" {
+			targetStatus = parallelWaveWorkerStatusCompleted
+			terminalCondition = "completed"
+		}
+		updatedWorker, err := finalizeParallelWaveWorker(projectCWD, wave, worker, targetStatus, "")
+		if err != nil {
+			return parallelWaveWaitCandidate{}, false, err
+		}
+		candidate.Worker = updatedWorker
+		switch updatedWorker.Status {
+		case parallelWaveWorkerStatusFailed:
+			terminalCondition = "failed"
+		case parallelWaveWorkerStatusReviewReady:
+			terminalCondition = "review_ready"
+		}
+		candidate.TerminalCondition = terminalCondition
 		return candidate, true, nil
 	}
 
@@ -2043,6 +2063,15 @@ func scheduleCreatedParallelWaveWorkers(
 	launchEpoch int,
 	startupTimeout time.Duration,
 ) error {
+	if err := blockParallelWaveWorkersWithFailedParents(wave); err != nil {
+		return err
+	}
+	var refreshedWave NetrunnerWaveSnapshot
+	refreshedWave, err := fetchNetrunnerWaveSnapshot(wave.Id, wave.ProjectId)
+	if err != nil {
+		return err
+	}
+	wave = refreshedWave
 	workerBySessionID := make(map[int]NetrunnerWaveWorkerSnapshot, len(wave.Workers))
 	for _, worker := range wave.Workers {
 		workerBySessionID[worker.SessionId] = worker
@@ -2063,8 +2092,9 @@ func scheduleCreatedParallelWaveWorkers(
 		for _, parentSessionID := range parentsByChild[worker.SessionId] {
 			parent, found := workerBySessionID[int(parentSessionID)]
 			if !found {
-				if err := markParallelWaveWorkerFailed(worker.Id, authorizedProjectId, "parent dependency missing"); err != nil {
-					return fmt.Errorf("failed to mark child worker %d failed: %v", worker.SessionId, err)
+				reason := "blocked: parent dependency missing"
+				if err := blockParallelWaveWorker(wave, worker, reason); err != nil {
+					return fmt.Errorf("failed to block child worker %d: %v", worker.SessionId, err)
 				}
 				dependencyFailed = true
 				break
@@ -2072,13 +2102,14 @@ func scheduleCreatedParallelWaveWorkers(
 
 			switch parent.Status {
 			case parallelWaveWorkerStatusReviewReady, parallelWaveWorkerStatusCleaned, parallelWaveWorkerStatusCompleted:
-			case parallelWaveWorkerStatusFailed:
+			case parallelWaveWorkerStatusFailed, parallelWaveWorkerStatusBlocked, parallelWaveWorkerStatusStopped, parallelWaveWorkerStatusStaleEpoch:
 				reason := fmt.Sprintf("parent session %d: %s", parent.SessionId, parent.FailureReason)
 				if strings.TrimSpace(parent.FailureReason) == "" {
-					reason = fmt.Sprintf("parent session %d failed", parent.SessionId)
+					reason = fmt.Sprintf("parent session %d %s", parent.SessionId, parent.Status)
 				}
-				if err := markParallelWaveWorkerFailed(worker.Id, authorizedProjectId, reason); err != nil {
-					return fmt.Errorf("failed to mark child worker %d failed: %v", worker.SessionId, err)
+				reason = "blocked: " + reason
+				if err := blockParallelWaveWorker(wave, worker, reason); err != nil {
+					return fmt.Errorf("failed to block child worker %d: %v", worker.SessionId, err)
 				}
 				dependencyFailed = true
 			default:
@@ -2328,7 +2359,7 @@ func launchParallelWaveWorkerProcess(
 		return fmt.Errorf("DB update error: %v", err)
 	}
 
-	command := execCommand("python3", commandArgs...)
+	command := execCommand(resolveFixerPythonExecutable(os.Environ()), commandArgs...)
 	commandEnv, envErr := resolveRuntimeLaunchEnv(projectCWD, os.Environ())
 	if envErr != nil {
 		log.Printf("warning: failed to resolve runtime launch env for %s: %v", projectCWD, envErr)
@@ -2408,24 +2439,65 @@ func launchParallelWaveWorkerProcess(
 }
 
 // abandonNeverLaunchedParallelWaveWorkers deterministically closes out workers
-// whose worktrees were prepared but whose process never launched: mark them
-// failed, remove their worktrees, and release their scope leases so they do
-// not remain stranded until whole-wave cleanup.
+// whose process never launched. The worker that actually failed remains
+// failed; dependency-gated or otherwise untouched workers become blocked and
+// release their leases immediately instead of remaining stranded until whole-
+// wave cleanup.
 func abandonNeverLaunchedParallelWaveWorkers(projectCWD string, waveID int, projectID int, workerFailures map[int]string, worktreePaths []string) []string {
-	for workerID, reason := range workerFailures {
-		_ = markParallelWaveWorkerFailed(workerID, projectID, reason)
+	partialWave, err := fetchNetrunnerWaveSnapshot(waveID, projectID)
+	if err == nil {
+		// A launch abort invalidates the whole admission attempt, including
+		// dependency-gated workers that never received a worktree. Close those
+		// rows out as blocked so an initialized wave cannot retain live leases.
+		for _, worker := range partialWave.Workers {
+			reason, selected := workerFailures[worker.Id]
+			switch worker.Status {
+			case parallelWaveWorkerStatusCreated:
+				if !selected {
+					reason = "launch abandoned before dependency-gated worker was scheduled"
+				}
+				if strings.TrimSpace(reason) == "" {
+					reason = "launch abandoned before dependency-gated worker was scheduled"
+				}
+				if err := blockParallelWaveWorker(partialWave, worker, "blocked: "+reason); err != nil {
+					log.Printf("warning: failed to block abandoned worker %d: %v", worker.SessionId, err)
+				}
+			case parallelWaveWorkerStatusWorktreeReady:
+				if !selected {
+					continue
+				}
+				if strings.HasPrefix(strings.TrimSpace(reason), "launch abandoned after ") {
+					if err := blockParallelWaveWorker(partialWave, worker, "blocked: "+reason); err != nil {
+						log.Printf("warning: failed to block abandoned worker %d: %v", worker.SessionId, err)
+					}
+				} else {
+					_ = markParallelWaveWorkerFailed(worker.Id, projectID, reason)
+				}
+			default:
+				if !selected {
+					continue
+				}
+				_ = markParallelWaveWorkerFailed(worker.Id, projectID, reason)
+			}
+			resolvedPath, resolveErr := resolveParallelWaveWorktreePath(projectCWD, worker.WorktreePath)
+			if resolveErr == nil {
+				if _, statErr := os.Stat(resolvedPath); statErr == nil {
+					worktreePaths = append(worktreePaths, resolvedPath)
+				}
+			}
+		}
 	}
 	rollbackFailures := rollbackParallelWaveWorktrees(projectCWD, worktreePaths)
 	if len(rollbackFailures) > 0 {
 		log.Printf("warning: wave %d launch-failure worktree rollback: %s", waveID, strings.Join(rollbackFailures, "; "))
 	}
-	partialWave, err := fetchNetrunnerWaveSnapshot(waveID, projectID)
+	partialWave, err = fetchNetrunnerWaveSnapshot(waveID, projectID)
 	if err != nil {
 		log.Printf("warning: failed to fetch wave %d after launch abandonment: %v", waveID, err)
 		return rollbackFailures
 	}
 	for _, worker := range partialWave.Workers {
-		if worker.Status != parallelWaveWorkerStatusFailed {
+		if worker.Status != parallelWaveWorkerStatusFailed && worker.Status != parallelWaveWorkerStatusBlocked {
 			continue
 		}
 		if leaseErr := releaseParallelWaveWorkerScopeLeases(partialWave, worker); leaseErr != nil {
@@ -2503,7 +2575,14 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 	launchWave := wave
 	launchWave.Workers = parallelWaveWorkersWithoutParents(wave)
 	if len(launchWave.Workers) == 0 {
-		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, fmt.Errorf("wave %d has no dependency-free workers to launch", wave.Id)
+		reason := fmt.Sprintf("wave %d has no dependency-free workers to launch", wave.Id)
+		workerFailures := make(map[int]string, len(wave.Workers))
+		for _, worker := range wave.Workers {
+			workerFailures[worker.Id] = reason
+		}
+		abandonNeverLaunchedParallelWaveWorkers(normalizedProjectCWD, wave.Id, authorizedProjectId, workerFailures, nil)
+		_ = updateParallelWaveStatus(wave.Id, authorizedProjectId, parallelWaveStatusFailed, reason, false)
+		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, errors.New(reason)
 	}
 	worktreePathByWorkerID, err := ensureParallelWaveWorkerPathsAvailable(normalizedProjectCWD, launchWave)
 	if err != nil {
@@ -2896,7 +2975,9 @@ func WaitForNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input W
 			return nil, WaitForNetrunnerWaveOutput{Status: "timed_out", Result: result}, nil
 		}
 
-		time.Sleep(time.Duration(pollIntervalSeconds) * time.Second)
+		if err := waitForContextOrDuration(ctx, time.Duration(pollIntervalSeconds)*time.Second); err != nil {
+			return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, err
+		}
 	}
 }
 

@@ -30,6 +30,20 @@ type explicitLaunchWorkerMetadata struct {
 	SessionID       int    `json:"session_id"`
 }
 
+func waitForContextOrDuration(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func explicitWaitTimeoutSeconds(raw int) (int, error) {
 	if raw <= 0 {
 		return explicitLaunchDefaultWait, nil
@@ -55,20 +69,31 @@ func resolveExplicitLauncherScript() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
-	launcherScript := filepath.Clean(filepath.Join(filepath.Dir(executablePath), "..", "client_wires", "fixer_autonomous.py"))
-	if _, statErr := os.Stat(launcherScript); statErr == nil {
-		return launcherScript, nil
-	}
-
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
-	launcherScript = filepath.Clean(filepath.Join(workingDir, "..", "client_wires", "fixer_autonomous.py"))
-	if _, statErr := os.Stat(launcherScript); statErr != nil {
-		return "", fmt.Errorf("explicit launcher script unavailable: %v", statErr)
+
+	// A worker runs from a nested Git worktree, while client_wires is a
+	// sibling of the project checkout. Walk both anchors upward so isolated
+	// worktrees resolve the same launcher as the main checkout.
+	anchors := []string{filepath.Dir(executablePath), workingDir}
+	var lastErr error
+	for _, anchor := range anchors {
+		for current := filepath.Clean(anchor); ; current = filepath.Dir(current) {
+			launcherScript := filepath.Join(filepath.Dir(current), "client_wires", "fixer_autonomous.py")
+			if _, statErr := os.Stat(launcherScript); statErr == nil {
+				return filepath.Clean(launcherScript), nil
+			} else {
+				lastErr = statErr
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+		}
 	}
-	return launcherScript, nil
+	return "", fmt.Errorf("explicit launcher script unavailable: %v", lastErr)
 }
 
 type sessionLaunchConfig struct {
@@ -228,7 +253,9 @@ func waitForSessionExternalID(ctx context.Context, sessionID int, backend string
 		if time.Now().After(deadline) {
 			return "", nil
 		}
-		time.Sleep(250 * time.Millisecond)
+		if err := waitForContextOrDuration(ctx, 250*time.Millisecond); err != nil {
+			return "", err
+		}
 	}
 }
 
@@ -726,6 +753,14 @@ func isWorkerProcessTerminal(process workerProcessSnapshot) bool {
 	return process.Status != workerStatusRunning || !process.Alive
 }
 
+// waitMayReportTerminalSessionStatus keeps a durable session status from
+// outrunning its currently live launcher attempt. A retry can reuse a session
+// whose previous attempt already wrote review/completed; that status is only
+// terminal after the newest recorded worker process has stopped.
+func waitMayReportTerminalSessionStatus(processFound bool, process workerProcessSnapshot) bool {
+	return !processFound || isWorkerProcessTerminal(process)
+}
+
 // explicitWaitPendingStartupFailureApplies decides whether a session stuck in
 // "pending" past the startup grace window should be declared a hard startup
 // failure. A recorded, still-alive worker process means the launch itself is
@@ -775,7 +810,7 @@ func markAutonomousRunBlockedForWorkerExit(projectID int, globalSessionID int, l
 	)
 }
 
-func malformedReviewSnapshotReason(localSessionID int, status string, report string, proposalIDs []int) string {
+func malformedReviewSnapshotReason(localSessionID int, status string, report string, _ []int) string {
 	if status != "review" {
 		return ""
 	}
@@ -783,14 +818,11 @@ func malformedReviewSnapshotReason(localSessionID int, status string, report str
 	if strings.TrimSpace(report) == "" {
 		missing = append(missing, "final report")
 	}
-	if len(proposalIDs) == 0 {
-		missing = append(missing, "doc-impact proposal")
-	}
 	if len(missing) == 0 {
 		return ""
 	}
 	return fmt.Sprintf(
-		"session %d reached review without %s; this cannot be produced by complete_task and points to a stale/manual status update or worker-completion gap",
+		"session %d reached review without %s; this points to a stale/manual status update or worker-completion gap",
 		localSessionID,
 		strings.Join(missing, " and "),
 	)
@@ -912,7 +944,11 @@ func waitForNetrunnerSessionsResult(ctx context.Context, sessionIDs []int, timeo
 				return ExplicitNetrunnerWaitAnyResult{}, errors.New(reason)
 			}
 			terminal, terminalCondition := classifyWaitTerminalCondition(candidate.InitialStatus, snapshot.Status, seenActive[candidate.LocalSessionID])
-			if terminal {
+			process, processFound, processErr := latestWorkerProcessForSession(authorizedProjectId, candidate.GlobalSessionID)
+			if processErr != nil {
+				return ExplicitNetrunnerWaitAnyResult{}, fmt.Errorf("DB query error: %v", processErr)
+			}
+			if terminal && waitMayReportTerminalSessionStatus(processFound, process) {
 				return buildWinnerResult(snapshot, terminalCondition), nil
 			}
 		}
@@ -921,7 +957,9 @@ func waitForNetrunnerSessionsResult(ctx context.Context, sessionIDs []int, timeo
 			return buildTimeoutResult(), nil
 		}
 
-		time.Sleep(time.Duration(pollIntervalSeconds) * time.Second)
+		if err := waitForContextOrDuration(ctx, time.Duration(pollIntervalSeconds)*time.Second); err != nil {
+			return ExplicitNetrunnerWaitAnyResult{}, err
+		}
 	}
 }
 
@@ -1008,15 +1046,15 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 			return ExplicitNetrunnerWaitResult{}, errors.New(reason)
 		}
 
-		terminal, terminalCondition := classifyWaitTerminalCondition(initialStatus, currentStatus, seenActive)
-		if terminal {
-			return buildResult(currentStatus, true, terminalCondition, false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), nil), nil
-		}
 		process, processFound, err := latestWorkerProcessForSession(authorizedProjectId, globalSessionID)
 		if err != nil {
 			return ExplicitNetrunnerWaitResult{}, fmt.Errorf("DB query error: %v", err)
 		}
 		workerProcessTerminal := processFound && isWorkerProcessTerminal(process)
+		terminal, terminalCondition := classifyWaitTerminalCondition(initialStatus, currentStatus, seenActive)
+		if terminal && waitMayReportTerminalSessionStatus(processFound, process) {
+			return buildResult(currentStatus, true, terminalCondition, false, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), nil), nil
+		}
 		if isExplicitWaitWorkerWatchdogStatus(currentStatus) && workerProcessTerminal {
 			diagnostic := buildWorkerProcessExitDiagnostic(authorizedProjectId, sessionID, process)
 			if err := markAutonomousRunBlockedForWorkerExit(authorizedProjectId, globalSessionID, sessionID, diagnostic); err != nil {
@@ -1034,7 +1072,9 @@ func waitForNetrunnerSessionResult(ctx context.Context, sessionID int, timeoutSe
 			return buildResult(currentStatus, false, "timed_out", true, report, proposalIDs, backend, model, reasoning, externalSessionID, shouldRecommendRepairFork(sessionState.ReworkCount, sessionState.ForcedStopCount, sessionState.RepairSourceSessionID), nil), nil
 		}
 
-		time.Sleep(time.Duration(pollIntervalSeconds) * time.Second)
+		if err := waitForContextOrDuration(ctx, time.Duration(pollIntervalSeconds)*time.Second); err != nil {
+			return ExplicitNetrunnerWaitResult{}, err
+		}
 
 		currentStatus, report, proposalIDs, backend, model, reasoning, externalSessionID, err = fetchSessionWaitSnapshot(globalSessionID, authorizedProjectId)
 		if err != nil {

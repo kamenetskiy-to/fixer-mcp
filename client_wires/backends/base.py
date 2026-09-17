@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 DEFAULT_BACKEND = "codex"
+DEFAULT_MCP_BACKEND = "codex"
 FIXER_ROLE_SKILL_NAMES = (
     "init-fixer",
     "init-unattached-fixer",
@@ -18,6 +19,7 @@ FIXER_ROLE_SKILL_NAMES = (
     "fixer-repo-cleanup",
     "hands-netrunner",
     "run-netrunner-wave",
+    "netrunner-backend-models",
     "review-netrunner-session",
     "complete-netrunner-session",
     "inspect-netrunner-transcript",
@@ -29,6 +31,8 @@ FIXER_ROLE_SKILL_NAMES = (
     "shadcn-ui-flutter",
     "design-system-works",
     "share-project",
+    "export-project-doc-bundle",
+    "triage-fixer-feedback",
 )
 FIXER_RETIRED_SKILL_NAMES = (
     "init-netrunner",

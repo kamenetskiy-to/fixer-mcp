@@ -454,6 +454,56 @@ class WebMcpConfigTests(unittest.TestCase):
 
 
 class FixerMcpEnvBindingTests(unittest.TestCase):
+    def test_provider_config_sanitizer_removes_runtime_environment(self) -> None:
+        spec = {
+            "command": "/tmp/server",
+            "args": ["--serve"],
+            "env": {"TOKEN": "do-not-persist"},
+            "transport": "stdio",
+        }
+
+        sanitized = fixer_wire_mcp._sanitize_mcp_server_for_provider_config(spec)
+
+        self.assertEqual(
+            sanitized,
+            {"command": "/tmp/server", "args": ["--serve"], "transport": "stdio"},
+        )
+        self.assertEqual(spec["env"], {"TOKEN": "do-not-persist"})
+
+    def test_mcp_environment_is_bound_to_provider_process_environment(self) -> None:
+        selected = {
+            "fixer_mcp": {
+                "env": {"TOKEN": "runtime-only", "FIXER_DB_PATH": "/tmp/fixer.db"},
+            },
+            "other": {"env": {"OTHER_TOKEN": "other-runtime-only"}},
+        }
+
+        bound = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(
+            {"KEEP": "yes", "TOKEN": "old"},
+            selected,
+        )
+
+        self.assertEqual(
+            bound,
+            {
+                "KEEP": "yes",
+                "TOKEN": "runtime-only",
+                "FIXER_DB_PATH": "/tmp/fixer.db",
+                "OTHER_TOKEN": "other-runtime-only",
+            },
+        )
+
+    def test_forced_fixer_overrides_do_not_embed_environment(self) -> None:
+        overrides = fixer_wire_mcp._build_forced_fixer_override_args(
+            {
+                "command": "/tmp/fixer_mcp",
+                "env": {"PGPASSWORD": "do-not-persist"},
+                "transport": "stdio",
+            }
+        )
+
+        self.assertNotIn("PGPASSWORD", " ".join(overrides))
+
     def test_bind_fixer_db_path_to_server_env_overrides_stale_value(self) -> None:
         selected = {
             "fixer_mcp": {

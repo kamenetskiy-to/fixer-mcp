@@ -7,7 +7,7 @@ import importlib
 import re
 from typing import Any, Callable, Sequence
 
-from client_wires.backends import is_codex_backend, normalize_backend_name
+from client_wires.backends import DEFAULT_MCP_BACKEND, is_codex_backend, normalize_backend_name
 from client_wires.backends.antigravity_adapter import normalize_antigravity_reasoning_alias
 from client_wires import fixer_wire_db
 
@@ -33,7 +33,12 @@ def _ensure_passthrough_dangerous_sandbox(passthrough_args: Sequence[str]) -> li
 
 
 def _is_codex_adapter(adapter: Any) -> bool:
-    return is_codex_backend(getattr(adapter, "name", ""))
+    name = getattr(adapter, "name", "")
+    if name:
+        return is_codex_backend(name)
+    # Keep compatibility with the small adapter facades used by older
+    # launcher integrations, which expose only the executable name.
+    return str(getattr(adapter, "command", "")).strip() == "codex"
 
 
 def _maybe_configure_playwright_runtime_mode(
@@ -67,6 +72,34 @@ def _maybe_configure_playwright_runtime_mode(
     if not callable(_maybe_configure_playwright_runtime):
         return None
     return _maybe_configure_playwright_runtime(
+        selected_servers,
+        available_servers,
+        interactive=interactive,
+    )
+
+
+def _maybe_configure_playwright_mesh_target(
+    adapter: Any,
+    selected_servers: dict[str, dict[str, object]],
+    available_servers: dict[str, dict[str, object]],
+    *,
+    interactive: bool,
+) -> str | None:
+    """Prompts for the Playwright Mesh device and browser when that server is attached."""
+    if not _is_codex_adapter(adapter):
+        return None
+    if "playwright-mesh" not in selected_servers:
+        return None
+
+    try:
+        runtime_helpers = importlib.import_module("client_wires.codex_compat.runtime")
+    except ImportError:
+        return None
+
+    maybe_configure_playwright_mesh = getattr(runtime_helpers, "maybe_configure_playwright_mesh", None)
+    if not callable(maybe_configure_playwright_mesh):
+        return None
+    return maybe_configure_playwright_mesh(
         selected_servers,
         available_servers,
         interactive=interactive,
@@ -193,7 +226,13 @@ def _resolve_netrunner_launch_selection(
     elif started or dry_run:
         reasoning = descriptor.default_reasoning
     else:
-        reasoning = callbacks.select_reasoning_interactive(backend, descriptor.default_reasoning, Option, single_select_items)
+        reasoning = callbacks.select_reasoning_interactive(
+            backend,
+            descriptor.default_reasoning,
+            Option,
+            single_select_items,
+            model=model,
+        )
 
     if getattr(descriptor, "name", "") == "antigravity":
         reasoning = normalize_antigravity_reasoning_alias(model, reasoning)
@@ -214,7 +253,7 @@ def _select_fresh_launch_selection(
     single_select_items: Any,
     callbacks: LaunchSelectionCallbacks,
 ) -> SessionLaunchSelection:
-    preferred_backend = normalize_backend_name(preset_backend)
+    preferred_backend = normalize_backend_name(preset_backend or DEFAULT_MCP_BACKEND)
     if preset_backend:
         backend = preferred_backend
     else:
@@ -242,7 +281,13 @@ def _select_fresh_launch_selection(
     if preset_reasoning and preset_reasoning.strip():
         reasoning = preset_reasoning.strip()
     else:
-        reasoning = callbacks.select_reasoning_interactive(backend, descriptor.default_reasoning, Option, single_select_items)
+        reasoning = callbacks.select_reasoning_interactive(
+            backend,
+            descriptor.default_reasoning,
+            Option,
+            single_select_items,
+            model=model,
+        )
 
     if getattr(descriptor, "name", "") == "antigravity":
         reasoning = normalize_antigravity_reasoning_alias(model, reasoning)

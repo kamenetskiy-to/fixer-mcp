@@ -24,6 +24,7 @@ class HandsDocEntry:
     path: str
     status: str
     parent_id: int = 0
+    display_title: str = ""
 
 
 def _slugify_filename(text: str, *, fallback: str) -> str:
@@ -61,8 +62,25 @@ def create_hands_worktree(project_cwd: Path) -> tuple[Path, str]:
 
 
 def load_project_doc_tree(conn: sqlite3.Connection, project_id: int) -> list[HandsDocEntry]:
+    try:
+        language_row = conn.execute(
+            "SELECT language_code FROM project_doc_language_policy WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        language_row = None
+    language = str(language_row[0]).strip().lower() if language_row else "en"
+    localized = language.split("-", 1)[0] != "en"
+    localization_join = (
+        "LEFT JOIN project_doc_title_localization l "
+        "ON l.project_doc_id = d.id AND l.language_code = ?"
+        if localized
+        else ""
+    )
+    display_title = "COALESCE(NULLIF(TRIM(l.localized_title), ''), '')" if localized else "d.title"
+    params: tuple[object, ...] = (language, project_id) if localized else (project_id,)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             (
                 SELECT COUNT(*)
@@ -70,6 +88,7 @@ def load_project_doc_tree(conn: sqlite3.Connection, project_id: int) -> list[Han
                 WHERE d2.project_id = d.project_id AND d2.id <= d.id
             ) AS local_doc_id,
             d.title,
+            {display_title},
             d.content,
             COALESCE(d.level, 0),
             COALESCE(d.slug, ''),
@@ -84,21 +103,30 @@ def load_project_doc_tree(conn: sqlite3.Connection, project_id: int) -> list[Han
                 )
             END AS local_parent_id
         FROM project_doc d
+        {localization_join}
         WHERE d.project_id = ?
         ORDER BY d.id
         """,
-        (project_id,),
+        params,
     ).fetchall()
+    if localized:
+        missing = [f"{int(row[0])} {str(row[1])!r}" for row in rows if not str(row[2]).strip()]
+        if missing:
+            raise RuntimeError(
+                f"Project documentation localization is incomplete for language {language!r}; "
+                f"missing localized titles: {', '.join(missing[:10])}"
+            )
     return [
         HandsDocEntry(
             doc_id=int(row[0]),
             title=str(row[1]),
-            content=str(row[2]),
-            level=int(row[3]),
-            slug=str(row[4]),
-            path=str(row[5]),
-            status=str(row[6]),
-            parent_id=int(row[7]),
+            display_title=str(row[2]),
+            content=str(row[3]),
+            level=int(row[4]),
+            slug=str(row[5]),
+            path=str(row[6]),
+            status=str(row[7]),
+            parent_id=int(row[8]),
         )
         for row in rows
     ]

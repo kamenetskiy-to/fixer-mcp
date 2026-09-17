@@ -44,6 +44,9 @@ func (r *Repository) ProjectDocsTree(ctx context.Context, projectID int) (Projec
 	if err != nil {
 		return ProjectDocsTreeResponse{}, err
 	}
+	if err := r.requireProjectDocLocalizationCoverage(ctx, projectID); err != nil {
+		return ProjectDocsTreeResponse{}, err
+	}
 
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
@@ -144,6 +147,9 @@ func (r *Repository) ProjectDoc(ctx context.Context, projectID int, localDocID i
 	if err != nil {
 		return ProjectDocDetailResponse{}, err
 	}
+	if err := r.requireProjectDocLocalizationCoverage(ctx, projectID); err != nil {
+		return ProjectDocDetailResponse{}, err
+	}
 	if localDocID <= 0 {
 		return ProjectDocDetailResponse{}, fmt.Errorf("invalid project document id")
 	}
@@ -200,6 +206,9 @@ func (r *Repository) ProjectDoc(ctx context.Context, projectID int, localDocID i
 func (r *Repository) ProjectDocs(ctx context.Context, projectID int) (ProjectDocsResponse, error) {
 	project, err := r.requireProject(ctx, projectID)
 	if err != nil {
+		return ProjectDocsResponse{}, err
+	}
+	if err := r.requireProjectDocLocalizationCoverage(ctx, projectID); err != nil {
 		return ProjectDocsResponse{}, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
@@ -298,6 +307,9 @@ func (r *Repository) SetProposalStatus(ctx context.Context, proposalID int, inpu
 	if err := r.db.QueryRowContext(ctx, "SELECT session_id, project_id FROM doc_proposal WHERE id = ?", proposalID).Scan(&sessionID, &projectID); err != nil {
 		return SessionActionResponse{}, err
 	}
+	if err := r.requireProjectDocLocalizationCoverage(ctx, projectID); err != nil {
+		return SessionActionResponse{}, err
+	}
 	if targetStatus == "rejected" {
 		if _, err := r.dbWrite.ExecContext(ctx, "UPDATE doc_proposal SET status = ? WHERE id = ?", targetStatus, proposalID); err != nil {
 			return SessionActionResponse{}, err
@@ -311,14 +323,22 @@ func (r *Repository) SetProposalStatus(ctx context.Context, proposalID int, inpu
 	defer func() {
 		_ = tx.Rollback()
 	}()
-	var proposedContent, proposedDocType string
+	var proposedContent, proposedDocType, proposedLocalizedTitle string
 	var targetProjectDocID sql.NullInt64
+	localizedTitleExpr := "''"
+	var localizedTitleColumnCount int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('doc_proposal') WHERE name = 'proposed_localized_title'").Scan(&localizedTitleColumnCount); err != nil {
+		return SessionActionResponse{}, err
+	}
+	if localizedTitleColumnCount == 1 {
+		localizedTitleExpr = "COALESCE(proposed_localized_title, '')"
+	}
 	if err := tx.QueryRowContext(
 		ctx,
-		"SELECT proposed_content, COALESCE(proposed_doc_type, 'documentation'), target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?",
+		fmt.Sprintf("SELECT proposed_content, COALESCE(proposed_doc_type, 'documentation'), %s, target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?", localizedTitleExpr),
 		proposalID,
 		projectID,
-	).Scan(&proposedContent, &proposedDocType, &targetProjectDocID); err != nil {
+	).Scan(&proposedContent, &proposedDocType, &proposedLocalizedTitle, &targetProjectDocID); err != nil {
 		return SessionActionResponse{}, err
 	}
 	if targetProjectDocID.Valid {
@@ -347,15 +367,38 @@ func (r *Repository) SetProposalStatus(ctx context.Context, proposalID int, inpu
 		}
 		switch len(matchingDocIDs) {
 		case 0:
-			if _, err := tx.ExecContext(
+			language, err := r.projectDocLanguage(ctx, projectID)
+			if err != nil {
+				return SessionActionResponse{}, err
+			}
+			if dashboardProjectDocLocalizationRequired(language) && strings.TrimSpace(proposedLocalizedTitle) == "" {
+				return SessionActionResponse{}, fmt.Errorf("proposed_localized_title is required for language %q", language)
+			}
+			res, err := tx.ExecContext(
 				ctx,
 				"INSERT INTO project_doc (project_id, title, content, doc_type) VALUES (?, ?, ?, ?)",
 				projectID,
 				"Documentation ("+proposedDocType+")",
 				proposedContent,
 				proposedDocType,
-			); err != nil {
+			)
+			if err != nil {
 				return SessionActionResponse{}, err
+			}
+			newDocID, err := res.LastInsertId()
+			if err != nil {
+				return SessionActionResponse{}, err
+			}
+			if dashboardProjectDocLocalizationRequired(language) {
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO project_doc_title_localization (
+						project_doc_id, language_code, localized_title, created_at, updated_at
+					) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					ON CONFLICT(project_doc_id, language_code) DO UPDATE SET
+						localized_title = excluded.localized_title,
+						updated_at = CURRENT_TIMESTAMP`, newDocID, language, strings.TrimSpace(proposedLocalizedTitle)); err != nil {
+					return SessionActionResponse{}, err
+				}
 			}
 		case 1:
 			if _, err := tx.ExecContext(

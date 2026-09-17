@@ -15,6 +15,7 @@ from .base import (
     normalize_mcp_server_for_antigravity,
 )
 from .catalog import load_backend_entry
+from client_wires.fixer_wire_mcp import _sanitize_mcp_server_for_provider_config
 
 
 ANTIGRAVITY_MCP_TIMEOUT_SECONDS = 120 * 60
@@ -181,6 +182,7 @@ class AntigravityBackendAdapter(BackendAdapter):
                 continue
             if "command" in server_payload and not str(server_payload.get("command", "")).strip():
                 continue
+            server_payload = _sanitize_mcp_server_for_provider_config(server_payload)
             if name == ANTIGRAVITY_FIXER_MCP_SERVER:
                 # Antigravity's MCP client defaults tool calls to a short
                 # timeout. Keep the durable Fixer server usable for long
@@ -190,11 +192,10 @@ class AntigravityBackendAdapter(BackendAdapter):
 
         agents_dir = cwd / ".agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        mcp_path = agents_dir / "mcp_config.json"
-        mcp_path.write_text(
-            json.dumps({"mcpServers": mcp_servers}, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        # Antigravity's project-local config is launcher-owned and can be
+        # mistaken for worker output (and, historically, carried raw env
+        # credentials). The CLI consumes the user config, so keep the
+        # workspace .agents tree limited to canonical skills.
         _merge_antigravity_user_mcp_config(mcp_servers)
         materialize_antigravity_workspace_skills(cwd, FIXER_ROLE_SKILL_NAMES)
 
@@ -210,6 +211,9 @@ class AntigravityBackendAdapter(BackendAdapter):
 _CODEX_SKILL_MARKER_RE = re.compile(r"^Activate skill `?\$([a-z0-9][a-z0-9-]*)`? immediately\.$")
 _ANTIGRAVITY_MODEL_VARIANT_RE = re.compile(r"^(?P<base>.+?) \((?P<label>[^)]+)\)$")
 _ANTIGRAVITY_CLI_MODEL_OPTIONS = (
+    "Gemini 3.8 Flash (Medium)",
+    "Gemini 3.8 Flash (High)",
+    "Gemini 3.8 Flash (Low)",
     "Gemini 3.7 Flash (Medium)",
     "Gemini 3.7 Flash (High)",
     "Gemini 3.7 Flash (Low)",

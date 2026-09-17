@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import curses
-from typing import Any, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 
-BACK_VALUE = "__back__"
-
-
-class BackNavigation(Exception):
-    """Raised when the operator presses backspace to leave the current stage."""
+from client_wires.fixer_wire_navigation import BACK_VALUE, BackNavigation
 
 
 class Option:
@@ -36,11 +32,29 @@ def _viewport(cursor: int, option_count: int, max_lines: int) -> tuple[int, int]
     return start, end
 
 
+def _tree_action_for_key(key: int, option: Option) -> str | None:
+    if option.is_header or option.disabled:
+        return None
+    value = option.value
+    if not (isinstance(value, int) or (isinstance(value, str) and value.lstrip("-").isdigit())):
+        return None
+    doc_id = int(value)
+    if key in (ord("t"), ord("T")):
+        return f"branch:{doc_id}"
+    if key == curses.KEY_RIGHT and "▸" in option.label:
+        return f"expand:{doc_id}"
+    if key == curses.KEY_LEFT and "▾" in option.label:
+        return f"collapse:{doc_id}"
+    return None
+
+
 def multi_select_items(
     options: Iterable[Option],
     *,
     title: str,
     preselected_values: Optional[Iterable[Any]] = None,
+    initial_cursor_value: Optional[Any] = None,
+    refresh_options: Optional[Callable[[List[Any]], Optional[List[Option]]]] = None,
 ) -> Optional[List[Any]]:
     option_list: List[Option] = list(options)
     if not option_list:
@@ -53,9 +67,44 @@ def multi_select_items(
             if any(opt.value == v for v in initial) and not (opt.disabled or opt.is_header):
                 selected[idx] = True
     cursor = 0
+    if initial_cursor_value is not None:
+        for idx, opt in enumerate(option_list):
+            if not opt.is_header and not opt.disabled and opt.value == initial_cursor_value:
+                cursor = idx
+                break
+
+    def _rebuild_options() -> None:
+        """Live-rebuild labels/order from the current selection when a refresh
+        callback is supplied (used by tree pickers with derived counters)."""
+        nonlocal option_list, selected, cursor
+        if refresh_options is None:
+            return
+        current_values = [
+            option_list[idx].value
+            for idx, flag in selected.items()
+            if flag and not option_list[idx].is_header and not option_list[idx].disabled
+        ]
+        refreshed = refresh_options(current_values)
+        if refreshed is None:
+            return
+        cursor_value = option_list[cursor].value if option_list else None
+        new_list = list(refreshed)
+        new_selected = {idx: False for idx in range(len(new_list))}
+        for idx, opt in enumerate(new_list):
+            if not (opt.is_header or opt.disabled) and any(
+                opt.value == value for value in current_values
+            ):
+                new_selected[idx] = True
+        option_list = new_list
+        selected = new_selected
+        if cursor_value is not None:
+            for idx, opt in enumerate(option_list):
+                if not opt.is_header and not opt.disabled and opt.value == cursor_value:
+                    cursor = idx
+                    break
 
     def _main(stdscr) -> List[Any]:
-        nonlocal cursor
+        nonlocal cursor, option_list, selected
         curses.curs_set(0)
         while True:
             stdscr.erase()
@@ -90,6 +139,7 @@ def multi_select_items(
                     if option_list[cursor].instant:
                         return [option_list[cursor].value]
                     selected[cursor] = not selected[cursor]
+                    _rebuild_options()
             elif key in (ord("a"), ord("A")):
                 make_active = any(
                     (not flag) and (not option_list[idx].disabled) and (not option_list[idx].is_header)
@@ -98,9 +148,26 @@ def multi_select_items(
                 for idx in selected:
                     if not (option_list[idx].disabled or option_list[idx].is_header):
                         selected[idx] = make_active
+                _rebuild_options()
+            elif key in (ord("t"), ord("T"), curses.KEY_RIGHT, curses.KEY_LEFT):
+                cur_idx = cursor
+                if cur_idx >= len(option_list):
+                    continue
+                cur_opt = option_list[cur_idx]
+                action = _tree_action_for_key(key, cur_opt)
+                if action is not None:
+                    selected_values = [
+                        option_list[idx].value
+                        for idx, flag in selected.items()
+                        if flag and not option_list[idx].is_header
+                    ]
+                    return [*selected_values, action]
             elif key in (10, 13, curses.KEY_ENTER):
                 return [option_list[idx].value for idx, flag in selected.items() if flag and not option_list[idx].is_header]
             elif key in (127, 8, curses.KEY_BACKSPACE):
+                for idx, opt in enumerate(option_list):
+                    if not opt.is_header and not opt.disabled:
+                        return BACK_VALUE
                 return BACK_VALUE
             elif key in (27, ord("q"), ord("Q")):
                 raise KeyboardInterrupt

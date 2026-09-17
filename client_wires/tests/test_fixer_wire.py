@@ -32,6 +32,7 @@ from client_wires.backends.base import (
 )
 from client_wires.backends.claude_adapter import ClaudeCodeBackendAdapter
 from client_wires.backends.codex_adapter import CodexBackendAdapter
+from client_wires.backends.pi_adapter import PiBackendAdapter
 from client_wires.backends.droid_adapter import DroidBackendAdapter
 from client_wires.backends.junie_adapter import JunieBackendAdapter
 from client_wires.backends.kimi_code_adapter import KimiCodeBackendAdapter
@@ -184,7 +185,7 @@ class BackendLaunchEnvironmentTests(unittest.TestCase):
                 env = {"PATH": "/usr/bin:/bin"}
                 (home / "bin").mkdir()
                 fixer_wire._ensure_architect_tool_path(env)
-            self.assertEqual(env["PATH"].split(os.pathsep)[:3], [str(home / "bin"), "/usr/bin", "/bin"])
+            self.assertEqual(env["PATH"].split(os.pathsep), ["/usr/bin", "/bin", str(home / "bin")])
 
 
 class FixerMcpAutobuildTests(unittest.TestCase):
@@ -1193,7 +1194,7 @@ class BackendCatalogTests(unittest.TestCase):
         backend_names = [descriptor.name for descriptor in fixer_wire.available_backend_descriptors()]
         self.assertEqual(
             backend_names,
-            ["codex", "commandcode", "droid", "claude", "antigravity", "junie", "kimi-code", "grok"],
+            ["codex", "commandcode", "droid", "claude", "antigravity", "junie", "kimi-code", "grok", "pi"],
         )
 
     def test_available_backend_descriptors_includes_unsubscribed_backends(self) -> None:
@@ -1208,7 +1209,7 @@ class BackendCatalogTests(unittest.TestCase):
 
     def test_subscribed_backend_descriptors_matches_current_architect_subscriptions(self) -> None:
         subscribed = {descriptor.name for descriptor in backends_pkg.subscribed_backend_descriptors()}
-        self.assertEqual(subscribed, {"antigravity", "claude", "codex", "commandcode", "kimi-code", "grok"})
+        self.assertEqual(subscribed, {"antigravity", "claude", "codex", "commandcode", "kimi-code", "grok", "pi"})
 
     def test_is_backend_available_reflects_catalog_flag(self) -> None:
         self.assertTrue(backends_pkg.is_backend_available("claude"))
@@ -1247,19 +1248,26 @@ class BackendCatalogTests(unittest.TestCase):
                 "gpt-5.3-codex-spark",
                 "gpt-5.2",
                 "opencode-go/gpt-5.6-luna",
+                "opencode-go/deepseek-v4.1-flash",
                 "opencode-go/deepseek-v4-flash",
-                "opencode-go/muse-spark-1.2",
-                "opencode-go/ox-alpha-free",
+                "opencode-go/muse-spark-1.2-contributor",
+                "opencode-go/glm-5.3-flash",
+                "commandcode/meta/muse-spark-1.2-contributor",
                 "commandcode/deepseek/deepseek-v4-flash",
+                "commandcode/deepseek/deepseek-v4-flash-vision-exp",
                 "commandcode/deepseek/deepseek-v4-pro",
-                "commandcode/zai-org/GLM-5.3",
+                "commandcode/zai-org/glm-5.3-flash",
+                "commandcode/gpt-5.6-sol",
                 "commandcode/gpt-5.6-luna",
                 "commandcode/google/gemini-3.7-flash",
+                "commandcode/minimaxai/minimax-m3",
+                "commandcode/moonshotai/kimi-k3",
                 "commandcode/xiaomi/mimo-v2.5-pro",
+                "commandcode/qwen/qwen3.8-27b",
+                "commandcode/qwen/qwen3.8-max",
                 "deepseek/deepseek-v4-flash-0731",
                 "deepseek/deepseek-v4-pro-0813",
-                "commandcode/stealth/ox-alpha",
-                "commandcode/laguna-s-2.1-free",
+                "commandcode/poolside/laguna-s-2.1-free",
             ),
         )
 
@@ -1777,13 +1785,9 @@ class BackendCatalogTests(unittest.TestCase):
             with patch.dict(os.environ, {"FIXER_ANTIGRAVITY_MCP_CONFIG_PATH": str(user_config)}, clear=False):
                 adapter.ensure_runtime_files(cwd, object(), selected, available)
 
-            workspace_payload = json.loads((cwd / ".agents" / "mcp_config.json").read_text(encoding="utf-8"))
             user_payload = json.loads(user_config.read_text(encoding="utf-8"))
 
-        self.assertEqual(
-            workspace_payload["mcpServers"]["fixer_mcp"]["timeoutSeconds"],
-            ANTIGRAVITY_MCP_TIMEOUT_SECONDS,
-        )
+        self.assertFalse((cwd / ".agents" / "mcp_config.json").exists())
         self.assertEqual(
             user_payload["mcpServers"]["fixer_mcp"]["timeoutSeconds"],
             ANTIGRAVITY_MCP_TIMEOUT_SECONDS,
@@ -1818,7 +1822,7 @@ class BackendCatalogTests(unittest.TestCase):
                     {"fixer_mcp": {"command": "/tmp/fixer_mcp"}},
                 )
 
-            payload = json.loads((cwd / ".agents" / "mcp_config.json").read_text(encoding="utf-8"))
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertIn("--print-timeout", command)
         self.assertIn("901s", command)
@@ -1918,6 +1922,37 @@ class BackendCatalogTests(unittest.TestCase):
         self.assertEqual(env["OPENAI_API_KEY"], "host-openai")
         self.assertEqual(env[fixer_wire.FIXER_DB_PATH_ENV], str(db_path))
         self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_build_backend_launch_env_merges_llm_env_for_pi_backend(self) -> None:
+        # Pi resolves provider keys from the process environment (the `$VAR`
+        # names declared in ~/.pi/agent/models.json), so the launcher must hand
+        # it the LLM env file the codex route already uses. Without this, a key
+        # that only lives in ~/.codex/llm.env never reaches Pi and the launch
+        # dies with "No API key found for <provider>".
+        adapter = PiBackendAdapter()
+        selection = types.SimpleNamespace(model="deepseek-v4.1-flash", reasoning_effort="high")
+        with patch.dict(os.environ, {"HOME": "/tmp/home", "OPENCODE_GO_API_KEY": "host-key"}, clear=True):
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                db_path = cwd / "fixer.db"
+                db_path.write_text("", encoding="utf-8")
+                with patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path):
+                    env = fixer_wire._build_backend_launch_env(
+                        adapter,
+                        selection,
+                        cwd=cwd,
+                        load_llm_env=lambda: {
+                            "OPENCODE_GO_API_KEY": "dotenv-key",
+                            "GEMINI_API_KEY": "dotenv-gemini",
+                        },
+                        merge_env_with_os=lambda payload: {**dict(os.environ), **payload},
+                    )
+        # A key that exists only in the LLM env file must reach the provider.
+        self.assertEqual(env["GEMINI_API_KEY"], "dotenv-gemini")
+        # An explicitly exported shell key stays authoritative.
+        self.assertEqual(env["OPENCODE_GO_API_KEY"], "host-key")
+        self.assertEqual(env["HOME"], "/tmp/home")
+        self.assertEqual(env[fixer_wire.FIXER_DB_PATH_ENV], str(db_path))
 
 
 class ClaudeRuntimeMaterializationTests(unittest.TestCase):
@@ -2087,36 +2122,28 @@ class AntigravityRuntimeMaterializationTests(unittest.TestCase):
             ):
                 adapter.ensure_runtime_files(cwd, selection, selected, available={})
 
-            mcp_payload = json.loads((cwd / ".agents" / "mcp_config.json").read_text(encoding="utf-8"))
             user_mcp_payload = json.loads(user_mcp_path.read_text(encoding="utf-8"))
+            self.assertFalse((cwd / ".agents" / "mcp_config.json").exists())
             self.assertEqual(
-                mcp_payload,
+                user_mcp_payload["mcpServers"],
                 {
-                    "mcpServers": {
-                        "fixer_mcp": {
-                            "args": ["--serve"],
-                            "command": "/tmp/fixer_mcp",
-                            "disabled": False,
-                            "env": {
-                                "FIXER_DB_PATH": str(cwd / "fixer.db"),
-                                "FIXER_MCP_DEFAULT_CWD": str(cwd.resolve()),
-                                "FIXER_MCP_DEFAULT_ROLE": "netrunner",
-                                "FIXER_MCP_LOCKED_ROLE": "netrunner",
-                                "TOKEN": "secret",
-                            },
-                            "timeoutSeconds": ANTIGRAVITY_MCP_TIMEOUT_SECONDS,
-                        },
-                        "remote-search": {
-                            "disabled": False,
-                            "headers": {"X-Test": "yes"},
-                            "serverUrl": "https://example.test/mcp",
-                        },
+                    "personal_tool": {"command": "/tmp/personal"},
+                    "fixer_mcp": {
+                        "args": ["--serve"],
+                        "command": "/tmp/fixer_mcp",
+                        "disabled": False,
+                        "timeoutSeconds": ANTIGRAVITY_MCP_TIMEOUT_SECONDS,
+                    },
+                    "remote-search": {
+                        "disabled": False,
+                        "headers": {"X-Test": "yes"},
+                        "serverUrl": "https://example.test/mcp",
                     },
                 },
             )
-            self.assertEqual(user_mcp_payload["mcpServers"]["personal_tool"], {"command": "/tmp/personal"})
-            self.assertEqual(user_mcp_payload["mcpServers"]["fixer_mcp"], mcp_payload["mcpServers"]["fixer_mcp"])
-            self.assertEqual(user_mcp_payload["mcpServers"]["remote-search"], mcp_payload["mcpServers"]["remote-search"])
+            serialized = json.dumps(user_mcp_payload)
+            self.assertNotIn("secret", serialized)
+            self.assertNotIn("FIXER_DB_PATH", serialized)
             self.assertTrue((cwd / ".agents" / "skills" / "init-fixer" / "SKILL.md").is_file())
             self.assertTrue((cwd / ".agents" / "skills" / "hands-netrunner" / "SKILL.md").is_file())
             self.assertTrue((cwd / ".agents" / "skills" / "complete-netrunner-session" / "SKILL.md").is_file())
@@ -2341,17 +2368,31 @@ class CodexBackendAdapterTests(unittest.TestCase):
                 types.SimpleNamespace(model="opencode-go/deepseek-v4-pro", reasoning_effort="high")
             )
         opencode_args = adapter.build_llm_args(
+            types.SimpleNamespace(model="opencode-go/deepseek-v4.1-flash", reasoning_effort="high")
+        )
+        legacy_alias_args = adapter.build_llm_args(
             types.SimpleNamespace(model="opencode-go/deepseek-v4-flash", reasoning_effort="high")
         )
         openrouter_args = adapter.build_llm_args(
             types.SimpleNamespace(model="deepseek/deepseek-v4-pro-0813", reasoning_effort="high")
         )
 
-        self.assertEqual(captured, ["deepseek-v4-flash", "deepseek/deepseek-v4-pro-0813"])
+        # The legacy `opencode-go/deepseek-v4-flash` slug stays selectable for
+        # already-persisted selections and now resolves to the same provider
+        # model as the current `opencode-go/deepseek-v4.1-flash` slug.
+        self.assertEqual(
+            captured,
+            ["deepseek-v4.1-flash", "deepseek-v4.1-flash", "deepseek/deepseek-v4-pro-0813"],
+        )
         self.assertIn('model_provider="opencode_go"', opencode_args)
+        self.assertIn('model_provider="opencode_go"', legacy_alias_args)
         self.assertIn('model_provider="openrouter"', openrouter_args)
-        catalog_args = [arg for arg in [*opencode_args, *openrouter_args] if arg.startswith("model_catalog_json=")]
-        self.assertEqual(len(catalog_args), 2)
+        catalog_args = [
+            arg
+            for arg in [*opencode_args, *legacy_alias_args, *openrouter_args]
+            if arg.startswith("model_catalog_json=")
+        ]
+        self.assertEqual(len(catalog_args), 3)
         self.assertTrue(all(Path(json.loads(arg.split("=", 1)[1])).is_file() for arg in catalog_args))
 
     def test_codex_adapter_materializes_project_local_fixer_skills(self) -> None:
@@ -2396,8 +2437,9 @@ class CodexBackendAdapterTests(unittest.TestCase):
 
             @staticmethod
             def build_mcp_flags(selected: dict[str, object], available: dict[str, object]) -> list[str]:
-                env = available["fixer_mcp"]["env"]  # type: ignore[index]
-                return [f"LOCKED={env['FIXER_MCP_LOCKED_ROLE']}", f"DB={env['FIXER_DB_PATH']}"]
+                self.assertNotIn("env", selected["fixer_mcp"])
+                self.assertNotIn("env", available["fixer_mcp"])
+                return ["MCP_CONFIG_WITHOUT_ENV"]
 
             @staticmethod
             def build_llm_args(_selection: object) -> list[str]:
@@ -2434,7 +2476,7 @@ class CodexBackendAdapterTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(flags, ["LOCKED=fixer", "DB=/tmp/fixer.db"])
+        self.assertEqual(flags, ["MCP_CONFIG_WITHOUT_ENV"])
 
     def test_build_mcp_flags_adds_narrow_direct_fixer_gate(self) -> None:
         captured: dict[str, object] = {}
@@ -2495,8 +2537,18 @@ class CodexBackendAdapterTests(unittest.TestCase):
         )
         self.assertEqual(gate["timeout"], 21600)
         self.assertEqual(gate["tool_timeout_sec"], 21600)
-        self.assertEqual(gate["env"]["FIXER_MCP_AUTO_AUTH"], "1")
-        self.assertEqual(gate["env"]["FIXER_MCP_TOOL_PROFILE"], "netrunner_gate")
+        self.assertEqual(
+            gate["env"],
+            {
+                "FIXER_DB_PATH": "/tmp/fixer.db",
+                "FIXER_MCP_DEFAULT_ROLE": "fixer",
+                "FIXER_MCP_DEFAULT_CWD": "/tmp/project",
+                "FIXER_MCP_LOCKED_ROLE": "fixer",
+                "FIXER_MCP_AUTO_AUTH": "1",
+                "FIXER_MCP_TOOL_PROFILE": "netrunner_gate",
+            },
+        )
+        self.assertNotIn("env", selected["fixer_mcp"])  # type: ignore[index]
         self.assertEqual(
             flags,
             [

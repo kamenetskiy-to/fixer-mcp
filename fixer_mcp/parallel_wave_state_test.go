@@ -138,6 +138,66 @@ func TestParallelWaveFailurePolicyUsesOnlyScheduledWorkers(t *testing.T) {
 	}
 }
 
+func TestScheduleCreatedParallelWaveWorkersBlocksFailedParentChildrenAndReleasesLease(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() { db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID }()
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds:   []int{1, 2},
+		Dependencies: []WaveDependency{{Child: 2, Parents: []int64{1}}},
+	})
+	if err != nil {
+		t.Fatalf("create dependency wave: %v", err)
+	}
+	parent := testWaveWorkerBySession(t, created.Wave, 1)
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?, terminal_outcome = ?, failure_reason = ?, terminal_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		parallelWaveWorkerStatusFailed,
+		parallelWaveWorkerStatusFailed,
+		"provider exited",
+		parent.Id,
+	); err != nil {
+		t.Fatalf("seed failed parent: %v", err)
+	}
+
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch dependency wave: %v", err)
+	}
+	if err := scheduleCreatedParallelWaveWorkers(context.Background(), repoDir, wave, wave.OrchestrationEpoch, time.Second); err != nil {
+		t.Fatalf("schedule dependency children: %v", err)
+	}
+
+	refreshed, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch blocked child: %v", err)
+	}
+	child := testWaveWorkerBySession(t, refreshed, 2)
+	if child.Status != parallelWaveWorkerStatusBlocked || !strings.Contains(child.FailureReason, "parent session 1") {
+		t.Fatalf("failed-parent child must be blocked with reason, got %+v", child)
+	}
+	var activeLeases int
+	if err := testDB.QueryRow(
+		"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND active = 1",
+		created.WaveId,
+	).Scan(&activeLeases); err != nil {
+		t.Fatalf("count child leases: %v", err)
+	}
+	if activeLeases != 1 {
+		t.Fatalf("blocking child must release only its lease while failed parent remains leased, got %d active leases", activeLeases)
+	}
+	decision := decideParallelWaveFailurePolicy(refreshed)
+	if decision.State != parallelWaveFailurePolicyRepairRequired || decision.WorkerID != parent.Id {
+		t.Fatalf("blocked dependent must not count as an additional provider failure: %+v", decision)
+	}
+}
+
 func TestParallelWaveFailurePolicyAfterGovernedRepair(t *testing.T) {
 	worker := func(id int, status string) NetrunnerWaveWorkerSnapshot {
 		return NetrunnerWaveWorkerSnapshot{Id: id, SessionId: id, Status: status}

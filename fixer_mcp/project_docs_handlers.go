@@ -302,6 +302,9 @@ func CheckCurrentProjectDocs(ctx context.Context, req *mcp.CallToolRequest, inpu
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, CheckCurrentProjectDocsOutput{}, fmt.Errorf("access denied: requires fixer role")
 	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, CheckCurrentProjectDocsOutput{}, err
+	}
 
 	rows, err := db.Query(`
 		SELECT
@@ -358,6 +361,9 @@ type SetSessionAttachedDocsOutput struct {
 func SetSessionAttachedDocs(ctx context.Context, req *mcp.CallToolRequest, input SetSessionAttachedDocsInput) (*mcp.CallToolResult, SetSessionAttachedDocsOutput, error) {
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, SetSessionAttachedDocsOutput{}, fmt.Errorf("access denied: requires fixer role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetSessionAttachedDocsOutput{}, err
 	}
 
 	globalSessionID, err := globalSessionIDFromProjectScoped(input.SessionId, authorizedProjectId)
@@ -445,6 +451,9 @@ func GetSessionAttachedDocs(ctx context.Context, req *mcp.CallToolRequest, input
 	if authorizedRole != "fixer" && authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, GetSessionAttachedDocsOutput{}, fmt.Errorf("access denied: requires authenticated role")
 	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, GetSessionAttachedDocsOutput{}, err
+	}
 
 	globalSessionID, err := globalSessionIDFromProjectScoped(input.SessionId, authorizedProjectId)
 	if err == sql.ErrNoRows {
@@ -522,6 +531,9 @@ type GetAttachedProjectDocsOutput struct {
 func GetAttachedProjectDocs(ctx context.Context, req *mcp.CallToolRequest, input GetAttachedProjectDocsInput) (*mcp.CallToolResult, GetAttachedProjectDocsOutput, error) {
 	if authorizedRole != "fixer" && authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, GetAttachedProjectDocsOutput{}, fmt.Errorf("access denied: requires authenticated role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, GetAttachedProjectDocsOutput{}, err
 	}
 
 	localSessionID := input.SessionId
@@ -743,9 +755,10 @@ func ViewNetrunnerLogs(ctx context.Context, req *mcp.CallToolRequest, input View
 }
 
 type ProposeDocUpdateInput struct {
-	ProposedContent    string `json:"proposed_content" jsonschema:"The canonical documentation content to propose. Use netrunner logs for history, not doc_proposal."`
-	ProposedDocType    string `json:"proposed_doc_type,omitempty" jsonschema:"The canonical document type to propose"`
-	TargetProjectDocId int    `json:"target_project_doc_id,omitempty" jsonschema:"Optional project-scoped target doc ID when the proposal should update one existing document"`
+	ProposedContent        string `json:"proposed_content" jsonschema:"The canonical documentation content to propose. Use netrunner logs for history, not doc_proposal."`
+	ProposedDocType        string `json:"proposed_doc_type,omitempty" jsonschema:"The canonical document type to propose"`
+	TargetProjectDocId     int    `json:"target_project_doc_id,omitempty" jsonschema:"Optional project-scoped target doc ID when the proposal should update one existing document"`
+	ProposedLocalizedTitle string `json:"proposed_localized_title,omitempty" jsonschema:"Localized title required for an untargeted proposal when the project documentation language is not English"`
 }
 
 type ProposeDocUpdateOutput struct {
@@ -756,6 +769,9 @@ type ProposeDocUpdateOutput struct {
 func ProposeDocUpdate(ctx context.Context, req *mcp.CallToolRequest, input ProposeDocUpdateInput) (*mcp.CallToolResult, ProposeDocUpdateOutput, error) {
 	if authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("access denied: requires netrunner role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, err
 	}
 
 	globalSessionID, _, err := resolveAuthorizedNetrunnerSessionID(
@@ -782,15 +798,33 @@ func ProposeDocUpdate(ctx context.Context, req *mcp.CallToolRequest, input Propo
 		}
 		targetProjectDocID = globalDocID
 	}
+	if input.TargetProjectDocId == 0 {
+		if _, _, err := requiredLocalizedProjectDocTitle(authorizedProjectId, input.ProposedLocalizedTitle); err != nil {
+			return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, err
+		}
+	}
 
-	res, err := db.Exec(
-		"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type, target_project_doc_id) VALUES (?, ?, 'pending', ?, ?, ?)",
-		authorizedProjectId,
-		globalSessionID,
-		input.ProposedContent,
-		docType,
-		targetProjectDocID,
-	)
+	var res sql.Result
+	if dbTableHasColumn("doc_proposal", "proposed_localized_title") {
+		res, err = db.Exec(
+			"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type, target_project_doc_id, proposed_localized_title) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+			authorizedProjectId,
+			globalSessionID,
+			input.ProposedContent,
+			docType,
+			targetProjectDocID,
+			strings.TrimSpace(input.ProposedLocalizedTitle),
+		)
+	} else {
+		res, err = db.Exec(
+			"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type, target_project_doc_id) VALUES (?, ?, 'pending', ?, ?, ?)",
+			authorizedProjectId,
+			globalSessionID,
+			input.ProposedContent,
+			docType,
+			targetProjectDocID,
+		)
+	}
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("DB insert error: %v", err)
 	}
@@ -811,11 +845,12 @@ func ProposeDocUpdate(ctx context.Context, req *mcp.CallToolRequest, input Propo
 type ReviewDocProposalsInput struct{}
 
 type DocProposal struct {
-	Id                 int    `json:"id"`
-	SessionId          int    `json:"session_id"`
-	ProposedContent    string `json:"proposed_content"`
-	ProposedDocType    string `json:"proposed_doc_type"`
-	TargetProjectDocId int    `json:"target_project_doc_id,omitempty"`
+	Id                     int    `json:"id"`
+	SessionId              int    `json:"session_id"`
+	ProposedContent        string `json:"proposed_content"`
+	ProposedDocType        string `json:"proposed_doc_type"`
+	TargetProjectDocId     int    `json:"target_project_doc_id,omitempty"`
+	ProposedLocalizedTitle string `json:"proposed_localized_title,omitempty"`
 }
 
 type ReviewDocProposalsOutput struct {
@@ -826,8 +861,15 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, ReviewDocProposalsOutput{}, fmt.Errorf("access denied: requires fixer role")
 	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, ReviewDocProposalsOutput{}, err
+	}
 
-	rows, err := db.Query(`
+	localizedTitleExpr := "''"
+	if dbTableHasColumn("doc_proposal", "proposed_localized_title") {
+		localizedTitleExpr = "COALESCE(p.proposed_localized_title, '')"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT
 			(
 				SELECT COUNT(*)
@@ -841,6 +883,7 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 			) AS local_session_id,
 			p.proposed_content,
 			COALESCE(p.proposed_doc_type, 'documentation'),
+			%s,
 			(
 				SELECT (
 					SELECT COUNT(*)
@@ -852,7 +895,7 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 			)
 		FROM doc_proposal p
 		WHERE p.project_id = ? AND p.status = 'pending'
-		ORDER BY p.id`, authorizedProjectId)
+		ORDER BY p.id`, localizedTitleExpr), authorizedProjectId)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, ReviewDocProposalsOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
@@ -862,7 +905,7 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 	for rows.Next() {
 		var p DocProposal
 		var targetProjectDocID sql.NullInt64
-		if err := rows.Scan(&p.Id, &p.SessionId, &p.ProposedContent, &p.ProposedDocType, &targetProjectDocID); err != nil {
+		if err := rows.Scan(&p.Id, &p.SessionId, &p.ProposedContent, &p.ProposedDocType, &p.ProposedLocalizedTitle, &targetProjectDocID); err != nil {
 			return &mcp.CallToolResult{IsError: true}, ReviewDocProposalsOutput{}, fmt.Errorf("DB scan error: %v", err)
 		}
 		if targetProjectDocID.Valid {
@@ -893,6 +936,9 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("access denied: requires fixer role")
 	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
+	}
 	if input.Status != "approved" && input.Status != "rejected" {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("invalid status: must be 'approved' or 'rejected'")
 	}
@@ -904,6 +950,7 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
+	proposalLocalizationColumn := dbTableHasColumn("doc_proposal", "proposed_localized_title")
 
 	if input.Status == "approved" {
 		tx, err := db.BeginTx(ctx, nil)
@@ -914,13 +961,17 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 			_ = tx.Rollback()
 		}()
 
-		var proposedContent, proposedDocType string
+		var proposedContent, proposedDocType, proposedLocalizedTitle string
 		var targetProjectDocID sql.NullInt64
+		localizedTitleExpr := "''"
+		if proposalLocalizationColumn {
+			localizedTitleExpr = "COALESCE(proposed_localized_title, '')"
+		}
 		err = tx.QueryRow(
-			"SELECT proposed_content, COALESCE(proposed_doc_type, 'documentation'), target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?",
+			fmt.Sprintf("SELECT proposed_content, COALESCE(proposed_doc_type, 'documentation'), %s, target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?", localizedTitleExpr),
 			globalProposalID,
 			authorizedProjectId,
-		).Scan(&proposedContent, &proposedDocType, &targetProjectDocID)
+		).Scan(&proposedContent, &proposedDocType, &proposedLocalizedTitle, &targetProjectDocID)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to fetch proposal: %v", err)
 		}
@@ -970,11 +1021,15 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 
 			switch len(matchingDocIDs) {
 			case 0:
+				language, localizedTitle, err := requiredLocalizedProjectDocTitleWithExecutor(tx, authorizedProjectId, proposedLocalizedTitle)
+				if err != nil {
+					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
+				}
 				tree, err := normalizeProjectDocTreeFieldsWithExecutor(tx, authorizedProjectId, "Documentation ("+proposedDocType+")", input.ParentDocId, input.Level, input.Slug, "", "current", 0)
 				if err != nil {
 					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
 				}
-				_, err = tx.Exec(
+				res, err := tx.Exec(
 					"INSERT INTO project_doc (project_id, title, content, doc_type, parent_doc_id, level, slug, path, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 					authorizedProjectId,
 					"Documentation ("+proposedDocType+")",
@@ -988,6 +1043,13 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 				)
 				if err != nil {
 					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert project_doc: %v", err)
+				}
+				newGlobalDocID, err := res.LastInsertId()
+				if err != nil {
+					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to read inserted project_doc id: %v", err)
+				}
+				if err := upsertProjectDocLocalizedTitle(tx, int(newGlobalDocID), language, localizedTitle); err != nil {
+					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert localized project_doc title: %v", err)
 				}
 			case 1:
 				if _, err := tx.Exec(
@@ -1050,6 +1112,9 @@ func GetProjectDocs(ctx context.Context, req *mcp.CallToolRequest, input GetProj
 	if authorizedRole != "fixer" && authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, GetProjectDocsOutput{}, fmt.Errorf("access denied: requires authenticated role")
 	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, GetProjectDocsOutput{}, err
+	}
 
 	rows, err := db.Query(`
 		SELECT
@@ -1094,14 +1159,15 @@ func GetProjectDocs(ctx context.Context, req *mcp.CallToolRequest, input GetProj
 }
 
 type AddProjectDocInput struct {
-	Title       string `json:"title" jsonschema:"The title of the new canonical document"`
-	Content     string `json:"content" jsonschema:"The content of the new canonical document"`
-	DocType     string `json:"doc_type,omitempty" jsonschema:"The canonical document type, e.g. 'documentation', 'architecture', etc."`
-	ParentDocId int    `json:"parent_doc_id,omitempty" jsonschema:"Optional project-scoped parent document ID for the canonical doc tree"`
-	Level       int    `json:"level,omitempty" jsonschema:"Optional tree level 0..3. Level 0 has no parent; child level must be parent.level + 1."`
-	Slug        string `json:"slug,omitempty" jsonschema:"Optional stable slug unique within the project"`
-	Path        string `json:"path,omitempty" jsonschema:"Optional stable materialized path unique within the project"`
-	Status      string `json:"status,omitempty" jsonschema:"Optional currentness status: current, draft, stale, or archived"`
+	Title          string `json:"title" jsonschema:"The title of the new canonical document"`
+	LocalizedTitle string `json:"localized_title,omitempty" jsonschema:"Localized title required when the project documentation language is not English"`
+	Content        string `json:"content" jsonschema:"The content of the new canonical document"`
+	DocType        string `json:"doc_type,omitempty" jsonschema:"The canonical document type, e.g. 'documentation', 'architecture', etc."`
+	ParentDocId    int    `json:"parent_doc_id,omitempty" jsonschema:"Optional project-scoped parent document ID for the canonical doc tree"`
+	Level          int    `json:"level,omitempty" jsonschema:"Optional tree level 0..3. Level 0 has no parent; child level must be parent.level + 1."`
+	Slug           string `json:"slug,omitempty" jsonschema:"Optional stable slug unique within the project"`
+	Path           string `json:"path,omitempty" jsonschema:"Optional stable materialized path unique within the project"`
+	Status         string `json:"status,omitempty" jsonschema:"Optional currentness status: current, draft, stale, or archived"`
 }
 
 type AddProjectDocOutput struct {
@@ -1112,6 +1178,13 @@ type AddProjectDocOutput struct {
 func AddProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input AddProjectDocInput) (*mcp.CallToolResult, AddProjectDocOutput, error) {
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, fmt.Errorf("access denied: requires fixer role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, err
+	}
+	language, localizedTitle, err := requiredLocalizedProjectDocTitle(authorizedProjectId, input.LocalizedTitle)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, err
 	}
 
 	docType := input.DocType
@@ -1124,7 +1197,12 @@ func AddProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input AddProje
 		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, err
 	}
 
-	res, err := db.Exec(
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, fmt.Errorf("DB transaction start error: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(
 		"INSERT INTO project_doc (project_id, title, content, doc_type, parent_doc_id, level, slug, path, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		authorizedProjectId,
 		input.Title,
@@ -1144,6 +1222,12 @@ func AddProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input AddProje
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, fmt.Errorf("LastInsertId error: %v", err)
 	}
+	if err := upsertProjectDocLocalizedTitle(tx, int(id), language, localizedTitle); err != nil {
+		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, fmt.Errorf("localized title insert error: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return &mcp.CallToolResult{IsError: true}, AddProjectDocOutput{}, fmt.Errorf("DB commit error: %v", err)
+	}
 
 	localDocID, err := projectScopedDocIDFromGlobal(int(id), authorizedProjectId)
 	if err != nil {
@@ -1154,14 +1238,15 @@ func AddProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input AddProje
 }
 
 type UpdateProjectDocInput struct {
-	DocId       int    `json:"doc_id" jsonschema:"The ID of the canonical document to update"`
-	Content     string `json:"content" jsonschema:"The new content of the document"`
-	DocType     string `json:"doc_type,omitempty" jsonschema:"Optionally update the doc type"`
-	ParentDocId int    `json:"parent_doc_id,omitempty" jsonschema:"Optionally update the project-scoped parent document ID"`
-	Level       int    `json:"level,omitempty" jsonschema:"Optionally update tree level 0..3. Child level must be parent.level + 1."`
-	Slug        string `json:"slug,omitempty" jsonschema:"Optionally update the stable slug"`
-	Path        string `json:"path,omitempty" jsonschema:"Optionally update the stable materialized path"`
-	Status      string `json:"status,omitempty" jsonschema:"Optionally update currentness status: current, draft, stale, or archived"`
+	DocId          int    `json:"doc_id" jsonschema:"The ID of the canonical document to update"`
+	LocalizedTitle string `json:"localized_title,omitempty" jsonschema:"Optional replacement localized title for the project's active documentation language"`
+	Content        string `json:"content" jsonschema:"The new content of the document"`
+	DocType        string `json:"doc_type,omitempty" jsonschema:"Optionally update the doc type"`
+	ParentDocId    int    `json:"parent_doc_id,omitempty" jsonschema:"Optionally update the project-scoped parent document ID"`
+	Level          int    `json:"level,omitempty" jsonschema:"Optionally update tree level 0..3. Child level must be parent.level + 1."`
+	Slug           string `json:"slug,omitempty" jsonschema:"Optionally update the stable slug"`
+	Path           string `json:"path,omitempty" jsonschema:"Optionally update the stable materialized path"`
+	Status         string `json:"status,omitempty" jsonschema:"Optionally update currentness status: current, draft, stale, or archived"`
 }
 
 type UpdateProjectDocOutput struct {
@@ -1171,6 +1256,9 @@ type UpdateProjectDocOutput struct {
 func UpdateProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input UpdateProjectDocInput) (*mcp.CallToolResult, UpdateProjectDocOutput, error) {
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, UpdateProjectDocOutput{}, fmt.Errorf("access denied: requires fixer role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, UpdateProjectDocOutput{}, err
 	}
 
 	globalDocID, err := globalProjectDocIDFromProjectScoped(input.DocId, authorizedProjectId)
@@ -1260,6 +1348,15 @@ func UpdateProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input Updat
 			return &mcp.CallToolResult{IsError: true}, UpdateProjectDocOutput{}, fmt.Errorf("DB update error: %v", err)
 		}
 	}
+	if strings.TrimSpace(input.LocalizedTitle) != "" {
+		language, localizedTitle, err := requiredLocalizedProjectDocTitle(authorizedProjectId, input.LocalizedTitle)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, UpdateProjectDocOutput{}, err
+		}
+		if err := upsertProjectDocLocalizedTitle(db, globalDocID, language, localizedTitle); err != nil {
+			return &mcp.CallToolResult{IsError: true}, UpdateProjectDocOutput{}, fmt.Errorf("localized title update error: %v", err)
+		}
+	}
 
 	return nil, UpdateProjectDocOutput{Status: "success"}, nil
 }
@@ -1275,6 +1372,9 @@ type DeleteProjectDocOutput struct {
 func DeleteProjectDoc(ctx context.Context, req *mcp.CallToolRequest, input DeleteProjectDocInput) (*mcp.CallToolResult, DeleteProjectDocOutput, error) {
 	if authorizedRole != "fixer" {
 		return &mcp.CallToolResult{IsError: true}, DeleteProjectDocOutput{}, fmt.Errorf("access denied: requires fixer role")
+	}
+	if err := requireProjectDocLocalizationCoverage(authorizedProjectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, DeleteProjectDocOutput{}, err
 	}
 
 	globalDocID, err := globalProjectDocIDFromProjectScoped(input.DocId, authorizedProjectId)

@@ -11,11 +11,6 @@ SMOKE_BINARY="${INSTALL_DIR}/fixer_mcp"
 unset FIXER_MCP_LOCKED_ROLE FIXER_DB_PATH FIXER_MCP_DEFAULT_ROLE
 unset FIXER_MCP_DEFAULT_CWD FIXER_MCP_AUTO_AUTH FIXER_MCP_TOOL_PROFILE
 
-# Wave tests create temporary repositories and merge committed parent
-# handoffs, so the clean smoke container needs a deterministic identity.
-git config --global user.name "fixer-mcp-smoke"
-git config --global user.email "fixer-mcp-smoke@example.invalid"
-
 cd "${ROOT_DIR}"
 
 echo "[smoke] toolchain"

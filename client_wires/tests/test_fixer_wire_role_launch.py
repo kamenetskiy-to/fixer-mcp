@@ -186,6 +186,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
     def test_launch_new_fixer_chat_forwards_all_supported_provider_selections(self) -> None:
         provider_matrix = (
             ("codex", "gpt-5.6-sol", "high"),
+            ("agy", "Gemini 3.8 Flash", "high"),
             ("agy", "Gemini 3.6 Flash", "high"),
             ("claude", "sonnet", "medium"),
             ("kimi-code", "kimi-k2.7-code", "high"),
@@ -226,6 +227,14 @@ class LaunchFixerFlowTests(unittest.TestCase):
                 self.assertEqual(launch.call_args.kwargs["preset_reasoning"], reasoning)
                 self.assertEqual(launch.call_args.kwargs["selected_mcp_names"], [fixer_wire.FORCED_MCP_SERVER])
                 self.assertTrue(launch.call_args.kwargs["dangerous_sandbox"])
+
+    def test_antigravity_gemini_38_flash_alias_maps_to_cli_variant(self) -> None:
+        adapter = AntigravityBackendAdapter()
+
+        self.assertEqual(
+            adapter._build_model_args("gemini-3.8-flash", "medium"),
+            ["--model", "Gemini 3.8 Flash (Medium)"],
+        )
 
     def test_launch_new_fixer_chat_constructs_locked_command_without_secret_arguments(self) -> None:
         captured: dict[str, object] = {}
@@ -271,6 +280,10 @@ class LaunchFixerFlowTests(unittest.TestCase):
         selected = captured["selected"]
         server_env = selected[fixer_wire.FORCED_MCP_SERVER]["env"]
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "fixer")
+        launch_env = mock_call.call_args.kwargs["env"]
+        self.assertEqual(launch_env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "fixer")
+        self.assertEqual(launch_env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "fixer")
+        self.assertEqual(launch_env[fixer_wire.FIXER_MCP_DEFAULT_CWD_ENV], str(Path.cwd().resolve()))
         self.assertEqual(getattr(captured["selection"], "model"), "gpt-5.6-sol")
 
     def test_launch_fixer_new_builds_fresh_codex_command(self) -> None:

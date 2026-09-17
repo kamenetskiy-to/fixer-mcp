@@ -14,6 +14,14 @@ from client_wires.backends.manifest import load_manifest
 
 
 class CodexCompatImportSurfaceTests(unittest.TestCase):
+    def test_tree_actions_use_horizontal_arrows_and_not_e(self) -> None:
+        collapsed = ui.Option("  0 ▸ Root", 7)
+        expanded = ui.Option("  1 ▾ Root", 7)
+
+        self.assertEqual(ui._tree_action_for_key(ui.curses.KEY_RIGHT, collapsed), "expand:7")
+        self.assertEqual(ui._tree_action_for_key(ui.curses.KEY_LEFT, expanded), "collapse:7")
+        self.assertIsNone(ui._tree_action_for_key(ord("e"), collapsed))
+
     def test_public_and_legacy_aliases_are_available(self) -> None:
         self.assertIs(ui.Option, ui.Option)
         self.assertIs(llm._reasoning_label, llm.reasoning_label)
@@ -39,8 +47,8 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-terra"], "high")
         self.assertEqual(llm.MODEL_DEFAULT_EFFORT["gpt-5.6-luna"], "high")
         self.assertEqual(
-            [key for _label, key, _description in llm.MODEL_REASONING_OPTIONS["gpt-5.6-luna"]],
-            ["low", "medium", "high", "xhigh", "max"],
+            [key for _label, key, _description in llm.MODEL_REASONING_OPTIONS["opencode-go/glm-5.3-flash"]],
+            ["minimal", "low", "medium", "high", "xhigh"],
         )
 
     def test_codex_sol_ultra_reasoning_is_preserved_in_launch_args(self) -> None:

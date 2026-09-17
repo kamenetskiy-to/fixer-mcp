@@ -308,6 +308,84 @@ class FixerWireResumeTests(unittest.TestCase):
         self.assertIn(("antigravity", "agy-fixer"), by_provider)
         self.assertNotIn(("antigravity", "agy-unknown"), by_provider)
 
+    def test_load_fixer_resume_summaries_discovers_pi_agent_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cwd = Path(tmp) / "workspace" / "self_orchestration"
+            cwd.mkdir(parents=True)
+            # Pi's own safe path rule: drop the leading slash, replace `/`, `\`
+            # and `:` with `-`, wrap in `--`.
+            safe_path = "--" + str(cwd.resolve())[1:].replace("/", "-").replace(":", "-") + "--"
+            session_dir = home / ".pi" / "agent" / "sessions" / safe_path
+            session_dir.mkdir(parents=True)
+
+            fixer_session_id = "01a0abed-ebf2-76da-83d7-e62ec0dae4c7"
+            fixer_log = session_dir / f"2026-02-01T10-00-00-000Z_{fixer_session_id}.jsonl"
+            fixer_log.write_text(
+                "\n".join(
+                    [
+                        '{"type":"session","version":3,"id":"'
+                        + fixer_session_id
+                        + '","timestamp":"2026-02-01T10:00:00.000Z","cwd":"'
+                        + str(cwd.resolve())
+                        + '"}',
+                        '{"type":"model_change","id":"1","parentId":null,"timestamp":"2026-02-01T10:00:01.000Z","provider":"opencode-go","modelId":"deepseek-v4.1-flash"}',
+                        '{"type":"thinking_level_change","id":"2","parentId":"1","timestamp":"2026-02-01T10:00:01.000Z","thinkingLevel":"max"}',
+                        '{"type":"message","id":"3","parentId":"2","timestamp":"2026-02-01T10:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Activate skill $init-fixer immediately."}]}}',
+                        '{"type":"message","id":"4","parentId":"3","timestamp":"2026-02-01T10:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Fixer thread on the pi backend"}]}}',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            hands_log = session_dir / "2026-02-01T11-00-00-000Z_pi-hands.jsonl"
+            hands_log.write_text(
+                '{"type":"session","id":"pi-hands","timestamp":"2026-02-01T11:00:00.000Z","cwd":"'
+                + str(cwd.resolve())
+                + '"}\n{"type":"message","timestamp":"2026-02-01T11:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Activate skill $hands-netrunner immediately."}]}}\n',
+                encoding="utf-8",
+            )
+
+            other_cwd = Path(tmp) / "workspace" / "elsewhere"
+            other_cwd.mkdir(parents=True)
+            misplaced_log = session_dir / "2026-02-01T12-00-00-000Z_pi-elsewhere.jsonl"
+            misplaced_log.write_text(
+                '{"type":"session","id":"pi-elsewhere","timestamp":"2026-02-01T12:00:00.000Z","cwd":"'
+                + str(other_cwd.resolve())
+                + '"}\n{"type":"message","timestamp":"2026-02-01T12:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Activate skill $init-fixer immediately."}]}}\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict(sys.modules, {"client_wires.codex_compat.sessions": _fake_codex_history_module([], {})}),
+                patch.object(Path, "home", return_value=home),
+            ):
+                summaries = fixer_wire._load_fixer_resume_summaries(cwd, limit=10)
+
+        self.assertEqual(
+            [(fixer_wire_resume.summary_provider(item), item.session_id) for item in summaries],
+            [("pi", fixer_session_id)],
+        )
+        summary = summaries[0]
+        self.assertEqual(summary.model, "deepseek-v4.1-flash")
+        self.assertEqual(summary.reasoning, "max")
+        self.assertEqual(summary.subscription_provider, "opencode-go")
+        self.assertEqual(summary.preview, "Fixer thread on the pi backend")
+        self.assertIsNotNone(summary.log_path)
+        self.assertGreaterEqual(summary.updated, summary.created)
+        parsed = fixer_wire_resume.parse_fixer_resume_selection(f"pi:{fixer_session_id}")
+        self.assertEqual((parsed.provider, parsed.session_id), ("pi", fixer_session_id))
+
+    def test_pi_project_session_dir_follows_pi_safe_path_rule(self) -> None:
+        cwd = Path("/tmp/pi-slug-check/project")
+        expected = "--" + str(cwd.resolve())[1:].replace("/", "-").replace(":", "-") + "--"
+        self.assertEqual(fixer_wire_resume._pi_project_session_dir(cwd).name, expected)
+        self.assertEqual(
+            fixer_wire_resume._pi_project_session_dir(cwd, store_root=Path("/tmp/store")).parent,
+            Path("/tmp/store"),
+        )
+
+
     def test_load_overseer_resume_summaries_discovers_every_supported_provider_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

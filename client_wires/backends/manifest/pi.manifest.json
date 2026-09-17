@@ -1,0 +1,75 @@
+{
+  "provider": "pi",
+  "label": "Pi",
+  "description": "Pi coding agent CLI (pi, v0.85.x). One harness over the Architect's OpenAI, OpenCode Go, CommandCode and Kimi Coding subscriptions. Skills are injected as explicit --skill paths under --no-skills; MCP is delegated to the installed pi-mcp-adapter extension through a project-scoped --mcp-config file in exclusive config mode, with server environment left in the provider process (never serialized into the generated config).",
+  "models": {
+    "options": [
+      "deepseek-v4.1-flash",
+      "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp",
+      "deepseek-v4-pro",
+      "commandcode/deepseek/deepseek-v4-flash",
+      "openai-codex/gpt-5.3-codex-spark",
+      "kimi-coding/k3"
+    ],
+    "default": "deepseek-v4.1-flash",
+    "internal_id_map": {
+      "deepseek-v4.1-flash": "opencode-go/deepseek-v4.1-flash",
+      "deepseek-v4-flash": "opencode-go/deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp": "opencode-go/deepseek-v4-flash-vision-exp",
+      "deepseek-v4-pro": "opencode-go/deepseek-v4-pro",
+      "commandcode/deepseek/deepseek-v4-flash": "commandcode/deepseek/deepseek-v4-flash",
+      "openai-codex/gpt-5.3-codex-spark": "openai-codex/gpt-5.3-codex-spark",
+      "kimi-coding/k3": "kimi-coding/k3"
+    },
+    "byok": false,
+    "auth": "subscription"
+  },
+  "reasoning": {
+    "options": [
+      "low",
+      "high",
+      "max"
+    ],
+    "default": "high",
+    "pass_mechanism": "flag",
+    "flag_or_key": "--thinking"
+  },
+  "skills": {
+    "inject_dir": ".agents/skills",
+    "scope_strategy": "location-flag",
+    "scope_flags": [
+      "--no-skills",
+      "--skill"
+    ]
+  },
+  "mcp": {
+    "config_format": "mcp-config-file",
+    "scope_strategy": "mcp-config-file",
+    "scope_flags": [
+      "--mcp-config",
+      ".run/pi/mcp.json"
+    ]
+  },
+  "tool_registration": "native",
+  "permissions": {
+    "interactive_auto_approve_flags": [
+      "--approve"
+    ],
+    "headless_auto_approve_flags": [
+      "--no-approve"
+    ],
+    "interactive_auto_approve_justification": "--approve is Pi's one-run project-trust grant. It is what keeps an interactive Fixer TUI from blocking on the non-interactive-incompatible trust prompt for a repository that carries project-local resources (this repo ships .agents/skills). Pi has no separate tool-approval flag: its built-in tools always run with the user's own permissions.",
+    "headless_auto_approve_justification": "Headless -p runs never show a trust prompt, so --no-approve is passed deliberately: it makes project-local settings/extensions a deterministic non-input instead of depending on the machine's saved trust decisions or defaultProjectTrust. It does not disable the MCP extension, which is a user/global extension."
+  },
+  "operator_questions": {
+    "supported": false,
+    "headless_auto_approve_dismisses": false
+  },
+  "launch": {
+    "interactive_cmd_template": "pi --model opencode-go/deepseek-v4.1-flash --thinking high --approve --no-skills --skill <abs>/.agents/skills/<role-skill> --mcp-config .run/pi/mcp.json [prompt]",
+    "headless_cmd_template": "pi --no-approve --no-skills --skill <abs>/.agents/skills/<role-skill> --model opencode-go/deepseek-v4.1-flash --thinking high --mcp-config .run/pi/mcp.json -p \"[prompt]\"",
+    "resume_interactive": "pi --model opencode-go/deepseek-v4.1-flash --thinking high --approve --no-skills --skill <abs>/.agents/skills/<role-skill> --mcp-config .run/pi/mcp.json --session-id [external_session_id] [prompt]",
+    "resume_headless": "pi --session-id [external_session_id] --no-approve --no-skills --skill <abs>/.agents/skills/<role-skill> --model opencode-go/deepseek-v4.1-flash --thinking high --mcp-config .run/pi/mcp.json -p \"[prompt]\""
+  }
+}

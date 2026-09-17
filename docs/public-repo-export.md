@@ -7,9 +7,10 @@ The export contract is:
 - include the Go MCP server source without local databases, logs, binaries, or generated build trees;
 - include Python client wires and their tests;
 - include the canonical skills under `.agents/skills`;
-- include Docker validation scripts, installation/verification scripts, GitHub Actions deterministic CI, public docs, a public README, MIT license, generated `.gitignore`, config examples, and a portable `fixer_mcp/mcp_config.json` used by autonomous role launchers;
+- include the managed install and self-update surface, so an installation from this repository can update itself: `installer/`, `packaging/` (with the vendored `tomli`), `bin/fixer`, `scripts/install/`, and `scripts/release/`, with their executable bits intact;
+- include Docker validation scripts, GitHub Actions deterministic CI, public docs, a public README, MIT license, generated `.gitignore`, config examples, and a portable `fixer_mcp/mcp_config.json` used by autonomous role launchers;
 - generate that runtime config with only repo-relative binary/database paths; never export the private source config;
-- fail the export if private paths, common secret formats, local env files, internal workspace directories, or private Russian operator labels appear in the output;
+- fail the export if the managed install surface is incomplete or not executable, or if private paths, common secret formats, local env files, internal workspace directories, or private Russian operator labels appear in the output;
 - write a tree snapshot to `dist/EXPORT_MANIFEST.txt` for review before any git operation.
 
-The Fixer owns git publication. The exporter only writes files under `dist/`.
+The exporter is private tooling and is not part of this repository. Publication runs in the private workspace: it writes the filtered tree to `dist/fixer-mcp-public/`, syncs that tree into a nested clone of this repository, and the operator pushes the clone. The export only ever writes files under `dist/`.

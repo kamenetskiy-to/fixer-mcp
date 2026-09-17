@@ -8,6 +8,15 @@ description: "Operate inside an Architect-opened Project Hands client or an expl
 This is the single Hands skill for both ordinary Hands work and governed
 acceptance iterations. It never creates ad-hoc sessions.
 
+## Fixer MCP boundary
+
+Do not use any Hands-related Fixer MCP tool during ordinary work unless the
+Architect explicitly asks for that control-plane operation. This includes
+state reads, mailbox/history reads, instruction submission, progress logging,
+review, completion, and operator notifications. A channel initialization is
+the sole automatic exception: perform its one-time authentication/state/mailbox
+read, then remain local until explicitly instructed otherwise.
+
 ## Project Hands Channel Mode
 
 Use this mode only after the Architect has opened `Руки (Project Hands)` through
@@ -22,27 +31,37 @@ such as "заведи Руки" received in a Fixer thread does not grant that a
 inspect/clean the durable Hands state if requested, then direct the Architect to
 start the channel through `fixer -> Руки` or Fixer Studio.
 
-1. First call `assume_role` with `role="netrunner"` and the current project
-   `cwd`.
-2. Call `get_hands_state`.
-3. Call `list_hands_instructions` to load the durable mailbox and current task.
-4. Reply in one short line only: confirm that the channel is initialized,
-   state the current Hands task, and ask whether to bring the app up through
-   tmux-flow. Do not print actor IDs, lanes, queue counts, journal state,
-   history, a checklist report, or any extra explanation.
-5. Wait for the Architect's instruction.
-6. Submit work with `submit_hands_instruction`. Address the current project,
-   never an actor or session ID.
+1. During channel initialization only, call `assume_role` with
+   `role="netrunner"` and the current project `cwd`, then call
+   `get_hands_state` and `list_hands_instructions` once to load the durable
+   mailbox and current task.
+2. Reply in one short line only: confirm that the channel is initialized,
+   state the current Hands task, and wait for the Architect's instruction. Do
+   not ask about tmux-flow by default. Do not print actor IDs, lanes, queue
+   counts, journal state, history, a checklist report, or any extra
+   explanation.
+3. After initialization, do not call Hands-related Fixer MCP tools, inspect
+   Hands state/history, or poll the mailbox unless the Architect explicitly
+   requests that operation.
+4. Submit work with `submit_hands_instruction` only when the Architect
+   explicitly asks to dispatch an instruction through the durable Hands actor.
+   Do not submit every local operation or progress update. Address the current
+   project, never an actor or session ID.
 7. Use the launcher-selected provider as the requested execution lane. Provider
    processes are generations of the same logical Hands actor, not new actors or
    mailboxes.
-8. For repository writes, preserve `awaiting_review` and use the governed review
-   tool. Never turn a successful process exit into implicit acceptance.
+8. For repository writes, preserve `awaiting_review`; never turn a successful
+   process exit into implicit acceptance or invoke review/completion tools
+   unless explicitly requested.
 
 Do not call `create_task`, create a manual session, scan provider transcripts for
 history, or resume a provider thread as the channel identity.
 
-## tmux-flow
+## tmux-flow (on request)
+
+Используй эту процедуру только если Архитектор явно попросил поднять,
+перезапустить или проверить приложение через tmux-flow и в проекте действительно
+есть приложение. Не упоминай и не предлагай tmux-flow автоматически.
 
 Работай только в уже существующей проектной tmux-сессии: сначала найди её через
 `tmux ls`, затем создай отдельное окно командой `tmux new-window -t <session> -n
@@ -53,9 +72,11 @@ history, or resume a provider thread as the channel identity.
 
 ## Netrunner Execution-Envelope Mode
 
-Use this mode only when the runtime supplies a preselected compatibility session
-ID. The session is a bounded execution/review envelope for a wave or one Hands
-instruction; it is never the permanent Hands identity.
+Use this mode only when the Architect or runtime explicitly supplies a
+preselected compatibility session ID. The session is a bounded
+execution/review envelope for a wave or one Hands instruction; it is never the
+permanent Hands identity. Its Fixer MCP calls are authorized only for that
+explicit envelope.
 
 1. Authenticate as `netrunner`.
 2. Checkout the preselected session with `checkout_task`.
@@ -108,7 +129,8 @@ For routine out-of-band status updates, use `fixer_mcp.send_operator_telegram_no
 ## Constraints
 
 - Fixer and Overseer may inspect Hands state/history, submit instructions, and
-  perform governed review. They never launch or resume a Hands client/process.
+  perform governed review only when the Architect explicitly requests that
+  operation. They never launch or resume a Hands client/process.
 - In locked Netrunner mode, do not try to use Fixer review, task creation, or doc-admin tools.
 - The public Project Hands path never asks the operator to select a session,
   model, or reasoning. Those are durable control-plane/lane concerns. MCP

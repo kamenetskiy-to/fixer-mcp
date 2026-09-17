@@ -110,9 +110,14 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
 
         self.assertEqual(state.display_name, "Руки")
         self.assertEqual(state.default_lane, "codex")
-        self.assertEqual([lane.provider for lane in state.lanes], ["codex", "commandcode", "claude", "kimi", "antigravity"])
-        self.assertEqual(state.lanes[0].backend, "codex")
+        self.assertEqual(
+            [lane.provider for lane in state.lanes],
+            ["commandcode", "codex", "claude", "kimi", "antigravity", "grok"],
+        )
+        self.assertEqual(state.lanes[0].backend, "commandcode")
         self.assertEqual(state.lanes[2].backend, "claude")
+        self.assertEqual(state.lanes[5].model, "grok-4.6")
+        self.assertEqual(state.lanes[5].reasoning, "default")
 
     def test_project_hands_facade_bootstraps_go_schema_before_reading_state(self) -> None:
         cwd = Path("/tmp/project")
@@ -172,6 +177,35 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
         self.assertEqual(selected.model, "gpt")
         self.assertEqual(captured["backend_args"][0], "codex")
         self.assertEqual(captured["model_selection"], ("codex", "gpt"))
+
+    def test_project_hands_backend_picker_excludes_unregistered_backends(self) -> None:
+        lanes = (
+            fixer_wire_netrunner_launch.ProjectHandsLane("codex", "gpt", "high"),
+            fixer_wire_netrunner_launch.ProjectHandsLane("kimi", "kimi-k3-256k", "default"),
+        )
+        captured: dict[str, object] = {}
+
+        def choose_backend(
+            preferred: str,
+            option_cls: object,
+            chooser: object,
+            *,
+            allowed_backends: set[str],
+        ) -> str:
+            captured["allowed_backends"] = allowed_backends
+            return "codex"
+
+        with patch.object(fixer_wire_selectors, "_select_backend_interactive", side_effect=choose_backend):
+            selected = fixer_wire_selectors._select_project_hands_lane_interactive(
+                lanes,
+                "codex",
+                _DummyOption,
+                lambda *_args, **_kwargs: "gpt",
+                select_model_interactive=lambda *_args, **_kwargs: "gpt",
+            )
+
+        self.assertEqual(selected.provider, "codex")
+        self.assertEqual(captured["allowed_backends"], {"codex", "kimi-code"})
 
     def test_launch_project_hands_uses_disposable_fixer_client_and_durable_lane(self) -> None:
         state = fixer_wire_netrunner_launch.ProjectHandsState(
@@ -267,7 +301,6 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
         ):
             selections = iter(
                 (
-                    fixer_wire_selectors.HANDS_LAUNCH_NEW,
                     fixer_wire_selectors.HANDS_WORKSPACE_SAFE,
                     "codex",
                     "openai",
@@ -1382,9 +1415,13 @@ class HandsDocsTreePickerTests(unittest.TestCase):
 
     def _run_picker(self, rounds: list[list[object]], preselected: list[int] | None = None):
         seen: list[list[object]] = []
+        rendered: list[list[str]] = []
+        calls: list[dict[str, object]] = []
 
-        def multi_select_items(options, **_kwargs):
+        def multi_select_items(options, **kwargs):
             seen.append([getattr(option, "value", None) for option in options])
+            rendered.append([str(getattr(option, "label", "")) for option in options])
+            calls.append(kwargs)
             return rounds.pop(0) if rounds else []
 
         result = fixer_wire_selectors._select_hands_docs_interactive(
@@ -1393,37 +1430,85 @@ class HandsDocsTreePickerTests(unittest.TestCase):
             _DummyOption,
             multi_select_items,
         )
-        return result, seen
+        return result, seen, rendered, calls
 
     def test_initial_round_shows_only_root_docs(self) -> None:
-        result, seen = self._run_picker([[]])
+        result, seen, _, _ = self._run_picker([[]])
         self.assertEqual(result, [])
         first_round = seen[0]
         self.assertIn(1, first_round)
         self.assertIn(4, first_round)
         self.assertNotIn(2, first_round)
         self.assertNotIn(3, first_round)
-        self.assertIn("expand:1", first_round)
-        self.assertIn("branch:1", first_round)
         self.assertNotIn("expand:4", first_round)  # Root B has no children
 
     def test_expand_branch_reveals_children_for_selection(self) -> None:
-        result, seen = self._run_picker([["expand:1"], [2]])
+        result, seen, _, _ = self._run_picker([["expand:1"], [2]])
         self.assertEqual(result, [2])
         self.assertIn(2, seen[1])
         self.assertNotIn(3, seen[1])  # grandchild still collapsed under child
 
     def test_branch_toggle_selects_whole_subtree(self) -> None:
-        result, _ = self._run_picker([["branch:1"], [1, 2, 3]])
+        result, _, _, _ = self._run_picker([["branch:1"], [1, 2, 3]])
         self.assertEqual(result, [1, 2, 3])
 
     def test_branch_toggle_twice_deselects_subtree(self) -> None:
-        result, _ = self._run_picker([["branch:1"], [1, 2, 3, "branch:1"], []])
+        result, _, _, _ = self._run_picker([["branch:1"], [1, 2, 3, "branch:1"], []])
         self.assertEqual(result, [])
 
     def test_hidden_docs_keep_preselection(self) -> None:
-        result, _ = self._run_picker([[4]], preselected=[3])
+        result, _, _, _ = self._run_picker([[4]], preselected=[3])
         self.assertEqual(result, [3, 4])
+
+    def test_expand_preserves_exact_doc_checkboxes_and_cursor(self) -> None:
+        result, _, rendered, calls = self._run_picker(
+            [[1, 4, "expand:1"], [1, 4]],
+            preselected=[1, 4],
+        )
+
+        self.assertEqual(result, [1, 4])
+        self.assertEqual(calls[1]["preselected_values"], [1, 4])
+        self.assertEqual(calls[1]["initial_cursor_value"], 1)
+        self.assertTrue(any("  0 ▾ Root A" in label for label in rendered[1]))
+
+    def test_parent_count_column_reports_selected_descendants_only(self) -> None:
+        _, _, rendered, _ = self._run_picker([[1, 2, "expand:1"], [1, 2]], preselected=[2])
+
+        self.assertTrue(any("  1 ▾ Root A" in label for label in rendered[1]))
+
+    def test_refresh_callback_recomputes_counts_and_order_live(self) -> None:
+        seen: list[list[object]] = []
+        rendered: list[list[str]] = []
+
+        def multi_select_items(options, **kwargs):
+            refresh = kwargs.get("refresh_options")
+            if refresh is not None:
+                refreshed = refresh([2, 3])  # attach child A1 + grandchild inside picker
+                seen.append(
+                    [
+                        getattr(opt, "value", None)
+                        for opt in refreshed
+                        if not getattr(opt, "is_header", False)
+                    ]
+                )
+                rendered.append(
+                    [
+                        str(getattr(opt, "label", ""))
+                        for opt in refreshed
+                        if not getattr(opt, "is_header", False)
+                    ]
+                )
+            return []
+
+        fixer_wire_selectors._select_hands_docs_interactive(
+            self._entries(), [], _DummyOption, multi_select_items
+        )
+
+        # Live refresh: counts derive from the selection passed in, and parent
+        # roots stay above leaf roots.
+        self.assertEqual(seen[0], [1, 4])
+        self.assertTrue(any("  2 ▸ Root A" in label for label in rendered[0]))
+        self.assertTrue(any("      Root B" in label for label in rendered[0]))
 
 
 if __name__ == "__main__":

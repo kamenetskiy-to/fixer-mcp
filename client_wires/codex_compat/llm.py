@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -17,6 +18,20 @@ CONFIG_ENV_VARS = {
 }
 
 MODEL_REASONING_OPTIONS: Dict[str, List[Tuple[str, str, str]]] = {
+    "opencode-go/glm-5.3-flash": [
+        ("Minimal", "minimal", "Fastest responses with little reasoning"),
+        ("Low", "low", "Fast responses with lighter reasoning"),
+        ("Medium", "medium", "Balanced reasoning depth and latency"),
+        ("High", "high", "Greater reasoning depth for complex work"),
+        ("Extra High", "xhigh", "Extra high reasoning depth for demanding tasks"),
+    ],
+    "opencode-go/muse-spark-1.2-contributor": [
+        ("Minimal", "minimal", "Fastest responses with little reasoning"),
+        ("Low", "low", "Fast responses with lighter reasoning"),
+        ("Medium", "medium", "Balanced reasoning depth and latency"),
+        ("High", "high", "Greater reasoning depth for complex work"),
+        ("Extra High", "xhigh", "Extra high reasoning depth for demanding tasks"),
+    ],
     "gpt-5.6-sol": [
         ("Low", "low", "Fast responses with lighter reasoning"),
         ("Medium", "medium", "Balances speed and reasoning depth for everyday tasks"),
@@ -72,6 +87,8 @@ MODEL_REASONING_OPTIONS: Dict[str, List[Tuple[str, str, str]]] = {
 }
 
 MODEL_DEFAULT_EFFORT = {
+    "opencode-go/glm-5.3-flash": "medium",
+    "opencode-go/muse-spark-1.2-contributor": "medium",
     "gpt-5.6-sol": "high",
     "gpt-5.6-terra": "high",
     "gpt-5.6-luna": "high",
@@ -85,6 +102,40 @@ MODEL_DEFAULT_EFFORT = {
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_REASONING = MODEL_DEFAULT_EFFORT[DEFAULT_MODEL]
 LLM_ENV_PATH = Path.home() / ".codex" / "llm.env"
+
+
+def _active_opencode_go_key() -> tuple[bool, str]:
+    """Return the key selected by ai-switch, including an intentional empty key."""
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    active_auth = data_home / "opencode" / "auth.json"
+    profiles = data_home / "opencode" / "auth_backups"
+    marker = state_home / "opencode" / "active-profile"
+    profile_names = {"PERSONAL": "Personal.json", "STAS": "Stas.json"}
+
+    def key_from(path: Path) -> str:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        provider = value.get("opencode-go")
+        return str(provider.get("key", "")) if isinstance(provider, dict) else ""
+
+    try:
+        selected = marker.read_text(encoding="utf-8").strip().upper()
+    except OSError:
+        selected = ""
+    if selected in profile_names:
+        return True, key_from(profiles / profile_names[selected])
+
+    active_key = key_from(active_auth)
+    if active_key:
+        for filename in profile_names.values():
+            if key_from(profiles / filename) == active_key:
+                return True, active_key
+    return False, ""
 
 
 @dataclass
@@ -125,6 +176,9 @@ def load_llm_env() -> Dict[str, str]:
             data[key.strip()] = value.strip().strip('"').strip("'")
     except OSError as exc:
         print(f"Не удалось прочитать {LLM_ENV_PATH}: {exc}")
+    selected, opencode_key = _active_opencode_go_key()
+    if selected and "OPENCODE_GO_API_KEY" in data:
+        data["OPENCODE_GO_API_KEY"] = opencode_key
     return data
 
 

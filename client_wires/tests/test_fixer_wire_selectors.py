@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from client_wires import fixer_wire
+from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_selectors
 
 
@@ -76,6 +77,54 @@ class FixerWireSelectorExtractionTests(unittest.TestCase):
         self.assertEqual(selected_model, "patched-model")
         patched_descriptor.assert_called_once_with("patched")
 
+    def test_hands_doc_tree_orders_parent_nodes_by_attached_count_first(self) -> None:
+        def entry(
+            doc_id: int, title: str, parent_id: int = 0
+        ) -> fixer_wire_hands_context.HandsDocEntry:
+            return fixer_wire_hands_context.HandsDocEntry(
+                doc_id=doc_id,
+                title=title,
+                content="",
+                level=0,
+                slug="",
+                path="",
+                status="current",
+                parent_id=parent_id,
+            )
+
+        entries = [
+            entry(1, "Alpha"),            # leaf root
+            entry(2, "Bravo"),            # parent root, 2 attached inside
+            entry(3, "Bravo-1", parent_id=2),  # leaf
+            entry(4, "Bravo-2", parent_id=2),  # parent, 1 attached inside
+            entry(5, "Bravo-2-a", parent_id=4),  # leaf
+            entry(6, "Charlie"),          # parent root, 1 attached inside
+            entry(7, "Charlie-1", parent_id=6),  # leaf
+        ]
+        calls: list[list[tuple[object, str]]] = []
+
+        def choose(options: list[_DummyOption], **_kwargs: object) -> list[object]:
+            calls.append(
+                [(option.value, option.label) for option in options if not option.is_header]
+            )
+            if len(calls) == 1:
+                return ["expand:2", "expand:6", 3, 5, 7]
+            return [3, 5, 7]
+
+        selected = fixer_wire_selectors._select_hands_docs_interactive(
+            entries, [3, 5, 7], _DummyOption, choose
+        )
+
+        # Roots: parent nodes first, ordered by attached count descending.
+        self.assertEqual([value for value, _ in calls[0]], [2, 6, 1])
+        # Expanded subtrees keep parents above leaves, still by count descending.
+        self.assertEqual([value for value, _ in calls[1]], [2, 4, 3, 6, 7, 1])
+        labels_by_id = dict(calls[1])
+        self.assertIn("  2 ", str(labels_by_id[2]))  # Bravo: 2 attached inside
+        self.assertIn("  1 ", str(labels_by_id[4]))  # Bravo-2: 1 attached inside
+        self.assertIn("  1 ", str(labels_by_id[6]))  # Charlie: 1 attached inside
+        self.assertEqual(selected, [3, 5, 7])
+
     def test_codex_model_selection_requires_family_choice_before_model(self) -> None:
         descriptor = types.SimpleNamespace(
             label="Codex CLI",
@@ -113,6 +162,6 @@ class FixerWireSelectorExtractionTests(unittest.TestCase):
             captured,
             [
                 ("Select Codex subscription (enter confirm, q cancel)", "openai"),
-                ("Select OpenCode Go model (enter confirm, q cancel)", "opencode-go/deepseek-v4-flash"),
+                ("Select OpenCode Go model (enter confirm, q cancel)", "opencode-go/glm-5.3-flash"),
             ],
         )

@@ -10,20 +10,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure Git identity for worktree tests
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - uses: actions/setup-go@v5
         with:
           go-version-file: fixer_mcp/go.mod
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m pip install pytest
       - run: python3 -m unittest discover -s client_wires/tests
       - run: make test-go
-      - run: FIXER_INSTALL_PREFIX="$RUNNER_TEMP/fixer" make install-verify
+      # Builds a release from this checkout, installs it into throwaway
+      # locations under $RUNNER_TEMP, then checks version identity, doctor
+      # health, a clean MCP stdio initialization, and the self-update check.
+      # Nothing is installed into the runner's home directory.
+      - run: make install-verify
+        env:
+          FIXER_MANAGED_ROOT: ${{ runner.temp }}/fixer/managed
+          FIXER_STATE_DIR: ${{ runner.temp }}/fixer/state
+          FIXER_USER_BIN: ${{ runner.temp }}/fixer/bin
+          FIXER_CACHE_DIR: ${{ runner.temp }}/fixer/cache
       - run: make docker-smoke
 
 # Authenticated docker-bootstrap-e2e remains an operator-run, manual gate.

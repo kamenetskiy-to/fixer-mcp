@@ -29,6 +29,7 @@ DEFAULT_CHROME_CANDIDATES = (
 )
 PLAYWRIGHT_LOG_ENV = "CODEX_PRO_PLAYWRIGHT_LOG"
 PLAYWRIGHT_HANDOFF_GRACE_ENV = "CODEX_PRO_PLAYWRIGHT_HANDOFF_GRACE_SEC"
+PLAYWRIGHT_ALLOW_FOREGROUND_ENV = "CODEX_PRO_PLAYWRIGHT_ALLOW_FOREGROUND"
 DEFAULT_HANDOFF_GRACE_SEC = 5.0
 RUNTIME_DIR_NAME = ".codex-playwright-runtime"
 
@@ -176,6 +177,140 @@ def _find_chrome() -> str:
             return found
 
     raise RuntimeError("Chrome executable not found")
+
+
+def _allow_foreground() -> bool:
+    return os.environ.get(PLAYWRIGHT_ALLOW_FOREGROUND_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _macos_app_bundle(executable: str) -> Path | None:
+    path = Path(executable).expanduser()
+    for parent in (path, *path.parents):
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def _macos_console_locked() -> bool | None:
+    """Report the macOS console lock state without touching System Events.
+
+    A locked console has a GUI session and running apps, but nothing can be seen
+    on the physical screen. Detecting it lets the wrapper explain an otherwise
+    baffling "the agent says it opened a browser but I see nothing".
+    """
+    if sys.platform != "darwin":
+        return None
+    for binary in ("/usr/sbin/ioreg", "/usr/bin/ioreg"):
+        if not Path(binary).is_file():
+            continue
+        try:
+            result = subprocess.run([binary, "-n", "Root", "-d1"], capture_output=True, text=True, timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        for line in result.stdout.splitlines():
+            if "IOConsoleLocked" in line:
+                return "Yes" in line
+        return None
+    return None
+
+
+def _activate_browser_app(executable: str) -> None:
+    """Bring the browser to the front so a headed window is actually visible.
+
+    Uses a direct application tell. System Events is deliberately avoided: it can
+    hang for minutes on a busy or locked console.
+    """
+    bundle = _macos_app_bundle(executable)
+    if bundle is None:
+        return
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-e", f'tell application "{bundle.stem}" to activate'],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _chrome_launch_command(executable: str, chrome_args: list[str], *, headless: bool) -> list[str]:
+    if sys.platform == "darwin" and not headless and not _allow_foreground():
+        bundle = _macos_app_bundle(executable)
+        if bundle is not None:
+            # `open -g` starts the visible app without making it frontmost or
+            # switching macOS Spaces.  The agent still gets a normal headed
+            # Chrome window and attaches to it over CDP.
+            return ["/usr/bin/open", "-g", "-na", str(bundle), "--args", *chrome_args]
+    return [executable, *chrome_args]
+
+
+def _frontmost_bundle_identifier() -> str | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "System Events" to get bundle identifier of first application process whose frontmost is true',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # System Events can be slow, busy, or awaiting an Automation permission
+        # decision. Losing the foreground hint must never abort the wrapper:
+        # a raised TimeoutExpired here closed the MCP handshake before it started.
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _restore_frontmost_bundle_identifier(bundle_identifier: str | None) -> None:
+    if sys.platform != "darwin" or not bundle_identifier:
+        return
+    script = """
+on run argv
+  tell application "System Events"
+    set targetBundle to item 1 of argv
+    set frontmost of first application process whose bundle identifier is targetBundle to true
+  end tell
+end run
+""".strip()
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-e", script, bundle_identifier],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _main_chrome_pid_for_profile(profile_dir: Path) -> int | None:
+    for process in _chrome_processes_for_profile(profile_dir):
+        command = process.command.lower()
+        if "helper" not in command and "--type=" not in command:
+            return process.pid
+    return None
+
+
+def _wait_for_main_chrome_pid(profile_dir: Path, timeout_sec: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        pid = _main_chrome_pid_for_profile(profile_dir)
+        if pid is not None:
+            return pid
+        time.sleep(0.1)
+    raise RuntimeError(f"Timed out waiting for the main Chrome process for profile {profile_dir}")
 
 
 def _free_port() -> int:
@@ -507,10 +642,24 @@ def main(argv: list[str]) -> int:
                 _managed_state_path(profile_dir).unlink(missing_ok=True)
                 state = None
             if cdp_endpoint is None:
+                if sys.platform == "darwin" and not args.headless and _macos_console_locked():
+                    _log("macOS console is locked; the headed Chrome window will not be visible on screen")
+                    print(
+                        "[playwright] macOS console is locked (IOConsoleLocked=Yes). The headed browser "
+                        "opens on a locked screen, so it cannot be seen even though it is running. "
+                        "Unlock the Mac, or target a mesh device whose screen you are actually looking at.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 port = args.port or _free_port()
                 cdp_endpoint = f"http://127.0.0.1:{port}"
-                chrome_cmd = [
-                    _find_chrome(),
+                executable = _find_chrome()
+                previous_frontmost = (
+                    _frontmost_bundle_identifier()
+                    if sys.platform == "darwin" and not args.headless and not _allow_foreground()
+                    else None
+                )
+                chrome_args = [
                     f"--remote-debugging-port={port}",
                     f"--user-data-dir={profile_dir}",
                     "--no-first-run",
@@ -518,7 +667,12 @@ def main(argv: list[str]) -> int:
                     "about:blank",
                 ]
                 if args.headless:
-                    chrome_cmd.insert(1, "--headless=new")
+                    chrome_args.insert(0, "--headless=new")
+                chrome_cmd = _chrome_launch_command(executable, chrome_args, headless=args.headless)
+                _log(
+                    f"launching Chrome background={not _allow_foreground() and not args.headless} "
+                    f"command={chrome_cmd[0]} profile={profile_dir}"
+                )
                 chrome = subprocess.Popen(
                     chrome_cmd,
                     stdout=subprocess.DEVNULL,
@@ -527,7 +681,15 @@ def main(argv: list[str]) -> int:
                 )
                 _log(f"launched managed Chrome pid={chrome.pid} endpoint={cdp_endpoint} profile={profile_dir}")
                 _wait_for_cdp(cdp_endpoint)
-                _write_managed_state(profile_dir, ManagedChromeState(pid=chrome.pid, port=port))
+                managed_pid = (
+                    _wait_for_main_chrome_pid(profile_dir)
+                    if sys.platform == "darwin" and not args.headless and not _allow_foreground()
+                    else chrome.pid
+                )
+                _write_managed_state(profile_dir, ManagedChromeState(pid=managed_pid, port=port))
+                _restore_frontmost_bundle_identifier(previous_frontmost)
+                if sys.platform == "darwin" and not args.headless and _allow_foreground():
+                    _activate_browser_app(executable)
             elif state is not None:
                 _log(f"attached to managed Chrome pid={state.pid} endpoint={cdp_endpoint} profile={profile_dir}")
             else:

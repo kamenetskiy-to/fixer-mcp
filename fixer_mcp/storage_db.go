@@ -72,8 +72,8 @@ func initDB() {
 				status TEXT NOT NULL,
 				report TEXT,
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
-				cli_model TEXT NOT NULL DEFAULT '',
-				cli_reasoning TEXT NOT NULL DEFAULT '',
+				cli_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna',
+				cli_reasoning TEXT NOT NULL DEFAULT 'high',
 				declared_write_scope TEXT NOT NULL DEFAULT '["."]',
 				parallel_wave_id TEXT NOT NULL DEFAULT '',
 				epic_doc_id INTEGER,
@@ -106,6 +106,26 @@ func initDB() {
 			FOREIGN KEY(project_id) REFERENCES project(id),
 			FOREIGN KEY(parent_doc_id) REFERENCES project_doc(id) ON DELETE SET NULL ON UPDATE NO ACTION
 		);
+		CREATE TABLE IF NOT EXISTS project_doc_language_policy (
+			project_id INTEGER PRIMARY KEY,
+			language_code TEXT NOT NULL DEFAULT 'ru',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS project_doc_title_localization (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_doc_id INTEGER NOT NULL,
+			language_code TEXT NOT NULL,
+			localized_title TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_doc_id) REFERENCES project_doc(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS project_doc_title_localization_unique_idx
+			ON project_doc_title_localization(project_doc_id, language_code);
+		CREATE INDEX IF NOT EXISTS project_doc_title_localization_language_idx
+			ON project_doc_title_localization(language_code, project_doc_id);
 		CREATE TABLE IF NOT EXISTS doc_proposal (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project_id INTEGER,
@@ -113,6 +133,7 @@ func initDB() {
 			status TEXT NOT NULL,
 			proposed_content TEXT NOT NULL,
 			proposed_doc_type TEXT DEFAULT 'documentation',
+			proposed_localized_title TEXT NOT NULL DEFAULT '',
 			target_project_doc_id INTEGER,
 			FOREIGN KEY(project_id) REFERENCES project(id),
 			FOREIGN KEY(session_id) REFERENCES session(id),
@@ -157,6 +178,28 @@ func initDB() {
 		CREATE UNIQUE INDEX IF NOT EXISTS project_mcp_server_unique_idx ON project_mcp_server(project_id, mcp_server_id);
 		CREATE INDEX IF NOT EXISTS project_mcp_server_project_idx ON project_mcp_server(project_id);
 		CREATE INDEX IF NOT EXISTS project_mcp_server_mcp_idx ON project_mcp_server(mcp_server_id);
+		CREATE TABLE IF NOT EXISTS project_hands_mcp_server (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			mcp_server_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(mcp_server_id) REFERENCES mcp_server(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS project_hands_mcp_server_unique_idx ON project_hands_mcp_server(project_id, mcp_server_id);
+		CREATE INDEX IF NOT EXISTS project_hands_mcp_server_project_idx ON project_hands_mcp_server(project_id);
+		CREATE INDEX IF NOT EXISTS project_hands_mcp_server_mcp_idx ON project_hands_mcp_server(mcp_server_id);
+		CREATE TABLE IF NOT EXISTS project_hands_doc (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL,
+			project_doc_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(project_doc_id) REFERENCES project_doc(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS project_hands_doc_unique_idx ON project_hands_doc(project_id, project_doc_id);
+		CREATE INDEX IF NOT EXISTS project_hands_doc_project_idx ON project_hands_doc(project_id);
+		CREATE INDEX IF NOT EXISTS project_hands_doc_doc_idx ON project_hands_doc(project_doc_id);
 		CREATE TABLE IF NOT EXISTS netrunner_attached_doc (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id INTEGER NOT NULL,
@@ -227,7 +270,7 @@ func initDB() {
 				acceptance_session_id INTEGER,
 				review_policy TEXT NOT NULL DEFAULT 'manual',
 				review_backend TEXT NOT NULL DEFAULT 'codex',
-					review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash',
+				review_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna',
 				review_reasoning TEXT NOT NULL DEFAULT 'high',
 				failure_reason TEXT NOT NULL DEFAULT '',
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -514,8 +557,8 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE project ADD COLUMN active INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN report TEXT;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_backend TEXT NOT NULL DEFAULT 'codex';`)
-	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_model TEXT NOT NULL DEFAULT '';`)
-	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_reasoning TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna';`)
+	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_reasoning TEXT NOT NULL DEFAULT 'high';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN declared_write_scope TEXT NOT NULL DEFAULT '["."]';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN parallel_wave_id TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN epic_doc_id INTEGER REFERENCES project_doc(id) ON DELETE SET NULL ON UPDATE NO ACTION;`)
@@ -536,6 +579,7 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE project_doc ADD COLUMN status TEXT NOT NULL DEFAULT 'current';`)
 	_, _ = db.Exec(`ALTER TABLE doc_proposal ADD COLUMN proposed_doc_type TEXT DEFAULT 'documentation';`)
 	_, _ = db.Exec(`ALTER TABLE doc_proposal ADD COLUMN target_project_doc_id INTEGER;`)
+	_, _ = db.Exec(`ALTER TABLE doc_proposal ADD COLUMN proposed_localized_title TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE mcp_server ADD COLUMN short_description TEXT;`)
 	_, _ = db.Exec(`ALTER TABLE mcp_server ADD COLUMN long_description TEXT;`)
 	_, _ = db.Exec(`ALTER TABLE mcp_server ADD COLUMN auto_attach INTEGER NOT NULL DEFAULT 0;`)
@@ -571,7 +615,7 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN acceptance_session_id INTEGER REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION;`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'manual';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_backend TEXT NOT NULL DEFAULT 'codex';`)
-	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave ADD COLUMN review_reasoning TEXT NOT NULL DEFAULT 'high';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN terminal_outcome TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN retry_attempt_count INTEGER NOT NULL DEFAULT 0;`)
@@ -630,9 +674,9 @@ func initDB() {
 			handoff_sha TEXT NOT NULL DEFAULT '',
 			acceptance_session_id INTEGER,
 			review_policy TEXT NOT NULL DEFAULT 'manual',
-			review_backend TEXT NOT NULL DEFAULT 'codex',
-				review_model TEXT NOT NULL DEFAULT 'opencode-go/deepseek-v4-flash',
-			review_reasoning TEXT NOT NULL DEFAULT 'high',
+				review_backend TEXT NOT NULL DEFAULT 'codex',
+				review_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna',
+				review_reasoning TEXT NOT NULL DEFAULT 'high',
 			failure_reason TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -770,7 +814,7 @@ func initDB() {
 			task_description TEXT NOT NULL,
 			declared_write_scope TEXT NOT NULL,
 			dependencies TEXT NOT NULL DEFAULT '[]',
-			cli_backend TEXT NOT NULL DEFAULT 'codex',
+				cli_backend TEXT NOT NULL DEFAULT 'codex',
 			cli_model TEXT NOT NULL DEFAULT '',
 			cli_reasoning TEXT NOT NULL DEFAULT '',
 			mcp_server_names TEXT NOT NULL DEFAULT '[]',
@@ -907,7 +951,7 @@ func initDB() {
 	_, _ = db.Exec(`UPDATE parallel_wave SET control_reason = '' WHERE control_reason IS NULL`)
 	_, _ = db.Exec(`UPDATE parallel_wave SET review_policy = 'manual' WHERE COALESCE(TRIM(review_policy), '') NOT IN ('automatic', 'manual')`)
 	_, _ = db.Exec(`UPDATE parallel_wave SET review_backend = 'codex' WHERE COALESCE(TRIM(review_backend), '') = ''`)
-	_, _ = db.Exec(`UPDATE parallel_wave SET review_model = 'opencode-go/deepseek-v4-flash' WHERE COALESCE(TRIM(review_model), '') = '' OR review_model = 'opencode-go/deepseek-v4-pro'`)
+	_, _ = db.Exec(`UPDATE parallel_wave SET review_model = 'gpt-5.6-luna' WHERE COALESCE(TRIM(review_model), '') = '' OR review_model = 'opencode-go/deepseek-v4-pro'`)
 	_, _ = db.Exec(`UPDATE parallel_wave SET review_reasoning = 'high' WHERE COALESCE(TRIM(review_reasoning), '') = ''`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET head_sha = '' WHERE head_sha IS NULL`)
 	_, _ = db.Exec(`UPDATE parallel_wave_worker SET changed_paths = '[]' WHERE COALESCE(TRIM(changed_paths), '') = ''`)
@@ -1153,7 +1197,7 @@ func initProjectWorkroomSchema() error {
 			actor_id TEXT NOT NULL UNIQUE,
 			display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
 			authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
-			default_lane TEXT NOT NULL DEFAULT 'codex' CHECK(default_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			default_lane TEXT NOT NULL DEFAULT 'commandcode' CHECK(default_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 			next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1171,7 +1215,7 @@ func initProjectWorkroomSchema() error {
 			instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
 			declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
 			instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
-			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 			risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
 			review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
 			state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
@@ -1220,7 +1264,7 @@ func initProjectWorkroomSchema() error {
 			generation INTEGER NOT NULL CHECK(generation > 0),
 			project_id INTEGER NOT NULL,
 			compat_session_id INTEGER,
-			provider TEXT NOT NULL CHECK(provider IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			provider TEXT NOT NULL CHECK(provider IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 			model TEXT NOT NULL,
 			reasoning TEXT NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
@@ -1300,7 +1344,28 @@ func initProjectWorkroomSchema() error {
 	_, _ = db.Exec(`ALTER TABLE hands_instruction ADD COLUMN instruction_envelope_json TEXT;`)
 	_, _ = db.Exec(`UPDATE hands_instruction SET instruction_envelope_json = '{}' WHERE instruction_envelope_json IS NULL OR NOT json_valid(instruction_envelope_json);`)
 	_, _ = db.Exec(`DROP TRIGGER IF EXISTS project_hands_after_project_insert`)
+	_, _ = db.Exec(`DROP TRIGGER IF EXISTS project_doc_language_policy_after_project_insert`)
 	_, _ = db.Exec(`DROP TABLE IF EXISTS hands_provider_lane`)
+
+	_, err = db.Exec(`
+		INSERT OR IGNORE INTO project_doc_language_policy (project_id, language_code, created_at, updated_at)
+		SELECT id, 'ru', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM project;
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+		CREATE TRIGGER IF NOT EXISTS project_doc_language_policy_after_project_insert
+		AFTER INSERT ON project
+		BEGIN
+			INSERT OR IGNORE INTO project_doc_language_policy (
+				project_id, language_code, created_at, updated_at
+			) VALUES (NEW.id, 'ru', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		END;
+	`)
+	if err != nil {
+		return err
+	}
 
 	_, err = db.Exec(`
 		INSERT OR IGNORE INTO project_hands (
@@ -1332,7 +1397,7 @@ func initProjectWorkroomSchema() error {
 				substr(lower(hex(randomblob(2))), 2) || '-' ||
 				substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
 				lower(hex(randomblob(6))),
-				'Руки', 'enabled', 'codex', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				'Руки', 'enabled', 'commandcode', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 			);
 		END;
 	`)
@@ -1354,7 +1419,7 @@ func migrateHandsGrokProviderLane() error {
 				generation INTEGER NOT NULL CHECK(generation > 0),
 				project_id INTEGER NOT NULL,
 				compat_session_id INTEGER,
-				provider TEXT NOT NULL CHECK(provider IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				provider TEXT NOT NULL CHECK(provider IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 				model TEXT NOT NULL,
 				reasoning TEXT NOT NULL,
 				status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
@@ -1397,7 +1462,7 @@ func migrateHandsGrokProviderLane() error {
 				instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
 				declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
 				instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
-				requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 				risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
 				review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
 				state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
@@ -1425,7 +1490,7 @@ func migrateHandsGrokProviderLane() error {
 				actor_id TEXT NOT NULL UNIQUE,
 				display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
 				authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
-				default_lane TEXT NOT NULL DEFAULT 'codex' CHECK(default_lane IN ('codex', 'claude', 'kimi-code', 'antigravity', 'grok')),
+				default_lane TEXT NOT NULL DEFAULT 'commandcode' CHECK(default_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 				next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1448,14 +1513,41 @@ func migrateHandsGrokProviderLane() error {
 	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON;`)
 
 	for _, table := range []string{"hands_generation", "hands_instruction", "project_hands"} {
+		tempTable := table + "_grok_mig"
 		var tableSQL string
 		err := conn.QueryRowContext(context.Background(),
 			`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
 		).Scan(&tableSQL)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
-		if tableSQL == "" || strings.Contains(tableSQL, "'grok'") {
+		var tempTableSQL string
+		tempErr := conn.QueryRowContext(context.Background(),
+			`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = ?`, tempTable,
+		).Scan(&tempTableSQL)
+		if tempErr != nil && tempErr != sql.ErrNoRows {
+			return tempErr
+		}
+		if tableSQL == "" && tempTableSQL != "" {
+			if table == "project_hands" {
+				if _, err := conn.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS project_hands_after_project_insert`); err != nil {
+					return fmt.Errorf("clear stale project_hands trigger during recovery: %w", err)
+				}
+			}
+			if _, err := conn.ExecContext(context.Background(), `ALTER TABLE `+tempTable+` RENAME TO `+table); err != nil {
+				return fmt.Errorf("recover %s from interrupted migration: %w", table, err)
+			}
+			continue
+		}
+		if tempTableSQL != "" {
+			if _, err := conn.ExecContext(context.Background(), `DROP TABLE `+tempTable); err != nil {
+				return fmt.Errorf("clear stale %s migration table: %w", table, err)
+			}
+		}
+		if tableSQL == "" {
+			continue
+		}
+		if tableSQL == "" || (strings.Contains(tableSQL, "'grok'") && strings.Contains(tableSQL, "'commandcode'")) {
 			continue
 		}
 		for _, stmt := range rebuilds[table] {

@@ -3,12 +3,15 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from client_wires import (
     fixer_autonomous_prompts,
     fixer_autonomous_state,
     fixer_autonomous_transcripts,
     fixer_autonomous_wave,
+    fixer_wire,
 )
 
 
@@ -179,6 +182,74 @@ class FixerAutonomousModuleTests(unittest.TestCase):
                 / "session-9"
                 / "worker_metadata.json",
             )
+
+    def test_wave_module_build_plan_injects_netrunner_role_into_process_env(self) -> None:
+        # Regression for wave 821 / session 647: the headless wave launcher built
+        # selected_servers with netrunner bindings but never merged those env vars into
+        # the process-level launch env.  Env-inheriting backends (pi) therefore ran with
+        # the fixer's FIXER_MCP_LOCKED_ROLE=fixer, causing authentication failures.
+        # The fix is a single call to fixer_wire_mcp._bind_mcp_server_env_to_launch_env
+        # in _build_wave_netrunner_launch_plan, mirroring fixer_wire_netrunner_launch.py:489.
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
+            project_cwd = Path(project_tmp)
+            worker_cwd = Path(worker_tmp)
+            db_path = project_cwd / "fixer.db"
+            db_path.touch()
+
+            available_servers = {fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"}}
+
+            fake_adapter = SimpleNamespace(
+                name="pi",
+                command="pi",
+                build_mcp_flags=lambda selected, _available: [],
+                build_headless_command=lambda *, model, reasoning, selected, available, prompt: ["pi", prompt],
+                ensure_runtime_files=lambda *_a, **_kw: None,
+                prepare_env=lambda *_a, **_kw: None,
+            )
+            launch_selection = fixer_wire.SessionLaunchSelection(
+                backend="pi",
+                model="pi-model",
+                reasoning="",
+            )
+
+            def fake_common_env(
+                _adapter: object,
+                _selection: object,
+                _cwd: Path,
+            ) -> dict[str, str]:
+                # Simulate the fixer's leaked env: LOCKED_ROLE=fixer.
+                return {
+                    fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV: "fixer",
+                    fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV: "fixer",
+                }
+
+            def fake_prompt(**_kwargs: object) -> str:
+                return "wave-prompt"
+
+            plan = fixer_autonomous_wave._build_wave_netrunner_launch_plan(
+                project_cwd=project_cwd,
+                worker_cwd=worker_cwd,
+                local_session_id=5,
+                wave_id=821,
+                wave_worker_id=1260,
+                declared_write_scope=["client_wires/fixer_autonomous_wave.py"],
+                fixer_session_id="fixer-session-pi",
+                assigned_mcp_names=[],
+                mcp_how_to={fixer_wire.FORCED_MCP_SERVER: "Use for project tools."},
+                launch_selection=launch_selection,
+                available_servers=available_servers,
+                config_env_vars={},
+                adapter=fake_adapter,
+                ensure_sqlite_scaffold=lambda _cwd, *, interactive=False: None,
+                db_path=db_path,
+                build_common_codex_env_fn=fake_common_env,
+                build_wave_netrunner_prompt_fn=fake_prompt,
+            )
+
+        # The process env must override the leaked fixer role with netrunner.
+        self.assertEqual(plan.env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "netrunner")
+        self.assertEqual(plan.env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "netrunner")
+        self.assertEqual(plan.env[fixer_wire.FIXER_DB_PATH_ENV], str(db_path.resolve()))
 
 
 if __name__ == "__main__":

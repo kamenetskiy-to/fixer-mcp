@@ -1,0 +1,28 @@
+#!/usr/bin/expect -f
+
+set timeout -1
+if {$argc < 2} {
+    exit 2
+}
+
+if {![info exists env(COMMANDCODE_INITIAL_PROMPT)]} {
+    exit 2
+}
+set initial_prompt $env(COMMANDCODE_INITIAL_PROMPT)
+set command $argv
+spawn {*}$command
+expect {
+    -re {sk your question} {
+        after 1000
+        send -- "\033\[200~"
+        send -- $initial_prompt
+        send -- "\033\[201~"
+        after 150
+        send -- "\r"
+        interact
+    }
+    eof {
+        set status [lindex [wait] 3]
+        exit $status
+    }
+}

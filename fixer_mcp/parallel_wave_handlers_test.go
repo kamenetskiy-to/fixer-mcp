@@ -968,7 +968,7 @@ func installFakeWaveWorkerLauncher(t *testing.T, failSessionID string, capturedA
 		t.Setenv("FAIL_WAVE_WORKER_SESSION_ID", failSessionID)
 	}
 	execCommand = func(name string, arg ...string) *exec.Cmd {
-		if name == "python3" {
+		if name == resolveFixerPythonExecutable(os.Environ()) {
 			if capturedArgs != nil {
 				*capturedArgs = append(*capturedArgs, append([]string{}, arg...))
 			}
@@ -976,6 +976,18 @@ func installFakeWaveWorkerLauncher(t *testing.T, failSessionID string, capturedA
 			return exec.Command(os.Args[0], helperArgs...)
 		}
 		return exec.Command(name, arg...)
+	}
+}
+
+func markFakeWaveWorkerExited(t *testing.T, testDB *sql.DB, waveID int, globalSessionID int) {
+	t.Helper()
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET status = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE parallel_wave_id = ? AND session_id = ?",
+		workerStatusExited,
+		waveID,
+		globalSessionID,
+	); err != nil {
+		t.Fatalf("mark fake worker process exited: %v", err)
 	}
 }
 
@@ -1144,6 +1156,7 @@ func TestWaitNetrunnerWaveMergesCompletedParentBranchIntoChildWorktree(t *testin
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'parent ready' WHERE id = ?", globalParentID); err != nil {
 		t.Fatalf("mark parent review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, globalParentID)
 	if _, err := testDB.Exec(
 		"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, ?, 'pending', 'parent doc')",
 		globalParentID,
@@ -1219,6 +1232,7 @@ func TestWaitNetrunnerWaveRejectsUncommittedParentHandoff(t *testing.T) {
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'parent ready' WHERE id = ?", globalParentID); err != nil {
 		t.Fatalf("mark parent review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, globalParentID)
 	if _, err := testDB.Exec("INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, ?, 'pending', 'parent docs')", globalParentID); err != nil {
 		t.Fatalf("seed parent proposal: %v", err)
 	}
@@ -1227,8 +1241,8 @@ func TestWaitNetrunnerWaveRejectsUncommittedParentHandoff(t *testing.T) {
 		t.Fatalf("wait dependency wave: %v", err)
 	}
 	parentWorker := testWaveWorkerBySession(t, output.Result.Wave, 1)
-	if parentWorker.Status != parallelWaveWorkerStatusFailed || !strings.Contains(parentWorker.FailureReason, "uncommitted") {
-		t.Fatalf("expected uncommitted parent handoff rejection, got %+v", parentWorker)
+	if parentWorker.Status != parallelWaveWorkerStatusReviewReady || !strings.Contains(parentWorker.FailureReason, "uncommitted") {
+		t.Fatalf("expected uncommitted parent handoff to remain review-ready with blocker, got %+v", parentWorker)
 	}
 	if output.Status != "blocked" {
 		t.Fatalf("deferred child failure must block follow-up in the same wait iteration: %+v", output.Result)
@@ -1526,7 +1540,7 @@ func TestGovernedRepairRecreationParentHandoffAndBranchIntegration(t *testing.T)
 	}
 }
 
-func TestGovernedRepairUncommittedOrContaminatedPatchSuppressesReviewer(t *testing.T) {
+func TestGovernedRepairUncommittedOrContaminatedPatchRemainsReviewReady(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -1556,19 +1570,71 @@ func TestGovernedRepairUncommittedOrContaminatedPatchSuppressesReviewer(t *testi
 		t.Fatalf("finalizeParallelWaveWorker returned error: %v", err)
 	}
 
-	if finalized.Status != parallelWaveWorkerStatusFailed {
-		t.Fatalf("expected worker status to be failed due to uncommitted/out-of-scope changes, got %s", finalized.Status)
+	if finalized.Status != parallelWaveWorkerStatusReviewReady {
+		t.Fatalf("expected worker status to remain review-ready with deliverable blockers, got %s", finalized.Status)
 	}
 	if !strings.Contains(finalized.FailureReason, "uncommitted") && !strings.Contains(finalized.FailureReason, "outside declared write scope") {
 		t.Fatalf("unexpected failure reason: %s", finalized.FailureReason)
 	}
 }
 
+func TestGovernedRepairAllowsReviewSubmissionWithoutNewCommit(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() { db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID }()
+	repoDir, testDB, _, wave := setupRunningWaveTest(t)
+	defer testDB.Close()
+
+	worker := testWaveWorkerBySession(t, wave, 1)
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave SET repair_attempt_count = 1 WHERE id = ?`,
+		wave.Id,
+	); err != nil {
+		t.Fatalf("seed governed repair attempt: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker SET head_sha = base_sha WHERE id = ?`,
+		worker.Id,
+	); err != nil {
+		t.Fatalf("seed previous repair head: %v", err)
+	}
+
+	finalized, err := finalizeParallelWaveWorker(repoDir, wave, worker, parallelWaveWorkerStatusReviewReady, "")
+	if err != nil {
+		t.Fatalf("finalize governed repair without new commit: %v", err)
+	}
+	if finalized.Status != parallelWaveWorkerStatusReviewReady {
+		t.Fatalf("a clean repair re-submission must remain review-ready, got %+v", finalized)
+	}
+}
+
+func TestSetSessionStatusRejectsWaveWorkerLifecycleBypass(t *testing.T) {
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	defer func() { db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID }()
+	_, testDB, _, wave := setupRunningWaveTest(t)
+	defer testDB.Close()
+
+	callResult, _, err := SetSessionStatus(context.Background(), nil, SetSessionStatusInput{
+		SessionId: wave.Workers[0].SessionId,
+		Status:    "review",
+	})
+	if err == nil || callResult == nil || !callResult.IsError {
+		t.Fatalf("expected wave worker lifecycle bypass to be rejected: result=%+v err=%v", callResult, err)
+	}
+	if !strings.Contains(err.Error(), "wave-linked session") {
+		t.Fatalf("unexpected bypass rejection: %v", err)
+	}
+}
+
 func TestParallelWaveProviderRetryClaimPersistsAndDoesNotDuplicate(t *testing.T) {
 	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
 	defer func() {
 		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
 	}()
+	// This test verifies durable retry claiming. Live account quotas belong to
+	// the separately tested quota gate and must not make it time-dependent.
+	DefaultQuotaGate = nil
 	repoDir := setupCleanGitRepo(t)
 	testDB := setupParallelWaveTestDB(t, repoDir)
 	defer testDB.Close()
@@ -1591,6 +1657,7 @@ func TestParallelWaveProviderRetryClaimPersistsAndDoesNotDuplicate(t *testing.T)
 	); err != nil {
 		t.Fatalf("seed eligible retry: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, worker.SessionId)
 	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
 	if err != nil {
 		t.Fatalf("fetch retry-wait wave: %v", err)
@@ -1759,6 +1826,7 @@ func TestWaitNetrunnerWaveLaunchesDeferredWorkerAfterResolvedParent(t *testing.T
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'parent ready' WHERE id = ?", globalParentID); err != nil {
 		t.Fatalf("mark parent review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, globalParentID)
 	if _, err := testDB.Exec(
 		"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, ?, 'pending', 'parent doc')",
 		globalParentID,
@@ -1863,6 +1931,8 @@ func TestWaitNetrunnerWaveRequiresAllParentsBeforeDeferredLaunch(t *testing.T) {
 	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET status = ?, head_sha = ?, terminal_at = CURRENT_TIMESTAMP WHERE id = ?", parallelWaveWorkerStatusCompleted, parentTwoHead, parentTwo.Id); err != nil {
 		t.Fatalf("mark second parent resolved: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, parentOne.SessionId)
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, parentTwo.SessionId)
 
 	callResult, out, err := WaitForNetrunnerWave(context.Background(), nil, WaitForNetrunnerWaveInput{WaveId: created.WaveId})
 	if err != nil {
@@ -2396,6 +2466,7 @@ func TestWaitNetrunnerWaveReturnsLowestReadyWorker(t *testing.T) {
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'ready one' WHERE id IN (1, 3)"); err != nil {
 		t.Fatalf("mark sessions review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, 1)
 	if _, err := testDB.Exec("INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, 1, 'pending', 'doc one'), (1, 3, 'pending', 'doc two')"); err != nil {
 		t.Fatalf("seed proposals: %v", err)
 	}
@@ -2418,7 +2489,7 @@ func TestWaitNetrunnerWaveReturnsLowestReadyWorker(t *testing.T) {
 	}
 }
 
-func TestWaitNetrunnerWaveMarksMalformedReviewWorkerFailed(t *testing.T) {
+func TestWaitNetrunnerWaveKeepsMalformedReviewWorkerReviewReady(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -2435,6 +2506,7 @@ func TestWaitNetrunnerWaveMarksMalformedReviewWorkerFailed(t *testing.T) {
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = '' WHERE id = 1"); err != nil {
 		t.Fatalf("mark session malformed review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, 1)
 
 	callResult, out, err := WaitForNetrunnerWave(context.Background(), nil, WaitForNetrunnerWaveInput{WaveId: created.WaveId})
 	if err != nil {
@@ -2443,8 +2515,8 @@ func TestWaitNetrunnerWaveMarksMalformedReviewWorkerFailed(t *testing.T) {
 	if callResult != nil {
 		t.Fatalf("expected nil call result on success, got %+v", callResult)
 	}
-	if out.Result.TerminalCondition != "failed" || out.Result.WorkerStatus != parallelWaveWorkerStatusFailed {
-		t.Fatalf("expected malformed review worker to fail, got %+v", out.Result)
+	if out.Result.TerminalCondition != "review_ready" || out.Result.WorkerStatus != parallelWaveWorkerStatusReviewReady {
+		t.Fatalf("expected malformed review worker to remain review-ready, got %+v", out.Result)
 	}
 	var failureReason string
 	if err := testDB.QueryRow(
@@ -2453,8 +2525,8 @@ func TestWaitNetrunnerWaveMarksMalformedReviewWorkerFailed(t *testing.T) {
 	).Scan(&failureReason); err != nil {
 		t.Fatalf("query worker failure reason: %v", err)
 	}
-	if !strings.Contains(failureReason, "reached review without final report and doc-impact proposal") {
-		t.Fatalf("expected malformed review failure reason, got %q", failureReason)
+	if !strings.Contains(failureReason, "reached review without final report") {
+		t.Fatalf("expected malformed review blocker, got %q", failureReason)
 	}
 }
 
@@ -2486,6 +2558,7 @@ func TestWaitNetrunnerWaveCapturesReviewReadyDiffArtifact(t *testing.T) {
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'ready with diff' WHERE id = 1"); err != nil {
 		t.Fatalf("mark session review: %v", err)
 	}
+	markFakeWaveWorkerExited(t, testDB, created.WaveId, 1)
 	if _, err := testDB.Exec("INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, 1, 'pending', 'phase 5 doc')"); err != nil {
 		t.Fatalf("seed proposal: %v", err)
 	}
@@ -2711,6 +2784,53 @@ func TestWaitNetrunnerWaveMarksMissingWorktreeAndDeadProcessFailed(t *testing.T)
 				t.Fatalf("expected failure reason containing %q, got %q", tc.reasonFragment, failureReason)
 			}
 		})
+	}
+}
+
+func TestInspectParallelWaveWorker_LiveProcessDoesNotMaskMissingWorktree(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	repoDir, testDB, _, wave := setupRunningWaveTest(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	worker := testWaveWorkerBySession(t, wave, 1)
+
+	// Case 1: Healthy worktree with live process must remain non-terminal (running).
+	candidate, terminal, err := inspectParallelWaveWorkerForWait(repoDir, wave, worker)
+	if err != nil {
+		t.Fatalf("inspect healthy worker: %v", err)
+	}
+	if terminal {
+		t.Fatalf("expected healthy worker with live process to be non-terminal, got %+v", candidate)
+	}
+
+	// Case 2: Removed worktree while process is still alive must fail immediately instead of hanging.
+	absWorktreePath, err := resolveParallelWaveWorktreePath(repoDir, worker.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve worktree: %v", err)
+	}
+	if err := os.RemoveAll(absWorktreePath); err != nil {
+		t.Fatalf("remove worktree: %v", err)
+	}
+
+	candidate, terminal, err = inspectParallelWaveWorkerForWait(repoDir, wave, worker)
+	if err != nil {
+		t.Fatalf("inspect worker with missing worktree: %v", err)
+	}
+	if !terminal || candidate.TerminalCondition != "failed" || candidate.Worker.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("expected missing worktree to be terminal failed immediately, got terminal=%v candidate=%+v", terminal, candidate)
+	}
+	if !strings.Contains(candidate.Worker.FailureReason, "worker worktree missing") {
+		t.Fatalf("expected failure reason to contain 'worker worktree missing', got %q", candidate.Worker.FailureReason)
 	}
 }
 
@@ -3224,9 +3344,10 @@ func TestLaunchNetrunnerWaveAbandonsFailedAndUnlaunchedWorkers(t *testing.T) {
 		t.Fatalf("seed third worker session: %v", err)
 	}
 	callResult, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
-		SessionIds: []int{1, 2, 3},
-		BaseRef:    "HEAD",
-		Reason:     "launch abandonment test",
+		SessionIds:   []int{1, 2, 3},
+		Dependencies: []WaveDependency{{Child: 3, Parents: []int64{1}}},
+		BaseRef:      "HEAD",
+		Reason:       "launch abandonment test",
 	})
 	if err != nil || callResult != nil {
 		t.Fatalf("create abandonment wave: result=%+v err=%v", callResult, err)
@@ -3257,10 +3378,10 @@ func TestLaunchNetrunnerWaveAbandonsFailedAndUnlaunchedWorkers(t *testing.T) {
 	if failed.Status != parallelWaveWorkerStatusFailed {
 		t.Fatalf("expected failed worker status, got %q", failed.Status)
 	}
-	if abandoned.Status != parallelWaveWorkerStatusFailed {
-		t.Fatalf("expected never-launched worker to be abandoned as failed, got %q", abandoned.Status)
+	if abandoned.Status != parallelWaveWorkerStatusBlocked {
+		t.Fatalf("expected never-launched worker to be blocked, got %q", abandoned.Status)
 	}
-	if !strings.Contains(abandoned.FailureReason, "launch abandoned") {
+	if !strings.Contains(abandoned.FailureReason, "blocked") || !strings.Contains(abandoned.FailureReason, "launch abandoned") {
 		t.Fatalf("expected abandonment reason, got %q", abandoned.FailureReason)
 	}
 

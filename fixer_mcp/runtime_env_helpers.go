@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ const (
 	netrunnerGateProfile   = "netrunner_gate"
 	defaultFixerDBFilename = "fixer.db"
 	pythonNoBytecodeEnv    = "PYTHONDONTWRITEBYTECODE"
+	fixerPythonEnv         = "FIXER_PYTHON"
 )
 
 var proxyEnvNames = map[string]struct{}{
@@ -68,10 +70,33 @@ func replaceEnvSliceValue(baseEnv []string, key string, value string) []string {
 	return append(resolved, key+"="+value)
 }
 
+// resolveFixerPythonExecutable picks the interpreter used by every private
+// Fixer launcher. The macOS system python can be 3.9 while client_wires needs
+// Python 3.11+ (tomllib); an explicit override remains available for portable
+// installations and CI.
+func resolveFixerPythonExecutable(baseEnv []string) string {
+	if configured := strings.TrimSpace(envSliceToMap(baseEnv)[fixerPythonEnv]); configured != "" {
+		return configured
+	}
+	for _, candidate := range []string{"/usr/local/bin/python3.11", "python3.11"} {
+		if strings.HasPrefix(candidate, "/") {
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+				return candidate
+			}
+			continue
+		}
+		if resolved, err := exec.LookPath(candidate); err == nil {
+			return resolved
+		}
+	}
+	return "python3"
+}
+
 func resolveRuntimeLaunchEnv(projectCWD string, baseEnv []string) ([]string, error) {
 	_ = projectCWD
 	cleaned := clearProxyEnvSlice(baseEnv)
-	return replaceEnvSliceValue(cleaned, pythonNoBytecodeEnv, "1"), nil
+	cleaned = replaceEnvSliceValue(cleaned, pythonNoBytecodeEnv, "1")
+	return replaceEnvSliceValue(cleaned, fixerPythonEnv, resolveFixerPythonExecutable(cleaned)), nil
 }
 
 func loadOptionalDotEnv(paths ...string) error {

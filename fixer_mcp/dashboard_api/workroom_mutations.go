@@ -462,6 +462,11 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO session_mcp_server (session_id, mcp_server_id)
+			SELECT ?, mcp_server_id FROM project_hands_mcp_server WHERE project_id = ?`, compatSessionID, projectID); err != nil {
+			return HandsInstructionReceipt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO session_mcp_server (session_id, mcp_server_id)
 			SELECT ?, mcp_server_id FROM project_mcp_server WHERE project_id = ?`, compatSessionID, projectID); err != nil {
 			return HandsInstructionReceipt{}, err
 		}

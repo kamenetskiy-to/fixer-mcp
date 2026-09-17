@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DEFAULT_BACKEND, BackendAdapter, BackendDescriptor, is_codex_backend, normalize_backend_name
+from .base import DEFAULT_BACKEND, DEFAULT_MCP_BACKEND, BackendAdapter, BackendDescriptor, is_codex_backend, normalize_backend_name
 from .antigravity_adapter import AntigravityBackendAdapter
 from .catalog import is_backend_available, load_backend_entry, set_backend_availability
 from .claude_adapter import ClaudeCodeBackendAdapter
@@ -12,9 +12,10 @@ from .droid_adapter import DroidBackendAdapter
 from .grok_adapter import GrokBackendAdapter
 from .junie_adapter import JunieBackendAdapter
 from .kimi_code_adapter import KimiCodeBackendAdapter
+from .pi_adapter import PiBackendAdapter
 
 
-SUPPORTED_BACKENDS = ("codex", "commandcode", "droid", "claude", "antigravity", "junie", "kimi-code", "grok")
+SUPPORTED_BACKENDS = ("codex", "commandcode", "droid", "claude", "antigravity", "junie", "kimi-code", "grok", "pi")
 
 
 def available_backend_descriptors() -> list[BackendDescriptor]:
@@ -77,12 +78,15 @@ def get_backend_adapter(name: str | None, *, codex_adapter: Any) -> BackendAdapt
         return KimiCodeBackendAdapter()
     if normalized == "grok":
         return GrokBackendAdapter()
+    if normalized == "pi":
+        return PiBackendAdapter()
     supported = ", ".join(SUPPORTED_BACKENDS)
     raise RuntimeError(f"Unsupported CLI backend {name!r}. Supported backends: {supported}")
 
 
 __all__ = [
     "DEFAULT_BACKEND",
+    "DEFAULT_MCP_BACKEND",
     "SUPPORTED_BACKENDS",
     "BackendAdapter",
     "BackendDescriptor",

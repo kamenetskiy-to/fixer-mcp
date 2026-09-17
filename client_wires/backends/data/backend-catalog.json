@@ -8,6 +8,7 @@
       "fresh_launch_supported": true,
       "label": "Google Antigravity CLI",
       "model_options": [
+        "Gemini 3.8 Flash",
         "Gemini 3.7 Flash",
         "Gemini 3.6 Flash",
         "Gemini 3.1 Pro",
@@ -106,7 +107,71 @@
           "model_providers.commandcode.name": "CommandCode",
           "model_providers.commandcode.wire_api": "responses"
         },
-        "commandcode/zai-org/GLM-5.3": {
+        "commandcode/meta/muse-spark-1.2-contributor": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1048576,
+          "model_auto_compact_token_limit": 950000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/deepseek/deepseek-v4-flash-vision-exp": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_auto_compact_token_limit": 850000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/gpt-5.6-sol": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/minimaxai/minimax-m3": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/moonshotai/kimi-k3": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_auto_compact_token_limit": 850000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/qwen/qwen3.8-27b": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/qwen/qwen3.8-max": {
+          "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
+          "model_context_window": 1000000,
+          "model_auto_compact_token_limit": 850000,
+          "model_provider": "commandcode",
+          "model_providers.commandcode.base_url": "http://127.0.0.1:18088/v1",
+          "model_providers.commandcode.env_key": "COMMANDCODE_API_KEY",
+          "model_providers.commandcode.name": "CommandCode",
+          "model_providers.commandcode.wire_api": "responses"
+        },
+        "commandcode/zai-org/glm-5.3-flash": {
           "model_auto_compact_token_limit": 850000,
           "model_catalog_json": "__FIXER_COMMANDCODE_MODEL_CATALOG__",
           "model_context_window": 1000000,
@@ -136,12 +201,22 @@
           "model_providers.openrouter.name": "OpenRouter",
           "model_providers.openrouter.wire_api": "responses"
         },
+        "opencode-go/deepseek-v4.1-flash": {
+          "model_auto_compact_token_limit": 425000,
+          "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
+          "model_context_window": 500000,
+          "model_provider": "opencode_go",
+          "model_providers.opencode_go.base_url": "http://127.0.0.1:18090/v1",
+          "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
+          "model_providers.opencode_go.name": "OpenCode Go",
+          "model_providers.opencode_go.wire_api": "responses"
+        },
         "opencode-go/deepseek-v4-flash": {
           "model_auto_compact_token_limit": 425000,
           "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
           "model_context_window": 500000,
           "model_provider": "opencode_go",
-          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.base_url": "http://127.0.0.1:18090/v1",
           "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
           "model_providers.opencode_go.name": "OpenCode Go",
           "model_providers.opencode_go.wire_api": "responses"
@@ -150,31 +225,30 @@
           "model_auto_compact_token_limit": 231200,
           "model_context_window": 272000,
           "model_provider": "opencode_go",
-          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.base_url": "http://127.0.0.1:18090/v1",
           "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
           "model_providers.opencode_go.name": "OpenCode Go",
           "model_providers.opencode_go.wire_api": "responses"
         },
-        "opencode-go/muse-spark-1.2": {
+        "opencode-go/muse-spark-1.2-contributor": {
           "model_auto_compact_token_limit": 891290,
           "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
           "model_context_window": 1048576,
           "model_provider": "opencode_go",
-          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.base_url": "http://127.0.0.1:18090/v1",
           "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
           "model_providers.opencode_go.name": "OpenCode Go",
           "model_providers.opencode_go.wire_api": "responses"
         },
-        "opencode-go/ox-alpha-free": {
-          "model_auto_compact_token_limit": 222822,
+        "opencode-go/glm-5.3-flash": {
+          "model_auto_compact_token_limit": 891290,
           "model_catalog_json": "__FIXER_DEEPSEEK_MODEL_CATALOG__",
-          "model_context_window": 262144,
+          "model_context_window": 1048576,
           "model_provider": "opencode_go",
-          "model_providers.opencode_go.base_url": "https://opencode.ai/zen/go/v1",
+          "model_providers.opencode_go.base_url": "http://127.0.0.1:18090/v1",
           "model_providers.opencode_go.env_key": "OPENCODE_GO_API_KEY",
           "model_providers.opencode_go.name": "OpenCode Go",
-          "model_providers.opencode_go.wire_api": "responses",
-          "web_search": "disabled"
+          "model_providers.opencode_go.wire_api": "responses"
         }
       },
       "model_options": [
@@ -188,19 +262,26 @@
         "gpt-5.3-codex-spark",
         "gpt-5.2",
         "opencode-go/gpt-5.6-luna",
+        "opencode-go/deepseek-v4.1-flash",
         "opencode-go/deepseek-v4-flash",
-        "opencode-go/muse-spark-1.2",
-        "opencode-go/ox-alpha-free",
+        "opencode-go/muse-spark-1.2-contributor",
+        "opencode-go/glm-5.3-flash",
+        "commandcode/meta/muse-spark-1.2-contributor",
         "commandcode/deepseek/deepseek-v4-flash",
+        "commandcode/deepseek/deepseek-v4-flash-vision-exp",
         "commandcode/deepseek/deepseek-v4-pro",
-        "commandcode/zai-org/GLM-5.3",
+        "commandcode/zai-org/glm-5.3-flash",
+        "commandcode/gpt-5.6-sol",
         "commandcode/gpt-5.6-luna",
         "commandcode/google/gemini-3.7-flash",
+        "commandcode/minimaxai/minimax-m3",
+        "commandcode/moonshotai/kimi-k3",
         "commandcode/xiaomi/mimo-v2.5-pro",
+        "commandcode/qwen/qwen3.8-27b",
+        "commandcode/qwen/qwen3.8-max",
         "deepseek/deepseek-v4-flash-0731",
         "deepseek/deepseek-v4-pro-0813",
-        "commandcode/stealth/ox-alpha",
-        "commandcode/laguna-s-2.1-free"
+        "commandcode/poolside/laguna-s-2.1-free"
       ],
       "reasoning_options": [
         "low",
@@ -214,22 +295,28 @@
     },
     "commandcode": {
       "available": true,
-      "default_model": "commandcode/deepseek/deepseek-v4-flash",
-      "default_reasoning": "high",
+      "default_model": "commandcode/zai-org/glm-5.3-flash",
+      "default_reasoning": "medium",
       "description": "Native Command Code CLI backend using cmd/cmdc.",
       "fresh_launch_supported": true,
       "label": "Command Code",
       "model_options": [
+        "commandcode/meta/muse-spark-1.2-contributor",
         "commandcode/deepseek/deepseek-v4-flash",
+        "commandcode/deepseek/deepseek-v4-flash-vision-exp",
         "commandcode/deepseek/deepseek-v4-pro",
-        "commandcode/zai-org/GLM-5.3",
+        "commandcode/zai-org/glm-5.3-flash",
+        "commandcode/gpt-5.6-sol",
         "commandcode/gpt-5.6-luna",
         "commandcode/google/gemini-3.7-flash",
+        "commandcode/minimaxai/minimax-m3",
+        "commandcode/moonshotai/kimi-k3",
         "commandcode/xiaomi/mimo-v2.5-pro",
-        "commandcode/stealth/ox-alpha",
-        "commandcode/laguna-s-2.1-free"
+        "commandcode/qwen/qwen3.8-27b",
+        "commandcode/qwen/qwen3.8-max",
+        "commandcode/poolside/laguna-s-2.1-free"
       ],
-      "reasoning_options": ["high"],
+      "reasoning_options": ["low", "medium", "high", "xhigh", "max"],
       "resume_supported": true
     },
     "droid": {
@@ -304,6 +391,29 @@
       ],
       "reasoning_options": [
         "default"
+      ],
+      "resume_supported": true
+    },
+    "pi": {
+      "available": true,
+      "default_model": "deepseek-v4.1-flash",
+      "default_reasoning": "high",
+      "description": "Pi coding agent CLI flow (pi) delegating MCP to the pi-mcp-adapter extension with an exclusive project-scoped --mcp-config file, and injecting Fixer role skills as explicit --skill paths.",
+      "fresh_launch_supported": true,
+      "label": "Pi",
+      "model_options": [
+        "deepseek-v4.1-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-v4-pro",
+        "commandcode/deepseek/deepseek-v4-flash",
+        "openai-codex/gpt-5.3-codex-spark",
+        "kimi-coding/k3"
+      ],
+      "reasoning_options": [
+        "low",
+        "high",
+        "max"
       ],
       "resume_supported": true
     }

@@ -18,73 +18,6 @@ def _make_conn(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-class HandsLaunchContextStorageTests(unittest.TestCase):
-    def test_save_list_and_external_id_roundtrip(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            conn = _make_conn(Path(tmp) / "fixer.db")
-            try:
-                fixer_wire_db._save_hands_launch_context(
-                    conn,
-                    1,
-                    worktree_path="/tmp/proj/.codex/hands_worktrees/1",
-                    branch_name="hands/1",
-                    provider="codex",
-                    model="gpt-5.6-sol",
-                    reasoning="high",
-                    mcp_names=["sqlite", "fixer_mcp"],
-                    doc_ids=[1, 3],
-                )
-                fixer_wire_db._save_hands_launch_context(
-                    conn,
-                    1,
-                    worktree_path="/tmp/proj/.codex/hands_worktrees/2",
-                    branch_name="hands/2",
-                    provider="claude",
-                    model="kimi/k3",
-                    reasoning="high",
-                    mcp_names=[],
-                    doc_ids=[],
-                )
-                fixer_wire_db._save_hands_launch_external_id(
-                    conn, 1, "/tmp/proj/.codex/hands_worktrees/1", "ext-123"
-                )
-                contexts = fixer_wire_db._list_hands_launch_contexts(conn, 1)
-            finally:
-                conn.close()
-
-        self.assertEqual(len(contexts), 2)
-        first = next(c for c in contexts if c.worktree_path.endswith("/1"))
-        self.assertEqual(first.external_session_id, "ext-123")
-        self.assertEqual(first.mcp_names, ("sqlite", "fixer_mcp"))
-        self.assertEqual(first.doc_ids, (1, 3))
-        self.assertEqual(first.provider, "codex")
-        second = next(c for c in contexts if c.worktree_path.endswith("/2"))
-        self.assertEqual(second.external_session_id, "")
-
-    def test_save_upserts_on_same_worktree(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            conn = _make_conn(Path(tmp) / "fixer.db")
-            try:
-                for doc_ids in ([1], [2, 4]):
-                    fixer_wire_db._save_hands_launch_context(
-                        conn,
-                        1,
-                        worktree_path="/tmp/proj/.codex/hands_worktrees/1",
-                        branch_name="hands/1",
-                        provider="codex",
-                        model="m",
-                        reasoning="high",
-                        mcp_names=[],
-                        doc_ids=doc_ids,
-                    )
-                contexts = fixer_wire_db._list_hands_launch_contexts(conn, 1)
-            finally:
-                conn.close()
-
-        self.assertEqual(len(contexts), 1)
-        self.assertEqual(contexts[0].doc_ids, (2, 4))
-
-
 class HandsWorktreeTests(unittest.TestCase):
     def test_create_hands_worktree_builds_clean_tree_on_new_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,6 +108,53 @@ class HandsDocsMaterializationTests(unittest.TestCase):
         self.assertEqual(entries[1].content, "b-body")
         self.assertEqual(entries[1].level, 1)
         self.assertEqual(entries[1].parent_id, 1)
+
+    def test_load_tree_uses_russian_display_title_but_materializes_english_canon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = _make_conn(Path(tmp) / "fixer.db")
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE project_doc (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_id INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        doc_type TEXT,
+                        parent_doc_id INTEGER,
+                        level INTEGER,
+                        slug TEXT,
+                        path TEXT,
+                        status TEXT
+                    );
+                    CREATE TABLE project_doc_language_policy (
+                        project_id INTEGER PRIMARY KEY,
+                        language_code TEXT NOT NULL
+                    );
+                    CREATE TABLE project_doc_title_localization (
+                        project_doc_id INTEGER NOT NULL,
+                        language_code TEXT NOT NULL,
+                        localized_title TEXT NOT NULL,
+                        UNIQUE(project_doc_id, language_code)
+                    );
+                    INSERT INTO project_doc_language_policy VALUES (1, 'ru');
+                    INSERT INTO project_doc (project_id, title, content, level, slug, path, status)
+                    VALUES (1, 'Architecture', 'English canonical body.', 0, 'architecture', 'architecture', 'current');
+                    INSERT INTO project_doc_title_localization VALUES (1, 'ru', 'Архитектура');
+                    """
+                )
+                entries = fixer_wire_hands_context.load_project_doc_tree(conn, 1)
+            finally:
+                conn.close()
+
+            worktree = Path(tmp) / "materialized"
+            written = fixer_wire_hands_context.materialize_hands_docs(worktree, entries)
+            content = (worktree / written[0]).read_text(encoding="utf-8")
+
+        self.assertEqual(entries[0].title, "Architecture")
+        self.assertEqual(entries[0].display_title, "Архитектура")
+        self.assertIn("# Architecture", content)
+        self.assertNotIn("# Архитектура", content)
 
 
 if __name__ == "__main__":

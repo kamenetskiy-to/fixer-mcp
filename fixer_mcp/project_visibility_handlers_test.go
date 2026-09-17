@@ -27,6 +27,7 @@ func TestHelperProcessOverseerLauncherFailure(t *testing.T) {
 
 func setupGetProjectsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+	t.Setenv(fixerMcpLockedRoleEnv, "")
 
 	normalizedProjectCWD, err := normalizeProjectCWD(testProjectCWD)
 	if err != nil {
@@ -529,9 +530,8 @@ func TestAssumeRoleFixerThenGetProjects_Denied(t *testing.T) {
 	db = testDB
 
 	_, assumeOut, assumeErr := AssumeRole(context.Background(), nil, AssumeRoleInput{
-		Role:  "fixer",
-		Cwd:   testProjectCWD,
-		Token: "supersecret",
+		Role: "fixer",
+		Cwd:  testProjectCWD,
 	})
 	if assumeErr != nil {
 		t.Fatalf("assume_role fixer failed: %v", assumeErr)
@@ -573,8 +573,7 @@ func TestAssumeRoleOverseerThenGetProjects_Allowed(t *testing.T) {
 	db = testDB
 
 	_, assumeOut, assumeErr := AssumeRole(context.Background(), nil, AssumeRoleInput{
-		Role:  "overseer",
-		Token: "supersecret",
+		Role: "overseer",
 	})
 	if assumeErr != nil {
 		t.Fatalf("assume_role overseer failed: %v", assumeErr)
@@ -721,9 +720,8 @@ func TestRegisterProject_OverseerIdempotentAndAuthRecovery(t *testing.T) {
 	}
 
 	_, assumeOut, assumeErr := AssumeRole(context.Background(), nil, AssumeRoleInput{
-		Role:  "fixer",
-		Cwd:   nestedDir,
-		Token: "supersecret",
+		Role: "fixer",
+		Cwd:  nestedDir,
 	})
 	if assumeErr != nil {
 		t.Fatalf("assume_role fixer after nested registration failed: %v", assumeErr)
@@ -795,9 +793,8 @@ func TestAssumeRole_UnknownCWD_InstructsOverseerRegistrationOnly(t *testing.T) {
 
 	missingCWD := t.TempDir() + "/not-registered"
 	callResult, out, err := AssumeRole(context.Background(), nil, AssumeRoleInput{
-		Role:  "fixer",
-		Cwd:   missingCWD,
-		Token: "supersecret",
+		Role: "fixer",
+		Cwd:  missingCWD,
 	})
 	if err != nil {
 		t.Fatalf("expected MCP error result instead of transport error, got: %v", err)

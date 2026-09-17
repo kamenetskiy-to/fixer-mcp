@@ -171,12 +171,16 @@ func createParallelWaveReviewSession(wave NetrunnerWaveSnapshot) (parallelWaveRe
 	taskDescription := parallelWaveReviewTaskDescription(wave)
 	result, err := db.Exec(
 		`INSERT INTO session (
-			project_id, task_description, status, declared_write_scope, parallel_wave_id
-		) VALUES (?, ?, 'pending', ?, ?)`,
+			project_id, task_description, status, declared_write_scope, parallel_wave_id,
+			cli_backend, cli_model, cli_reasoning
+		) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
 		authorizedProjectId,
 		taskDescription,
 		declaredWriteScope,
 		parallelWaveReviewMarker(wave.Id),
+		defaultParallelWaveReviewBackend,
+		defaultParallelWaveReviewModel,
+		defaultParallelWaveReviewReasoning,
 	)
 	if err != nil {
 		return parallelWaveReviewSession{}, err
@@ -305,7 +309,7 @@ func launchParallelWaveReviewer(ctx context.Context, wave NetrunnerWaveSnapshot,
 	if reviewReasoning == "" {
 		reviewReasoning = defaultParallelWaveReviewReasoning
 	}
-	command := execCommand("python3", launcherScript, "launch-wave-reviewer",
+	command := execCommand(resolveFixerPythonExecutable(os.Environ()), launcherScript, "launch-wave-reviewer",
 		"--cwd", projectCWD,
 		"--session-id", strconv.Itoa(review.LocalSessionID),
 		"--wave-id", strconv.Itoa(wave.Id),

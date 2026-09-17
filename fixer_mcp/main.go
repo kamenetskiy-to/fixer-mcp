@@ -233,7 +233,7 @@ func WakeFixerAutonomous(ctx context.Context, req *mcp.CallToolRequest, input Wa
 	}
 
 	command := execCommand(
-		"python3",
+		resolveFixerPythonExecutable(os.Environ()),
 		launcherScript,
 		"resume-fixer",
 		"--cwd",

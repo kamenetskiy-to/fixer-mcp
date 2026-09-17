@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence
 
 from client_wires.backends import (
     DEFAULT_BACKEND,
+    DEFAULT_MCP_BACKEND,
     available_backend_descriptors,
     normalize_backend_name,
     subscribed_backend_descriptors,
@@ -21,6 +22,7 @@ from client_wires.backends.codex_adapter import (
     codex_model_family_label,
     codex_model_options_for_family,
 )
+from client_wires.backends.commandcode_adapter import commandcode_reasoning_options
 from client_wires.codex_compat.ui import BACK_VALUE, BackNavigation
 from client_wires import fixer_wire_db
 from client_wires import fixer_wire_mcp
@@ -34,8 +36,6 @@ FIXER_LAUNCH_NEW = "__fixer_launch_new__"
 FIXER_LAUNCH_RESUME = "__fixer_launch_resume__"
 OVERSEER_LAUNCH_NEW = "__overseer_launch_new__"
 OVERSEER_LAUNCH_RESUME = "__overseer_launch_resume__"
-HANDS_LAUNCH_NEW = "__hands_launch_new__"
-HANDS_LAUNCH_RESUME = "__hands_launch_resume__"
 HANDS_WORKSPACE_SAFE = "__hands_workspace_safe__"
 HANDS_WORKSPACE_HOTFIX = "__hands_workspace_hotfix__"
 RECENTLY_ACTIVE_STATUSES = {"in_progress"}
@@ -43,6 +43,7 @@ MCP_CATEGORY_ORDER = ("DB", "Web-search", "Design", "Productivity", "Coding", "O
 MCP_FALLBACK_CATEGORY = "Other"
 HIDDEN_MCP_SERVERS = fixer_wire_mcp.HIDDEN_MCP_SERVERS
 ALWAYS_VISIBLE_MCP_NAMES = {fixer_wire_mcp.FIGMA_CONSOLE_MCP_NAME}
+MESH_MCP_PREFIX = fixer_wire_mcp.MESH_MCP_PREFIX
 NETRUNNER_KIND_MANUAL = fixer_wire_prompts.NETRUNNER_KIND_MANUAL
 NETRUNNER_KIND_ACCEPTANCE = fixer_wire_prompts.NETRUNNER_KIND_ACCEPTANCE
 
@@ -87,6 +88,9 @@ def _summary_provider(summary: Any) -> str:
 def _fixer_resume_value(summary: Any) -> str:
     provider = _summary_provider(summary)
     session_id = str(summary.session_id)
+    subscription = _summary_subscription_provider(summary)
+    if provider == "codex" and subscription and subscription != "openai":
+        return f"codex/{subscription}:{session_id}"
     if provider == DEFAULT_BACKEND:
         return session_id
     return f"{provider}:{session_id}"
@@ -95,6 +99,17 @@ def _fixer_resume_value(summary: Any) -> str:
 def _provider_label(provider: str) -> str:
     descriptors = {descriptor.name: descriptor.label for descriptor in available_backend_descriptors()}
     return descriptors.get(provider, provider)
+
+
+def _summary_subscription_provider(summary: Any) -> str:
+    explicit = str(getattr(summary, "subscription_provider", "") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider = _summary_provider(summary)
+    model = str(getattr(summary, "model", "") or "").strip()
+    if provider in {"codex", "commandcode"}:
+        return codex_model_family_for_model(model) if model else ("commandcode" if provider == "commandcode" else "openai")
+    return ""
 
 
 def _resume_session_label(summary: Any, *, preview_width: int = 42) -> str:
@@ -106,7 +121,11 @@ def _resume_session_label(summary: Any, *, preview_width: int = 42) -> str:
         width=preview_width,
         placeholder="…",
     )
-    provider_text = textwrap.shorten(_provider_label(provider), width=12, placeholder="…")
+    provider_text = _provider_label(provider)
+    subscription = _summary_subscription_provider(summary)
+    if provider == "codex" and subscription:
+        provider_text = f"{provider_text}/{codex_model_family_label(subscription)}"
+    provider_text = textwrap.shorten(provider_text, width=20, placeholder="…")
     session_id = textwrap.shorten(str(summary.session_id), width=32, placeholder="…")
     return f"{provider_text:<12} | {preview:<42} | {created_local} | {updated_local} | {session_id}"
 
@@ -214,25 +233,6 @@ def _select_overseer_launch_action_interactive(Option: Any, single_select_items:
     return selected_text
 
 
-def _select_hands_launch_action_interactive(Option: Any, single_select_items: Any, *, has_resume: bool) -> str:
-    options = [Option("Project Hands launch", is_header=True)]
-    if has_resume:
-        options.append(Option("Resume a saved Руки client", HANDS_LAUNCH_RESUME))
-    options.append(Option("Start a new Руки client", HANDS_LAUNCH_NEW))
-    selected = single_select_items(
-        options,
-        title="Project Hands session mode (enter confirm, q cancel)",
-        preselected_value=HANDS_LAUNCH_RESUME if has_resume else HANDS_LAUNCH_NEW,
-    )
-    if selected is None:
-        print("Cancelled.")
-        raise SystemExit(130)
-    selected_text = str(selected)
-    if selected_text not in {HANDS_LAUNCH_NEW, HANDS_LAUNCH_RESUME}:
-        raise RuntimeError(f"Unexpected Project Hands launch mode: {selected_text}")
-    return selected_text
-
-
 def _select_hands_workspace_mode_interactive(Option: Any, single_select_items: Any) -> str:
     options = [
         Option("Project Hands workspace", is_header=True),
@@ -247,6 +247,8 @@ def _select_hands_workspace_mode_interactive(Option: Any, single_select_items: A
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
+    if selected == BACK_VALUE:
+        raise BackNavigation()
     selected_text = str(selected)
     if selected_text not in {HANDS_WORKSPACE_SAFE, HANDS_WORKSPACE_HOTFIX}:
         raise RuntimeError(f"Unexpected Project Hands workspace mode: {selected_text}")
@@ -278,99 +280,89 @@ def _select_hands_docs_interactive(
 
     selected = {int(doc_id) for doc_id in preselected_ids if int(doc_id) in by_id}
     expanded: set[int] = set()
-    while True:
-        options = [Option("Project documentation tree", is_header=True)]
-        visible_doc_ids: list[int] = []
+
+    def _build_options(selection: set[int]) -> tuple[list[Any], list[int]]:
+        opts: list[Any] = [Option("Project documentation tree", is_header=True)]
+        visible: list[int] = []
+
+        def _order_key(doc_id: int) -> tuple[int, int, int]:
+            kids = children.get(doc_id, [])
+            attached_inside = sum(
+                1 for nested_id in _subtree(doc_id)[1:] if nested_id in selection
+            )
+            # Parent nodes (with children) first; among them by attached-docs count
+            # descending, then stable by doc id.
+            return (0 if kids else 1, -attached_inside, doc_id)
 
         def _walk(doc_id: int, depth: int) -> None:
             entry = by_id[doc_id]
             kids = children.get(doc_id, [])
             indent = "  " * depth
-            label = f"{indent}{entry.title}  ({entry.path or entry.slug or entry.status})"
-            options.append(Option(label, doc_id))
-            visible_doc_ids.append(doc_id)
-            if not kids:
+            marker = "▾" if doc_id in expanded and kids else "▸" if kids else " "
+            attached_inside = sum(
+                1 for nested_id in _subtree(doc_id)[1:] if nested_id in selection
+            )
+            count_column = f"{attached_inside:>3}" if kids else "   "
+            display_title = str(getattr(entry, "display_title", "") or entry.title)
+            label = f"{count_column} {indent}{marker} {display_title}  ({entry.path or entry.slug or entry.status})"
+            opts.append(Option(label, doc_id))
+            visible.append(doc_id)
+            if not kids or doc_id not in expanded:
                 return
-            branch_ids = _subtree(doc_id)
-            if doc_id in expanded:
-                options.append(Option(f"{indent}  ▸ collapse branch", f"collapse:{doc_id}", instant=True))
-                options.append(Option(
-                    f"{indent}  ▸ toggle whole branch ({len(branch_ids)} docs)",
-                    f"branch:{doc_id}",
-                    instant=True,
-                ))
-                for kid in kids:
-                    _walk(kid, depth + 1)
-            else:
-                options.append(Option(
-                    f"{indent}  ▸ expand branch ({len(branch_ids)} docs)",
-                    f"expand:{doc_id}",
-                    instant=True,
-                ))
-                options.append(Option(
-                    f"{indent}  ▸ toggle whole branch ({len(branch_ids)} docs)",
-                    f"branch:{doc_id}",
-                    instant=True,
-                ))
+            for kid in sorted(kids, key=_order_key):
+                _walk(kid, depth + 1)
 
-        for root in roots:
+        for root in sorted(roots, key=_order_key):
             _walk(root, 0)
+        return opts, visible
+
+    def _refresh_options(current_selected_values: Sequence[Any]) -> list[Any]:
+        current = {
+            int(value) for value in current_selected_values if int(value) in by_id
+        }
+        options, _ = _build_options(current)
+        return options
+
+    cursor_doc_id: int | None = None
+    while True:
+        options, visible_doc_ids = _build_options(selected)
+        preselected_values = sorted(selected)
         result = multi_select_items(
             options,
-            title="Attach project docs to Руки (space toggle, enter confirm, a toggle all, q cancel)",
-            preselected_values=sorted(selected),
+            title="Attach project docs to Руки (space toggle, enter confirm, a toggle all, q cancel | t toggle branch, ← collapse, → expand)",
+            preselected_values=preselected_values,
+            initial_cursor_value=cursor_doc_id,
+            refresh_options=_refresh_options,
         )
         if result is None:
             print("Cancelled.")
             raise SystemExit(130)
-        actions = [value for value in result if isinstance(value, str)]
-        chosen_docs = {int(value) for value in result if not isinstance(value, str)}
+        if result == BACK_VALUE or BACK_VALUE in result:
+            raise BackNavigation()
+        actions = [value for value in result if isinstance(value, str) and value != BACK_VALUE]
+        chosen_docs = {int(value) for value in result if not isinstance(value, str) and value != BACK_VALUE}
         selected = (selected - set(visible_doc_ids)) | chosen_docs
         if not actions:
             return sorted(selected)
         for action in actions:
             verb, _, raw_id = action.partition(":")
-            doc_id = int(raw_id)
+            try:
+                doc_id = int(raw_id)
+            except ValueError:
+                continue
             if verb == "expand":
                 expanded.add(doc_id)
+                cursor_doc_id = doc_id
             elif verb == "collapse":
                 expanded.discard(doc_id)
+                cursor_doc_id = doc_id
             elif verb == "branch":
                 branch_ids = set(_subtree(doc_id))
                 if branch_ids <= selected:
                     selected -= branch_ids
                 else:
                     selected |= branch_ids
-
-
-def _select_hands_resume_context_interactive(
-    contexts: Sequence[Any],
-    Option: Any,
-    single_select_items: Any,
-) -> Any:
-    if not contexts:
-        raise RuntimeError("No saved Руки launch contexts were found for this project.")
-    options = [Option("Руки launch contexts", is_header=True)]
-    for index, context in enumerate(contexts):
-        external = str(getattr(context, "external_session_id", "") or "").strip()
-        resume_mark = "resume" if external else "fresh"
-        docs_count = len(getattr(context, "doc_ids", ()) or ())
-        mcp_count = len(getattr(context, "mcp_names", ()) or ())
-        created = str(getattr(context, "created_at", "") or "")[:16]
-        label = (
-            f"{context.provider:<12} | {created} | {resume_mark} | "
-            f"docs={docs_count} mcp={mcp_count} | {Path(str(context.worktree_path)).name}"
-        )
-        options.append(Option(label, index))
-    selected = single_select_items(
-        options,
-        title="Select Руки client to resume (enter confirm, q cancel)",
-        preselected_value=0,
-    )
-    if selected is None:
-        print("Cancelled.")
-        raise SystemExit(130)
-    return contexts[int(selected)]
+                cursor_doc_id = doc_id
 
 
 def _select_manual_netrunner_kind_interactive(Option: Any, single_select_items: Any) -> str:
@@ -419,27 +411,43 @@ def _select_project_hands_lane_interactive(
     select_backend = select_backend_interactive or _select_backend_interactive
     select_model = select_model_interactive or _select_model_interactive
     preferred_provider = default_lane if default_lane in by_provider else str(lanes[0].provider)
-    selected_backend = normalize_backend_name(
-        select_backend(
-            backend_for_provider.get(preferred_provider, preferred_provider),
+    from client_wires.fixer_wire_navigation import FixerTuiNavigator
+
+    nav = FixerTuiNavigator()
+
+    def _pick_backend() -> str:
+        preferred_backend = backend_for_provider.get(preferred_provider, preferred_provider)
+        if select_backend_interactive is None:
+            selected_backend = _select_backend_interactive(
+                preferred_backend,
+                Option,
+                single_select_items,
+                allowed_backends={backend_for_provider[provider] for provider in by_provider},
+            )
+        else:
+            selected_backend = select_backend(preferred_backend, Option, single_select_items)
+        return normalize_backend_name(selected_backend)
+
+    def _pick_model() -> Any:
+        selected_backend = nav.state["backend"]
+        selected_provider = provider_for_backend.get(selected_backend, selected_backend)
+        lane = by_provider.get(selected_provider)
+        if lane is None:
+            raise RuntimeError(f"Selected Project Hands lane {selected_backend!r} is unavailable.")
+        preferred_model = str(getattr(lane, "model", "") or "").strip()
+        selected_model = select_model(
+            selected_backend,
+            preferred_model,
             Option,
             single_select_items,
+            **({"require_codex_model_family": True} if selected_backend == "codex" else {}),
         )
-    )
-    selected_provider = provider_for_backend.get(selected_backend, selected_backend)
-    lane = by_provider.get(selected_provider)
-    if lane is None:
-        raise RuntimeError(f"Selected Project Hands lane {selected_backend!r} is unavailable.")
+        return replace(lane, model=selected_model)
 
-    preferred_model = str(getattr(lane, "model", "") or "").strip()
-    selected_model = select_model(
-        selected_backend,
-        preferred_model,
-        Option,
-        single_select_items,
-        **({"require_codex_model_family": True} if selected_backend == "codex" else {}),
-    )
-    return replace(lane, model=selected_model)
+    nav.add("backend", _pick_backend)
+    nav.add("lane", _pick_model)
+    nav.run()
+    return nav.state["lane"]
 
 
 def _select_session_interactive(
@@ -512,6 +520,12 @@ def _select_mcp_interactive(
     ] = fixer_wire_db._registry_metadata_with_fallback,
 ) -> list[str]:
     always_visible_names = ALWAYS_VISIBLE_MCP_NAMES.intersection(set(registry_names))
+    # Mesh browser servers must stay selectable even though they are not curated
+    # defaults: the registry resets is_default on every Fixer MCP start, and the
+    # whole point is to attach this MCP to Hands before a session exists.
+    always_visible_names |= {
+        name for name in registry_names if str(name).startswith(MESH_MCP_PREFIX)
+    }
     if show_all_registry_names:
         names = sorted((set(registry_names) | set(assigned_names) | always_visible_names) - HIDDEN_MCP_SERVERS)
     else:
@@ -556,7 +570,11 @@ def _select_mcp_interactive(
     if selected is None:
         print("Cancelled.")
         raise SystemExit(130)
-    return [str(name) for name in selected if isinstance(name, str)]
+    if selected == BACK_VALUE:
+        raise BackNavigation()
+    if any(v == BACK_VALUE for v in selected):
+        raise BackNavigation()
+    return [str(name) for name in selected if isinstance(name, str) and name != BACK_VALUE]
 
 
 def _select_fixer_resume_session_interactive(
@@ -665,16 +683,22 @@ def _select_backend_interactive(
     preferred_backend: str,
     Option: Any,
     single_select_items: Any,
+    *,
+    allowed_backends: set[str] | None = None,
 ) -> str:
     descriptors = {descriptor.name: descriptor for descriptor in subscribed_backend_descriptors()}
     order = ("codex", "commandcode", "antigravity", "grok", "claude", "kimi-code")
     ordered = [name for name in order if name in descriptors]
     ordered += [name for name in descriptors if name not in order]
+    if allowed_backends is not None:
+        ordered = [name for name in ordered if name in allowed_backends]
+        if normalize_backend_name(preferred_backend) not in allowed_backends:
+            preferred_backend = ordered[0] if ordered else preferred_backend
     options = [Option("CLI backends", is_header=True)]
     for name in ordered:
         descriptor = descriptors[name]
         label = descriptor.label
-        if name == DEFAULT_BACKEND:
+        if name == DEFAULT_MCP_BACKEND:
             label = f"{label} [default]"
         detail = ai_limits.backend_subscription_limits(name) or descriptor.description
         options.append(Option(f"{label} | {detail}", name))
@@ -704,52 +728,65 @@ def _select_model_interactive(
     descriptor = backend_descriptor(backend)
     preferred_model = preferred_model.strip()
     if backend == "codex" and require_codex_model_family:
+        from client_wires.fixer_wire_navigation import FixerTuiNavigator
+
+        nav = FixerTuiNavigator()
         preferred_family = codex_model_family_for_model(preferred_model or descriptor.default_model)
-        family_options = [Option("Codex subscriptions", is_header=True)]
-        for family in ("openai", "opencode-go", "commandcode"):
-            family_options.append(
-                Option(
-                    f"{codex_model_family_label(family)} "
-                    f"[default: {codex_default_model_for_family(family)}]",
-                    family,
+
+        def _pick_family() -> str:
+            family_options = [Option("Codex subscriptions", is_header=True)]
+            for family in ("openai", "opencode-go", "commandcode"):
+                note = " | MCP unavailable" if family == "opencode-go" else " | verified MCP route" if family == "commandcode" else ""
+                family_options.append(
+                    Option(
+                        f"{codex_model_family_label(family)} "
+                        f"[default: {codex_default_model_for_family(family)}]{note}",
+                        family,
+                    )
                 )
+            choice = single_select_items(
+                family_options,
+                title="Select Codex subscription (enter confirm, q cancel)",
+                preselected_value=preferred_family,
             )
-        family_choice = single_select_items(
-            family_options,
-            title="Select Codex subscription (enter confirm, q cancel)",
-            preselected_value=preferred_family,
-        )
-        if family_choice is None:
-            print("Cancelled.")
-            raise SystemExit(130)
-        if family_choice == BACK_VALUE:
-            raise BackNavigation()
-        family = str(family_choice).strip().lower()
-        family_model_options = codex_model_options_for_family(descriptor.model_options, family)
-        if not family_model_options:
-            raise RuntimeError(f"No Codex model options are registered for family {family!r}.")
-        if preferred_model not in family_model_options:
-            preferred_model = codex_default_model_for_family(family)
-        options = [Option(f"{codex_model_family_label(family)} models", is_header=True)]
-        for model in family_model_options:
-            label = codex_model_display_label(model)
-            if model == preferred_model:
-                label = f"{label} [default]"
-            options.append(Option(label, model))
-        selected = single_select_items(
-            options,
-            title=f"Select {codex_model_family_label(family)} model (enter confirm, q cancel)",
-            preselected_value=preferred_model,
-        )
-        if selected is None:
-            print("Cancelled.")
-            raise SystemExit(130)
-        if selected == BACK_VALUE:
-            raise BackNavigation()
-        selected_model = str(selected).strip()
-        if selected_model not in family_model_options:
-            raise RuntimeError(f"Selected Codex model {selected_model!r} is not part of family {family!r}.")
-        return selected_model
+            if choice is None:
+                print("Cancelled.")
+                raise SystemExit(130)
+            if choice == BACK_VALUE:
+                raise BackNavigation()
+            return str(choice).strip().lower()
+
+        def _pick_family_model() -> str:
+            family = nav.state["family"]
+            family_model_options = codex_model_options_for_family(descriptor.model_options, family)
+            if not family_model_options:
+                raise RuntimeError(f"No Codex model options are registered for family {family!r}.")
+            local_preferred = preferred_model if preferred_model in family_model_options else codex_default_model_for_family(family)
+            opts = [Option(f"{codex_model_family_label(family)} models", is_header=True)]
+            for model in family_model_options:
+                label = codex_model_display_label(model)
+                if model == local_preferred:
+                    label = f"{label} [default]"
+                opts.append(Option(label, model))
+            choice2 = single_select_items(
+                opts,
+                title=f"Select {codex_model_family_label(family)} model (enter confirm, q cancel)",
+                preselected_value=local_preferred,
+            )
+            if choice2 is None:
+                print("Cancelled.")
+                raise SystemExit(130)
+            if choice2 == BACK_VALUE:
+                raise BackNavigation()
+            picked = str(choice2).strip()
+            if picked not in family_model_options:
+                raise RuntimeError(f"Selected Codex model {picked!r} is not part of family {family!r}.")
+            return picked
+
+        nav.add("family", _pick_family)
+        nav.add("family_model", _pick_family_model)
+        nav.run()
+        return str(nav.state["family_model"]).strip()
 
     options = [Option(f"{descriptor.label} models", is_header=True)]
     for model in descriptor.model_options:
@@ -778,10 +815,24 @@ def _select_reasoning_interactive(
     single_select_items: Any,
     *,
     backend_descriptor: Callable[[str], Any] = fixer_wire_db._backend_descriptor,
+    model: str | None = None,
 ) -> str:
     descriptor = backend_descriptor(backend)
+    reasoning_options = descriptor.reasoning_options
+    if backend == "commandcode" and model:
+        model_options = commandcode_reasoning_options(model)
+        if not model_options:
+            return descriptor.default_reasoning
+        reasoning_options = model_options
+    preferred_value = preferred_reasoning.strip() or descriptor.default_reasoning
+    if preferred_value not in reasoning_options:
+        preferred_value = (
+            "high" if "high" in reasoning_options
+            else "xhigh" if "xhigh" in reasoning_options
+            else reasoning_options[0]
+        )
     options = [Option(f"{descriptor.label} reasoning", is_header=True)]
-    for reasoning in descriptor.reasoning_options:
+    for reasoning in reasoning_options:
         label = reasoning
         if reasoning == descriptor.default_reasoning:
             label = f"{label} [default]"
@@ -790,7 +841,7 @@ def _select_reasoning_interactive(
     selected = single_select_items(
         options,
         title=f"Select {descriptor.label} reasoning (enter confirm, q cancel)",
-        preselected_value=preferred_reasoning.strip() or descriptor.default_reasoning,
+        preselected_value=preferred_value,
     )
     if selected is None:
         print("Cancelled.")

@@ -67,7 +67,7 @@ func TestPermanentHandsIdentityAndProviderDefaultsAreAvailable(t *testing.T) {
 		t.Fatalf("repeat migration duplicated identity: %d", identityCount)
 	}
 	lanes := readHandsLanes()
-	if len(lanes) != 5 || lanes[0].Model != "gpt-5.6-luna" || lanes[0].Reasoning != "high" || lanes[2].Model != "kimi-k3-256k" || lanes[4].Provider != "grok" {
+	if len(lanes) != 6 || lanes[0].Provider != "commandcode" || lanes[0].Model != "commandcode/zai-org/glm-5.3-flash" || lanes[0].Reasoning != "medium" || lanes[3].Model != "kimi-k3-256k" || lanes[5].Provider != "grok" {
 		t.Fatalf("unexpected provider defaults: %+v", lanes)
 	}
 }

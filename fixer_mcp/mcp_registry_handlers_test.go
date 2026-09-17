@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -377,6 +379,53 @@ func TestSyncAndListMcpServers_FixerFlow(t *testing.T) {
 	}
 	if !foundCatalog {
 		t.Fatalf("expected catalog_server in list output, got %+v", listOut.Servers)
+	}
+}
+
+func TestSyncMcpServers_DefaultsToAuthenticatedProjectConfig(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() { _ = testDB.Close() }()
+
+	projectCWD := t.TempDir()
+	if _, err := testDB.Exec("UPDATE project SET cwd = ? WHERE id = 1", projectCWD); err != nil {
+		t.Fatalf("update project cwd: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(projectCWD, "mcp_config.json"),
+		[]byte(`{"mcpServers":{"project_local_server":{"command":"node"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("write project mcp config: %v", err)
+	}
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+	callResult, out, err := SyncMcpServers(context.Background(), nil, SyncMcpServersInput{})
+	if err != nil {
+		t.Fatalf("sync project-local mcp_config.json: %v", err)
+	}
+	if callResult != nil || out.Total != 1 {
+		t.Fatalf("unexpected sync output: result=%+v output=%+v", callResult, out)
+	}
+
+	_, setOut, err := SetProjectMcpServers(context.Background(), nil, SetProjectMcpServersInput{
+		McpServerNames: []string{"project_local_server"},
+	})
+	if err != nil {
+		t.Fatalf("allowlist synced project-local server: %v", err)
+	}
+	if len(setOut.McpServerNames) != 1 || setOut.McpServerNames[0] != "project_local_server" {
+		t.Fatalf("unexpected project allowlist output: %+v", setOut)
 	}
 }
 

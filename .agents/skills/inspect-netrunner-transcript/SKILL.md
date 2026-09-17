@@ -1,6 +1,6 @@
 ---
 name: inspect-netrunner-transcript
-description: Use when a Fixer needs to recover or audit a confusing, broken, dead, or interrupted Netrunner by locating its local Codex/Droid JSONL transcript path through Fixer MCP without loading the transcript into context.
+description: Use when a Fixer needs to recover or audit a confusing, broken, dead, or interrupted Netrunner by locating its local Codex, Droid, or Antigravity JSONL transcript path through Fixer MCP without loading the transcript into context.
 ---
 
 # Inspect Netrunner Transcript
@@ -25,6 +25,7 @@ jq -c 'select(.type == "response_item" or .type == "message")' '<transcript_path
 
 ## Notes
 
-- Codex and Droid path details are hidden by the MCP tool. Treat `transcript_path` as authoritative when present.
+- Codex, Droid, and Antigravity path details are hidden by the MCP tool. Treat `transcript_path` as authoritative when present.
+- Antigravity stores a session transcript under `~/.gemini/antigravity-cli/brain/<external-session-id>/.system_generated/logs/`. Fixer MCP prefers `transcript_full.jsonl` and falls back to `transcript.jsonl`. Do not rediscover this path manually when the lookup has returned it.
 - If `exists` or `readable` is false, use `search_diagnostics` to decide whether the worker never launched, external id metadata is missing, or the local transcript store is unavailable.
 - Quote only the small lines needed for evidence. Summarize the rest.

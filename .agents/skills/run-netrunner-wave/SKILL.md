@@ -25,7 +25,22 @@ Every wave has a `review_policy`:
 - A one-worker wave (monowave) must always use `manual`.
 - `automatic` adds an independent reviewer Netrunner after all workers are terminal. Use it only when the Architect explicitly requests automatic review or for a genuinely large parallel wave where the additional review materially helps.
 - The Fixer still owns the final review and integration decision under both policies. `manual` does not disable review.
-- When `automatic` is selected, the Fixer may set `review_backend`, `review_model`, and `review_reasoning`. Defaults are `codex`, `opencode-go/deepseek-v4-flash`, and `high`. OpenCode Go DeepSeek V4 Pro is forbidden.
+- When `automatic` is selected, the Fixer may set `review_backend`, `review_model`, and `review_reasoning`. MCP-bound defaults are `codex`, `gpt-5.6-luna`, and `high`. OpenCode Go DeepSeek V4 Pro is forbidden.
+- CommandCode/OpenCode routes remain available as explicit alternatives; they are not the default worker route.
+
+## Attempt And Instruction Semantics
+
+The provider receives the task text when its attempt is launched. `update_task`
+appends durable session metadata; it does not hot-patch a running provider
+process. If the acceptance criteria or instructions change, explicitly stop and
+requeue/relaunch the attempt (or use the governed repair path) before claiming
+that the worker received the change.
+
+Worker terminality is separate from reviewer terminality. Under `automatic`,
+the runtime creates one linked reviewer only after all scheduled implementation
+workers are terminal and failure reconciliation passes. The reviewer is an
+independent session, not another implementation worker; a reviewer launch
+failure is persisted for Fixer follow-up and never implies acceptance.
 
 ## Dirty Base Dispatch
 
@@ -95,17 +110,47 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
    - an estimated wait/execution time for the wave as a whole;
    - the wave id, session ids, and each worker's initial `launched`, `running`, or dependency-pending status.
    Use persisted launch configuration and returned initial statuses, label estimates as approximate when needed, and make this report the first response content required by the active-wave status rule. This launch report does not replace later active-wave reconciliation or the final-response wait requirement.
-10. Wait with `wait_for_netrunner_wave(wave_id, return_when="first_review_ready")`. Under `manual`, this never starts a reviewer Netrunner. Under explicitly selected `automatic`, waiting after all workers become terminal starts the configured independent reviewer.
-11. The Fixer reviews every returned worker serially under both policies:
+10. Wait with `wait_for_netrunner_wave(wave_id, return_when="first_review_ready")`. Under `manual`, this never starts a reviewer Netrunner. Under explicitly selected `automatic`, all implementation workers becoming terminal may start the configured independent reviewer, but does not make that reviewer terminal or accepted.
+11. The Fixer reviews every returned worker serially under both policies and,
+    for `automatic`, separately verifies the linked reviewer session/process:
    - read the session report and proposals
    - inspect changed paths and the captured patch artifact
    - inspect the worker worktree when needed
    - verify the worker reported a commit SHA, a clean worktree, scope compliance, and required tests
+   - verify the automatic reviewer is terminal and its report is available before using it as review evidence
    - reject for rework if task changes are uncommitted, the worktree is dirty, or changed paths exceed `declared_write_scope`
    - approve or reject doc proposals by Fixer judgment
    - complete the session or append precise rework
-12. Continue waiting until all workers are terminal; use `return_when="all_terminal"` when you need the final aggregate state.
-13. Clean up only after review decisions are made. Start conservative, then call `cleanup_netrunner_wave(remove_worktrees=true)` when it is safe.
+12. Continue waiting until all implementation workers are terminal; use
+    `return_when="all_terminal"` for the final worker aggregate, but do not
+    confuse that result with reviewer or acceptance completion.
+13. After implementation review passes, reconcile governed repair before
+    advancing. A first eligible single-worker/minority failure becomes
+    `repair_required`; the Fixer authorizes the selected worker once with
+    `authorize_netrunner_wave_repair`. A strict majority pauses the wave, and
+    a later minority/tie after the repair is consumed becomes
+    `manual_repair_required`.
+14. For the explicit phase contract, call
+    `transition_netrunner_wave_phase(target_phase="acceptance", ...)` only
+    after all implementation workers are terminal, failure policy is `passed`,
+    the implementation reviewer is completed and approved, and a distinct
+    project-scoped pending acceptance session is supplied. Review that
+    acceptance session separately, then transition to `completed` only after
+    it is completed and reviewed; recursive-capable waves also require an
+    exact committed `handoff_sha`.
+15. Clean up only after review/acceptance decisions are made. Start
+    conservative, then call `cleanup_netrunner_wave(remove_worktrees=true)`
+    when it is safe.
+
+### Acceptance Transition Runtime Blocker
+
+The current `transition_netrunner_wave_phase` handler requires a completed
+implementation reviewer session, while `manual` review intentionally creates
+no reviewer Netrunner. Consequently manual waves—including mandatory-manual
+monowaves—cannot use the acceptance transition as currently implemented. Keep
+the blocker visible and do not fabricate a reviewer or claim that a Fixer-only
+review satisfies the handler; this needs a runtime contract change before
+manual-wave acceptance can be enabled.
 
 ## Droid Backend Launches
 
@@ -138,7 +183,9 @@ malformed-completion handling, and hang recovery follow the provider adapter can
 - Netrunners must not remove worktrees, rebase, merge, change wave state, or edit another worker's branch.
 - Netrunners must commit all task changes on their own worker branch before `complete_task`; they must not merge or push.
 - Treat timeout, stale epoch, frozen orchestration, missing process, or scope drift as review blockers.
-- If the wave produces conflicting results, create an explicit dependency-gated repair worker or stop and report the conflict; do not launch a serial autonomous worker.
+- If the wave produces conflicting results, use the durable failure-policy and
+  governed repair path above, or stop and report the conflict; do not launch an
+  untracked serial autonomous worker.
 
 ## Reporting
 

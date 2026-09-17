@@ -24,25 +24,27 @@ const contextPackageSessionExcerptLen = 300
 
 // ContextPackageManifest describes where and when a package was exported.
 type ContextPackageManifest struct {
-	SchemaVersion int    `json:"schema_version"`
-	ExportedAt    string `json:"exported_at"`
-	ProjectName   string `json:"project_name"`
-	ProjectRoot   string `json:"project_root"`
+	SchemaVersion         int    `json:"schema_version"`
+	ExportedAt            string `json:"exported_at"`
+	ProjectName           string `json:"project_name"`
+	ProjectRoot           string `json:"project_root"`
+	DocumentationLanguage string `json:"documentation_language,omitempty"`
 }
 
 // ContextPackageDoc carries one canonical project doc. Parent linkage is
 // expressed via the parent's slug/path, never via raw numeric doc ids, so the
 // tree can be recreated on a machine where ids differ.
 type ContextPackageDoc struct {
-	Title      string `json:"title"`
-	Content    string `json:"content"`
-	DocType    string `json:"doc_type"`
-	Level      int    `json:"level"`
-	Slug       string `json:"slug"`
-	Path       string `json:"path"`
-	Status     string `json:"status"`
-	ParentSlug string `json:"parent_slug,omitempty"`
-	ParentPath string `json:"parent_path,omitempty"`
+	Title          string `json:"title"`
+	LocalizedTitle string `json:"localized_title,omitempty"`
+	Content        string `json:"content"`
+	DocType        string `json:"doc_type"`
+	Level          int    `json:"level"`
+	Slug           string `json:"slug"`
+	Path           string `json:"path"`
+	Status         string `json:"status"`
+	ParentSlug     string `json:"parent_slug,omitempty"`
+	ParentPath     string `json:"parent_path,omitempty"`
 }
 
 // ContextPackageBacklogItem carries one backlog item without machine-local ids.
@@ -106,9 +108,23 @@ type ImportProjectContextPackageOutput struct {
 }
 
 func fetchProjectContextDocs(projectID int) ([]ContextPackageDoc, error) {
+	language, err := projectDocLanguage(projectID)
+	if err != nil {
+		return nil, err
+	}
+	localized := projectDocLocalizationRequired(language)
+	localizedTitleExpr := "''"
+	localizationJoin := ""
+	args := []any{projectID}
+	if localized {
+		localizedTitleExpr = "COALESCE(l.localized_title, '')"
+		localizationJoin = "LEFT JOIN project_doc_title_localization l ON l.project_doc_id = d.id AND l.language_code = ?"
+		args = []any{language, projectID}
+	}
 	rows, err := db.Query(
-		`SELECT d.id,
+		fmt.Sprintf(`SELECT d.id,
 		        d.title,
+		        %s,
 		        d.content,
 		        COALESCE(d.doc_type, 'documentation'),
 		        d.parent_doc_id,
@@ -117,9 +133,10 @@ func fetchProjectContextDocs(projectID int) ([]ContextPackageDoc, error) {
 		        COALESCE(d.path, ''),
 		        COALESCE(d.status, 'current')
 		 FROM project_doc d
+		 %s
 		 WHERE d.project_id = ?
-		 ORDER BY d.id`,
-		projectID,
+		 ORDER BY d.id`, localizedTitleExpr, localizationJoin),
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -138,6 +155,7 @@ func fetchProjectContextDocs(projectID int) ([]ContextPackageDoc, error) {
 		if err := rows.Scan(
 			&entry.globalID,
 			&entry.doc.Title,
+			&entry.doc.LocalizedTitle,
 			&entry.doc.Content,
 			&entry.doc.DocType,
 			&parentID,
@@ -286,6 +304,13 @@ func ExportProjectContextPackage(ctx context.Context, req *mcp.CallToolRequest, 
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, ExportProjectContextPackageOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
+	if err := requireProjectDocLocalizationCoverage(projectID); err != nil {
+		return &mcp.CallToolResult{IsError: true}, ExportProjectContextPackageOutput{}, err
+	}
+	documentationLanguage, err := projectDocLanguage(projectID)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, ExportProjectContextPackageOutput{}, err
+	}
 
 	overview, err := fetchProjectContextOptionalContent("project_overview", projectID)
 	if err != nil {
@@ -310,10 +335,11 @@ func ExportProjectContextPackage(ctx context.Context, req *mcp.CallToolRequest, 
 
 	pkg := ProjectContextPackage{
 		Manifest: ContextPackageManifest{
-			SchemaVersion: contextPackageSchemaVersion,
-			ExportedAt:    time.Now().UTC().Format(time.RFC3339),
-			ProjectName:   projectName,
-			ProjectRoot:   projectCWD,
+			SchemaVersion:         contextPackageSchemaVersion,
+			ExportedAt:            time.Now().UTC().Format(time.RFC3339),
+			ProjectName:           projectName,
+			ProjectRoot:           projectCWD,
+			DocumentationLanguage: documentationLanguage,
 		},
 		Overview: overview,
 		Handoff:  handoff,
@@ -420,6 +446,11 @@ func ImportProjectContextPackage(ctx context.Context, req *mcp.CallToolRequest, 
 	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = ?", projectID).Scan(&existingDocs); err != nil {
 		return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
+	if existingDocs > 0 {
+		if err := requireProjectDocLocalizationCoverage(projectID); err != nil {
+			return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, err
+		}
+	}
 	var existingHandoff int
 	if err := db.QueryRow("SELECT COUNT(*) FROM project_handoff WHERE project_id = ?", projectID).Scan(&existingHandoff); err != nil {
 		return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, fmt.Errorf("DB query error: %v", err)
@@ -474,6 +505,10 @@ func ImportProjectContextPackage(ctx context.Context, req *mcp.CallToolRequest, 
 	slugToGlobalID := make(map[string]int, len(docs))
 	pathToGlobalID := make(map[string]int, len(docs))
 	for _, doc := range docs {
+		language, localizedTitle, err := requiredLocalizedProjectDocTitle(projectID, doc.LocalizedTitle)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, fmt.Errorf("doc %q: %v", doc.Title, err)
+		}
 		parentLocalDocID := 0
 		if doc.Level > 0 {
 			parentKey := doc.ParentPath
@@ -520,6 +555,9 @@ func ImportProjectContextPackage(ctx context.Context, req *mcp.CallToolRequest, 
 		newGlobalID, err := res.LastInsertId()
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, fmt.Errorf("LastInsertId error: %v", err)
+		}
+		if err := upsertProjectDocLocalizedTitle(db, int(newGlobalID), language, localizedTitle); err != nil {
+			return &mcp.CallToolResult{IsError: true}, ImportProjectContextPackageOutput{}, fmt.Errorf("localized title insert error for doc %q: %v", doc.Title, err)
 		}
 		if doc.Slug != "" {
 			slugToGlobalID[doc.Slug] = int(newGlobalID)

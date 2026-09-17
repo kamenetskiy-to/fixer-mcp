@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from client_wires import fixer_wire
+from client_wires import fixer_wire, fixer_wire_mcp
 
 WAVE_BRANCH_PATTERN = re.compile(r"^fixer/wave-[1-9][0-9]*/session-[1-9][0-9]*$")
 
@@ -279,6 +279,12 @@ def _build_wave_netrunner_launch_plan(
         available_servers,
         interactive=False,
     )
+    fixer_wire._maybe_configure_playwright_mesh_target(
+        adapter,
+        selected_servers,
+        available_servers,
+        interactive=False,
+    )
     adapter.ensure_runtime_files(resolved_worker_cwd, llm_selection, selected_servers, available_servers)
     prompt = build_wave_netrunner_prompt_fn(
         session_id=normalized_session_id,
@@ -298,6 +304,7 @@ def _build_wave_netrunner_launch_plan(
     )
     env = build_common_codex_env_fn(adapter, llm_selection, resolved_project_cwd)
     env[fixer_wire.FIXER_DB_PATH_ENV] = str(resolved_db_path)
+    env = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(env, selected_servers)
     for server_name, config_path in selected_config_paths.items():
         env_var = config_env_vars.get(server_name)
         if env_var:

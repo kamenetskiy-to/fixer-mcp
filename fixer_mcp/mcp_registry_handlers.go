@@ -36,6 +36,7 @@ var curatedDefaultMcpServers = []curatedMcpServerSpec{
 	{Name: "chrome-devtools", Category: "Coding", HowTo: "Use for deep Chrome runtime debugging across DOM/CSS, console, network, performance, Core Web Vitals, and Lighthouse traces."},
 	{Name: "eslint", Category: "Coding", HowTo: "Use for direct lint loops, rule-level fixes, and quality gates in strict TypeScript + eslint-config-next codebases."},
 	{Name: "mcp-language-server", Category: "Coding", HowTo: "Use for LSP-backed semantic code operations (definitions, references, hover, diagnostics, rename, and workspace edits)."},
+	{Name: "quern", Category: "Coding", HowTo: "Use for mobile UI testing, network request interception/mocking, log inspection, and simulator/device automation."},
 }
 
 type ListMcpServersInput struct {
@@ -157,8 +158,15 @@ func SyncMcpServers(ctx context.Context, req *mcp.CallToolRequest, input SyncMcp
 	specs = append(specs, input.Servers...)
 	if len(specs) == 0 {
 		configPath := strings.TrimSpace(input.SourceConfigPath)
+		projectCWD, err := projectCWDFromID(authorizedProjectId)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SyncMcpServersOutput{}, fmt.Errorf("failed to resolve current project cwd: %v", err)
+		}
 		if configPath == "" {
-			configPath = filepath.Join(".", "mcp_config.json")
+			configPath = "mcp_config.json"
+		}
+		if !filepath.IsAbs(configPath) {
+			configPath = filepath.Join(projectCWD, configPath)
 		}
 
 		content, err := os.ReadFile(configPath)

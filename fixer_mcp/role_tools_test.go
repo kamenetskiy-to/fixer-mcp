@@ -129,9 +129,8 @@ func TestAssumeRoleLockedRoleRejectsMismatchWithoutMutatingAuth(t *testing.T) {
 	authorizedSessionId = 77
 
 	callResult, out, err := AssumeRole(context.Background(), nil, AssumeRoleInput{
-		Role:  "fixer",
-		Cwd:   testProjectCWD,
-		Token: "supersecret",
+		Role: "fixer",
+		Cwd:  testProjectCWD,
 	})
 	if err != nil {
 		t.Fatalf("locked role mismatch should return MCP error output, not handler error: %v", err)
@@ -235,6 +234,59 @@ func TestAssumeRoleLockedFixerAllowsTokenlessAuth(t *testing.T) {
 	}
 }
 
+func TestAssumeRoleUnlockedOverseerAndFixerTokenlessAuth(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	t.Setenv(fixerMcpLockedRoleEnv, "")
+	db = testDB
+	authorizedRole = ""
+	authorizedProjectId = 0
+	authorizedSessionId = 99
+
+	// Unlocked overseer
+	callResult, out, err := AssumeRole(context.Background(), nil, AssumeRoleInput{
+		Role: "overseer",
+	})
+	if err != nil {
+		t.Fatalf("expected unlocked overseer auth success, got: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result on success, got: %+v", callResult)
+	}
+	if out.Status != "success" || authorizedRole != "overseer" || authorizedProjectId != 0 || authorizedSessionId != 0 {
+		t.Fatalf("unexpected state after unlocked overseer auth: out=%+v role=%q project=%d session=%d", out, authorizedRole, authorizedProjectId, authorizedSessionId)
+	}
+
+	// Unlocked fixer
+	callResult, out, err = AssumeRole(context.Background(), nil, AssumeRoleInput{
+		Role: "fixer",
+		Cwd:  testProjectCWD,
+	})
+	if err != nil {
+		t.Fatalf("expected unlocked fixer auth success, got: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result on success, got: %+v", callResult)
+	}
+	if out.Status != "success" || authorizedRole != "fixer" || authorizedProjectId != 1 || authorizedSessionId != 0 {
+		t.Fatalf("unexpected state after unlocked fixer auth: out=%+v role=%q project=%d session=%d", out, authorizedRole, authorizedProjectId, authorizedSessionId)
+	}
+}
+
 func TestLockedRoleToolSurfacesHideForeignAndAdminTools(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -246,19 +298,19 @@ func TestLockedRoleToolSurfacesHideForeignAndAdminTools(t *testing.T) {
 			name:       "overseer",
 			lockedRole: "overseer",
 			present:    []string{"assume_role", "get_projects", "launch_and_wait_fixers", "append_overseer_fixer_message", "get_project_balance", "credit_project_balance", "set_fixer_spend_authority", "get_balance_ledger"},
-			absent:     []string{"create_task", "checkout_task", "log_netrunner_progress", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "wake_fixer_autonomous", "record_fixer_spend"},
+			absent:     []string{"create_task", "checkout_task", "log_netrunner_progress", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "wake_fixer_autonomous", "record_fixer_spend", "export_project_doc_bundle"},
 		},
 		{
 			name:       "fixer",
 			lockedRole: "fixer",
-			present:    []string{"assume_role", "create_task", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "review_doc_proposals", "get_project_balance", "record_fixer_spend", "get_balance_ledger"},
-			absent:     []string{"get_projects", "checkout_task", "log_netrunner_progress", "complete_task", "sync_mcp_servers", "clear_project_handoff", "wake_fixer_autonomous", "credit_project_balance", "set_fixer_spend_authority"},
+			present:    []string{"assume_role", "create_task", "sync_mcp_servers", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "review_doc_proposals", "get_project_balance", "record_fixer_spend", "get_balance_ledger", "export_project_doc_bundle"},
+			absent:     []string{"get_projects", "checkout_task", "log_netrunner_progress", "complete_task", "clear_project_handoff", "wake_fixer_autonomous", "credit_project_balance", "set_fixer_spend_authority"},
 		},
 		{
 			name:       "netrunner",
 			lockedRole: "netrunner",
 			present:    []string{"assume_role", "checkout_task", "log_netrunner_progress", "complete_task", "wake_fixer_autonomous"},
-			absent:     []string{"get_projects", "create_task", "view_netrunner_logs", "review_doc_proposals", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "get_project_balance", "credit_project_balance", "set_fixer_spend_authority", "record_fixer_spend", "get_balance_ledger"},
+			absent:     []string{"get_projects", "create_task", "view_netrunner_logs", "review_doc_proposals", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "get_project_balance", "credit_project_balance", "set_fixer_spend_authority", "record_fixer_spend", "get_balance_ledger", "export_project_doc_bundle"},
 		},
 	}
 
@@ -348,6 +400,16 @@ func TestLockedFixerSurfaceKeepsLaunchToolsOnMainServer(t *testing.T) {
 		if _, ok := toolSet[name]; !ok {
 			t.Fatalf("expected %s on the locked fixer fixer_mcp surface", name)
 		}
+	}
+}
+
+func TestLockedFixerSurfaceExposesProjectMcpConfigSync(t *testing.T) {
+	toolSet := make(map[string]struct{})
+	for _, name := range registeredToolNamesForMode("fixer") {
+		toolSet[name] = struct{}{}
+	}
+	if _, ok := toolSet["sync_mcp_servers"]; !ok {
+		t.Fatal("expected sync_mcp_servers on the locked fixer surface")
 	}
 }
 

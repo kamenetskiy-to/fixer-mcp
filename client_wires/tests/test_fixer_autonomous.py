@@ -612,6 +612,67 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "netrunner")
         self.assertEqual(server_env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "netrunner")
 
+    def test_build_wave_netrunner_launch_plan_propagates_netrunner_role_into_process_env(self) -> None:
+        # Regression for wave 821 / session 647: env-inheriting backends (pi) received
+        # FIXER_MCP_LOCKED_ROLE=fixer from the parent process instead of netrunner because
+        # the wave headless launcher never merged selected_servers[...][env] into the
+        # process launch env.  The interactive path (fixer_wire_netrunner_launch.py:489)
+        # calls _bind_mcp_server_env_to_launch_env; the headless wave path now does too.
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
+            project_cwd = Path(project_tmp)
+            worker_cwd = Path(worker_tmp)
+            db_path = project_cwd / "fixer.db"
+            db_path.touch()
+
+            available_servers = {
+                fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"},
+            }
+            adapter = _FakeBackendAdapter()
+            launch_selection = fixer_wire.SessionLaunchSelection(
+                backend="pi",
+                model="pi-model",
+                reasoning="",
+            )
+
+            with (
+                patch.object(_FakeBackendAdapter, "ensure_runtime_files"),
+                patch.object(
+                    fixer_autonomous,
+                    "_build_common_codex_env",
+                    # Simulate the fixer's own env leaking LOCKED_ROLE=fixer into the child.
+                    return_value={
+                        fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV: "fixer",
+                        fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV: "fixer",
+                        fixer_wire.FIXER_MCP_DEFAULT_CWD_ENV: str(project_cwd.resolve()),
+                    },
+                ),
+            ):
+                plan = fixer_autonomous._build_wave_netrunner_launch_plan(
+                    project_cwd=project_cwd,
+                    worker_cwd=worker_cwd,
+                    local_session_id=5,
+                    wave_id=821,
+                    wave_worker_id=1260,
+                    declared_write_scope=["client_wires/fixer_autonomous_wave.py"],
+                    fixer_session_id="fixer-session-pi",
+                    assigned_mcp_names=[],
+                    mcp_how_to={fixer_wire.FORCED_MCP_SERVER: "Use for project tools."},
+                    launch_selection=launch_selection,
+                    available_servers=available_servers,
+                    config_env_vars={},
+                    adapter=adapter,
+                    ensure_sqlite_scaffold=lambda _cwd, *, interactive=False: None,
+                    db_path=db_path,
+                )
+
+        # The process env must carry netrunner role overrides, not the fixer's role.
+        self.assertEqual(plan.env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "netrunner")
+        self.assertEqual(plan.env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "netrunner")
+        # FIXER_MCP_DEFAULT_CWD is set to the project cwd by the server binding helpers.
+        self.assertIn(fixer_wire.FIXER_MCP_DEFAULT_CWD_ENV, plan.env)
+        # FIXER_DB_PATH must also be present.
+        self.assertEqual(plan.env[fixer_wire.FIXER_DB_PATH_ENV], str(db_path.resolve()))
+
     def test_build_wave_netrunner_launch_plan_scaffolds_sqlite_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
             project_cwd = Path(project_tmp)
@@ -1603,10 +1664,8 @@ class FixerAutonomousTests(unittest.TestCase):
                     suppress_autonomous_wake=True,
                 )
 
-            payload = json.loads((cwd / ".codex" / "autonomous_resolution.json").read_text(encoding="utf-8"))
-
         self.assertEqual(new_session_id, "new-session")
-        self.assertEqual(payload["fixer_codex_session_id"], "")
+        self.assertFalse((cwd / ".codex" / "autonomous_resolution.json").exists())
         self.assertIn("--mcp=fixer_mcp", launched["command"])
         self.assertNotIn("Autonomous fixer Codex session ID", launched["command"][-1])
         self.assertIn("Do not call fixer_mcp.wake_fixer_autonomous", launched["command"][-1])

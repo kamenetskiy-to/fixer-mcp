@@ -44,6 +44,30 @@ func TestDocsProposalLogHandlersLiveOutsideMain(t *testing.T) {
 	}
 }
 
+func TestProjectDocBundleHandlerLivesOutsideMain(t *testing.T) {
+	mainSource, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	bundleSource, err := os.ReadFile("project_doc_bundle_handlers.go")
+	if err != nil {
+		t.Fatalf("read project_doc_bundle_handlers.go: %v", err)
+	}
+	for _, symbol := range []string{
+		"type ExportProjectDocBundleInput",
+		"type ExportProjectDocBundleOutput",
+		"func ExportProjectDocBundle(",
+		"func writeProjectDocBundleArchive(",
+	} {
+		if strings.Contains(string(mainSource), symbol) {
+			t.Fatalf("expected bundle symbol %q to stay out of main.go", symbol)
+		}
+		if !strings.Contains(string(bundleSource), symbol) {
+			t.Fatalf("expected bundle symbol %q in project_doc_bundle_handlers.go", symbol)
+		}
+	}
+}
+
 func TestRuntimeHelperClustersLiveOutsideMain(t *testing.T) {
 	mainSource, err := os.ReadFile("main.go")
 	if err != nil {
@@ -424,6 +448,7 @@ func TestTranscriptHandlersLiveOutsideMain(t *testing.T) {
 		"func droidProjectTranscriptDirName(",
 		"func transcriptFileMetadata(",
 		"func findCodexTranscriptPath(",
+		"func findAntigravityTranscriptPath(",
 		"func payloadString(",
 		"func nestedPayloadMap(",
 		"func transcriptPayloadRecordType(",

@@ -25,7 +25,7 @@ const (
 )
 
 var handsProviders = map[string]struct{}{
-	"codex": {}, "claude": {}, "kimi-code": {}, "antigravity": {}, "grok": {},
+	"codex": {}, "commandcode": {}, "claude": {}, "kimi-code": {}, "antigravity": {}, "grok": {},
 }
 
 var terminalHandsInstructionStates = map[string]struct{}{
@@ -246,8 +246,8 @@ const handsInstructionSelectColumns = `
 	COALESCE(terminal_at, ''), COALESCE(instruction_envelope_json, '{}')`
 
 func readHandsLanes() []HandsProviderLane {
-	lanes := make([]HandsProviderLane, 0, 5)
-	for _, provider := range []string{"codex", "claude", "kimi-code", "antigravity", "grok"} {
+	lanes := make([]HandsProviderLane, 0, 6)
+	for _, provider := range []string{"commandcode", "codex", "claude", "kimi-code", "antigravity", "grok"} {
 		model, reasoning, _ := handsProviderConfig(provider)
 		lanes = append(lanes, HandsProviderLane{Provider: provider, Model: model, Reasoning: reasoning})
 	}
@@ -532,7 +532,7 @@ func appendWorkroomAuditTx(ctx context.Context, tx *sql.Tx, projectID int, princ
 type SubmitHandsInstructionInput struct {
 	InstructionText    string   `json:"instruction_text" jsonschema:"Immutable instruction text, at most 64 KiB."`
 	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Normalized project-relative paths. An empty list declares read-only work."`
-	RequestedLane      string   `json:"requested_lane,omitempty" jsonschema:"Registered provider lane: codex, claude, kimi-code, antigravity, or grok. Defaults to the project lane."`
+	RequestedLane      string   `json:"requested_lane,omitempty" jsonschema:"Registered provider lane: codex, commandcode, claude, kimi-code, antigravity, or grok. Defaults to the project lane."`
 	SourceChannelKind  string   `json:"source_channel_kind,omitempty" jsonschema:"Durable registered source channel; defaults to fixer_mcp."`
 	SourceChannelID    string   `json:"source_channel_id,omitempty" jsonschema:"Durable source conversation identifier; defaults to the authenticated project."`
 	SourceMessageID    string   `json:"source_message_id,omitempty" jsonschema:"Optional durable source message identifier."`
@@ -608,6 +608,11 @@ func createHandsCompatibilitySessionTx(ctx context.Context, tx *sql.Tx, projectI
 		projectID, globalSessionID,
 		`{"classification":"post_cutover_compatibility_projection"}`,
 		instructionID, workroomTimestamp()); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO session_mcp_server (session_id, mcp_server_id)
+		SELECT ?, mcp_server_id FROM project_hands_mcp_server WHERE project_id = ?`, globalSessionID, projectID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `

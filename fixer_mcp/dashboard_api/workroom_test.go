@@ -129,6 +129,8 @@ func openWorkroomRepository(t *testing.T) (*Repository, time.Time) {
 			classified_by TEXT NOT NULL, PRIMARY KEY(project_id, session_id)
 		);
 		CREATE TABLE project_mcp_server (project_id INTEGER NOT NULL, mcp_server_id INTEGER NOT NULL, PRIMARY KEY(project_id, mcp_server_id));
+		CREATE TABLE project_hands_mcp_server (project_id INTEGER NOT NULL, mcp_server_id INTEGER NOT NULL, PRIMARY KEY(project_id, mcp_server_id));
+		CREATE TABLE project_hands_doc (project_id INTEGER NOT NULL, project_doc_id INTEGER NOT NULL, PRIMARY KEY(project_id, project_doc_id));
 		CREATE TABLE session_mcp_server (session_id INTEGER NOT NULL, mcp_server_id INTEGER NOT NULL, PRIMARY KEY(session_id, mcp_server_id));
 		CREATE TABLE project_write_lease (
 			id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, owner_id TEXT NOT NULL,
@@ -236,7 +238,7 @@ func TestInternalWorkroomBridgeRequiresSignatureAndReturnsConsistentSnapshot(t *
 	if status := doSignedBridgeJSON(t, request, &snapshot); status != http.StatusOK {
 		t.Fatalf("signed snapshot returned %d", status)
 	}
-	if snapshot.ProjectID != 1 || snapshot.ProjectCwd != "/tmp/workroom-project" || snapshot.ProtocolVersion != 1 || snapshot.HandsDisplayName != "Руки" || len(snapshot.HandsLanes) != 4 {
+	if snapshot.ProjectID != 1 || snapshot.ProjectCwd != "/tmp/workroom-project" || snapshot.ProtocolVersion != 1 || snapshot.HandsDisplayName != "Руки" || len(snapshot.HandsLanes) != 5 {
 		t.Fatalf("unexpected consistent snapshot: %+v", snapshot)
 	}
 	if snapshot.WatermarkSeq != 0 || len(snapshot.HandsMailbox) != 0 {

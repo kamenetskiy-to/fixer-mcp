@@ -57,12 +57,15 @@ func setupTranscriptPathTestDB(t *testing.T, projectOneCWD string, projectTwoCWD
 			(3, 1, 'p1 codex second', 'completed', 'codex'),
 			(4, 1, 'p1 droid third', 'completed', 'droid'),
 			(5, 1, 'p1 missing fourth', 'completed', 'codex'),
-			(6, 1, 'p1 droid no external fifth', 'completed', 'droid');
+			(6, 1, 'p1 droid no external fifth', 'completed', 'droid'),
+			(7, 1, 'p1 pending Hands manual sixth', 'pending', 'codex'),
+			(8, 1, 'p1 antigravity seventh', 'completed', 'antigravity');
 		INSERT INTO session_external_link (session_id, backend, external_session_id) VALUES
 			(2, 'droid', 'droid-project-two'),
 			(3, 'codex', 'codex-project-one-second'),
 			(4, 'droid', 'droid-project-one-third'),
-			(5, 'codex', 'codex-missing-fourth');
+			(5, 'codex', 'codex-missing-fourth'),
+			(8, 'antigravity', 'antigravity-project-one-seventh');
 		INSERT INTO session_codex_link (session_id, codex_session_id) VALUES
 			(3, 'codex-project-one-second'),
 			(5, 'codex-missing-fourth');
@@ -73,6 +76,46 @@ func setupTranscriptPathTestDB(t *testing.T, projectOneCWD string, projectTwoCWD
 	}
 
 	return testDB
+}
+
+func TestGetNetrunnerTranscriptPathAntigravityUsesBrainSessionPath(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalAntigravityRoot := antigravitySessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		antigravitySessionTranscriptRoot = originalAntigravityRoot
+	}()
+
+	antigravityRoot := filepath.Join(t.TempDir(), ".gemini", "antigravity-cli", "brain")
+	transcriptPath := filepath.Join(antigravityRoot, "antigravity-project-one-seventh", ".system_generated", "logs", "transcript_full.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir Antigravity transcript dir: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("{\"type\":\"PLANNER_RESPONSE\"}\n"), 0o644); err != nil {
+		t.Fatalf("write Antigravity transcript: %v", err)
+	}
+	antigravitySessionTranscriptRoot = antigravityRoot
+
+	testDB := setupTranscriptPathTestDB(t, filepath.Join(t.TempDir(), "project-one"), filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 7})
+	if err != nil {
+		t.Fatalf("get Antigravity transcript path failed: %v", err)
+	}
+	if out.Backend != "antigravity" || out.GlobalSessionId != 8 {
+		t.Fatalf("expected Antigravity global session 8, got %+v", out)
+	}
+	if !out.Found || !out.Exists || !out.Readable || out.TranscriptPath != transcriptPath {
+		t.Fatalf("expected readable Antigravity transcript path %q, got %+v", transcriptPath, out)
+	}
 }
 
 func TestGetNetrunnerTranscriptPathCodexUsesProjectScopedSessionID(t *testing.T) {
@@ -172,7 +215,7 @@ func TestGetNetrunnerTranscriptPathDroidUsesFactorySessionPath(t *testing.T) {
 	}
 }
 
-func TestGetNetrunnerTranscriptPathDroidDiscoversMissingExternalIDFromProjectTranscript(t *testing.T) {
+func TestGetNetrunnerTranscriptPathDroidMissingExternalIDFailsClosedWithMultipleSameCWDCandidates(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -187,12 +230,15 @@ func TestGetNetrunnerTranscriptPathDroidDiscoversMissingExternalIDFromProjectTra
 	projectCWD := filepath.Join(t.TempDir(), "project-one")
 	droidRoot := filepath.Join(t.TempDir(), ".factory", "sessions")
 	droidSessionTranscriptRoot = droidRoot
-	transcriptPath := filepath.Join(droidRoot, droidProjectTranscriptDirName(projectCWD), "droid-before-checkout.jsonl")
-	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+	transcriptDir := filepath.Join(droidRoot, droidProjectTranscriptDirName(projectCWD))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		t.Fatalf("mkdir droid transcript dir: %v", err)
 	}
-	if err := os.WriteFile(transcriptPath, []byte("{\"type\":\"session_start\",\"cwd\":\""+projectCWD+"\"}\n"), 0o644); err != nil {
-		t.Fatalf("write droid transcript: %v", err)
+	for _, name := range []string{"droid-before-checkout.jsonl", "droid-current.jsonl"} {
+		transcriptPath := filepath.Join(transcriptDir, name)
+		if err := os.WriteFile(transcriptPath, []byte("{\"type\":\"session_start\",\"id\":\""+strings.TrimSuffix(name, ".jsonl")+"\",\"cwd\":\""+projectCWD+"\"}\n"), 0o644); err != nil {
+			t.Fatalf("write droid transcript: %v", err)
+		}
 	}
 
 	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
@@ -210,22 +256,62 @@ func TestGetNetrunnerTranscriptPathDroidDiscoversMissingExternalIDFromProjectTra
 	if out.Backend != "droid" || out.GlobalSessionId != 6 {
 		t.Fatalf("expected droid global session 6, got %+v", out)
 	}
-	if out.ExternalSessionId != "droid-before-checkout" {
-		t.Fatalf("expected discovered external id from transcript filename, got %+v", out)
+	if out.ExternalSessionId != "" || out.Found || out.Exists || out.Readable || out.TranscriptPath != "" {
+		t.Fatalf("expected missing external id to fail closed, got %+v", out)
 	}
-	if !out.Found || !out.Exists || !out.Readable || out.TranscriptPath != transcriptPath {
-		t.Fatalf("expected readable droid transcript path %q, got %+v", transcriptPath, out)
-	}
-	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "no external session id persisted yet") {
-		t.Fatalf("expected missing external id diagnostic, got %+v", out.SearchDiagnostics)
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "transcript identity cannot be proven") {
+		t.Fatalf("expected explicit unavailable diagnostic, got %+v", out.SearchDiagnostics)
 	}
 
 	persisted, err := fetchSessionExternalID(6, "droid")
 	if err != nil {
 		t.Fatalf("fetch persisted droid external id: %v", err)
 	}
-	if persisted != "droid-before-checkout" {
-		t.Fatalf("expected discovered droid id to be persisted, got %q", persisted)
+	if persisted != "" {
+		t.Fatalf("expected no inferred droid id to be persisted, got %q", persisted)
+	}
+}
+
+func TestGetNetrunnerTranscriptPathPendingHandsManualSessionFailsClosed(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalCodexRoot := codexSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		codexSessionTranscriptRoot = originalCodexRoot
+	}()
+
+	projectCWD := filepath.Join(t.TempDir(), "project-one")
+	codexRoot := filepath.Join(t.TempDir(), ".codex", "sessions")
+	codexSessionTranscriptRoot = codexRoot
+	for _, name := range []string{"rollout-old-pending.jsonl", "rollout-latest-pending.jsonl"} {
+		transcriptPath := filepath.Join(codexRoot, "2026", "08", "31", name)
+		if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+			t.Fatalf("mkdir codex transcript dir: %v", err)
+		}
+		if err := os.WriteFile(transcriptPath, []byte("{\"type\":\"session_meta\",\"id\":\""+strings.TrimSuffix(name, ".jsonl")+"\",\"cwd\":\""+projectCWD+"\"}\n"), 0o644); err != nil {
+			t.Fatalf("write codex transcript: %v", err)
+		}
+	}
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 6})
+	if err != nil {
+		t.Fatalf("pending Hands/manual lookup failed: %v", err)
+	}
+	if out.GlobalSessionId != 7 || out.ExternalSessionId != "" || out.Found || out.TranscriptPath != "" {
+		t.Fatalf("expected pending Hands/manual session to remain unavailable, got %+v", out)
+	}
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "transcript identity cannot be proven") {
+		t.Fatalf("expected explicit unavailable diagnostic, got %+v", out.SearchDiagnostics)
 	}
 }
 
@@ -294,11 +380,11 @@ func TestGetNetrunnerTranscriptPathMissingExternalIDDiagnosticDiffersFromMissing
 		t.Fatalf("missing external id lookup should not fail: %v", err)
 	}
 	diagnostics := strings.Join(out.SearchDiagnostics, "\n")
-	if !strings.Contains(diagnostics, "no external session id persisted yet") {
-		t.Fatalf("expected missing external id diagnostic, got %+v", out.SearchDiagnostics)
+	if !strings.Contains(diagnostics, "transcript unavailable: no persisted external session id") {
+		t.Fatalf("expected explicit unavailable diagnostic, got %+v", out.SearchDiagnostics)
 	}
-	if strings.Contains(diagnostics, "external session id is empty; cannot resolve") {
-		t.Fatalf("expected diagnostic to avoid old ambiguous empty-id wording, got %+v", out.SearchDiagnostics)
+	if strings.Contains(diagnostics, "scanning transcript store by project cwd") {
+		t.Fatalf("lookup must not scan by project cwd without an external id, got %+v", out.SearchDiagnostics)
 	}
 }
 

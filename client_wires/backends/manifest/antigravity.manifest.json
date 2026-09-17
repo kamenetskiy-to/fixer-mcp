@@ -4,6 +4,9 @@
   "description": "Google Antigravity CLI (agy) provider for the Fixer MCP provider-adapter abstraction. Reasoning is encoded in model display names; MCP isolation relies on project-local config overriding global entries by name.",
   "models": {
     "options": [
+      "Gemini 3.8 Flash (Low)",
+      "Gemini 3.8 Flash (Medium)",
+      "Gemini 3.8 Flash (High)",
       "Gemini 3.7 Flash (Low)",
       "Gemini 3.7 Flash (Medium)",
       "Gemini 3.7 Flash (High)",
@@ -17,6 +20,9 @@
     ],
     "default": "Gemini 3.7 Flash (Medium)",
     "internal_id_map": {
+      "Gemini 3.8 Flash (Low)": "Gemini 3.8 Flash (Low)",
+      "Gemini 3.8 Flash (Medium)": "Gemini 3.8 Flash (Medium)",
+      "Gemini 3.8 Flash (High)": "Gemini 3.8 Flash (High)",
       "Gemini 3.7 Flash (Low)": "Gemini 3.7 Flash (Low)",
       "Gemini 3.7 Flash (Medium)": "Gemini 3.7 Flash (Medium)",
       "Gemini 3.7 Flash (High)": "Gemini 3.7 Flash (High)",

@@ -25,6 +25,7 @@ from client_wires import (
     fixer_autonomous_transcripts,
     fixer_autonomous_wave,
     fixer_wire,
+    fixer_wire_mcp,
 )
 
 AUTONOMOUS_STATE_RELATIVE_PATH = fixer_autonomous_state.AUTONOMOUS_STATE_RELATIVE_PATH
@@ -652,10 +653,15 @@ def launch_netrunner(
     playwright_runtime_mode: str | None = None,
 ) -> str | None:
     bootstrap_codex_pro_import_path()
-    state = _load_or_initialize_launch_state(
-        cwd,
-        fixer_session_id,
-        allow_missing_fixer_session=suppress_autonomous_wake,
+    # Wave/reviewer workers never resume the Fixer, so they must not create a
+    # legacy autonomous state file merely to launch a headless worker.
+    state = (
+        {
+            "fixer_codex_session_id": (fixer_session_id or "").strip(),
+            "active_netrunner_session_ids": [],
+        }
+        if suppress_autonomous_wake
+        else _load_or_initialize_launch_state(cwd, fixer_session_id)
     )
 
     db_path = fixer_wire._resolve_fixer_db_path(cwd)
@@ -665,7 +671,8 @@ def launch_netrunner(
         project_id = fixer_wire._resolve_project_id(conn, cwd)
         sessions = fixer_wire._load_session_rows(conn, project_id)
         session_by_id = {row.session_id: row for row in sessions}
-        state = _clear_stale_active_netrunner_if_safe(cwd, state, session_by_id, local_session_id)
+        if not suppress_autonomous_wake:
+            state = _clear_stale_active_netrunner_if_safe(cwd, state, session_by_id, local_session_id)
         selected_session = session_by_id.get(local_session_id)
         if selected_session is None:
             raise RuntimeError(f"Session {local_session_id} is not available for {cwd}.")
@@ -673,7 +680,7 @@ def launch_netrunner(
         assigned_names = fixer_wire._load_assigned_mcp_names(conn, selected_session.global_session_id)
         registry_meta = fixer_wire._load_registry_mcp_metadata(conn)
         resolved_fixer_session_id = (fixer_session_id or "").strip()
-        if not resolved_fixer_session_id:
+        if not resolved_fixer_session_id and not suppress_autonomous_wake:
             state_fixer_session_id = str(state.get("fixer_codex_session_id", "")).strip()
             resolved_fixer_session_id = (
                 state_fixer_session_id
@@ -752,6 +759,12 @@ def launch_netrunner(
         interactive=False,
         runtime_mode=playwright_runtime_mode,
     )
+    fixer_wire._maybe_configure_playwright_mesh_target(
+        adapter,
+        selected_servers,
+        available_servers,
+        interactive=False,
+    )
     adapter.ensure_runtime_files(cwd, llm_selection, selected_servers, available_servers)
 
     prompt = _build_autonomous_netrunner_prompt(
@@ -767,6 +780,11 @@ def launch_netrunner(
         mcp_names=selected_mcp_names,
     )
     env = _build_common_codex_env(adapter, llm_selection, cwd)
+    # Mirror the wave launcher and the interactive path: the selected MCP servers'
+    # env bindings (netrunner role, stateless auth, DB path) must reach the worker
+    # process, not only its provider config. Env-inheriting backends such as pi
+    # otherwise start with the Fixer's own FIXER_MCP_LOCKED_ROLE=fixer (backlog 162).
+    env = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(env, selected_servers)
     for server_name, config_path in selected_config_paths.items():
         env_var = config_env_vars.get(server_name)
         if env_var:
@@ -808,14 +826,15 @@ def launch_netrunner(
             session_id=local_session_id,
         )
 
-    active_session_ids = _normalize_active_netrunner_session_ids(state)
-    if local_session_id not in active_session_ids:
-        active_session_ids.append(local_session_id)
-    _set_active_netrunner_session_ids(state, active_session_ids)
-    state["last_launched_netrunner_session_id"] = None
-    state["last_launched_netrunner_backend"] = launch_selection.backend
-    state["updated_at_epoch"] = int(time.time())
-    _save_state(cwd, state)
+    if not suppress_autonomous_wake:
+        active_session_ids = _normalize_active_netrunner_session_ids(state)
+        if local_session_id not in active_session_ids:
+            active_session_ids.append(local_session_id)
+        _set_active_netrunner_session_ids(state, active_session_ids)
+        state["last_launched_netrunner_session_id"] = None
+        state["last_launched_netrunner_backend"] = launch_selection.backend
+        state["updated_at_epoch"] = int(time.time())
+        _save_state(cwd, state)
 
     new_session_id = _wait_for_new_external_session_id(
         launch_selection.backend,
@@ -832,9 +851,10 @@ def launch_netrunner(
         external_session_id=new_session_id,
     )
 
-    state["last_launched_netrunner_session_id"] = new_session_id
-    state["updated_at_epoch"] = int(time.time())
-    _save_state(cwd, state)
+    if not suppress_autonomous_wake:
+        state["last_launched_netrunner_session_id"] = new_session_id
+        state["updated_at_epoch"] = int(time.time())
+        _save_state(cwd, state)
 
     print(
         f"[fixer-autonomous] launched netrunner session {local_session_id} "
@@ -949,9 +969,7 @@ def launch_wave_netrunner_worker(
 
         assigned_names = fixer_wire._load_assigned_mcp_names(conn, selected_session.global_session_id)
         registry_meta = fixer_wire._load_registry_mcp_metadata(conn)
-        resolved_fixer_session_id = (fixer_session_id or "").strip() or _current_state_fixer_session_id(
-            resolved_project_cwd
-        )
+        resolved_fixer_session_id = (fixer_session_id or "").strip()
         resolved_backend = fixer_wire.normalize_backend_name(backend or selected_session.cli_backend)
         descriptor = fixer_wire._backend_descriptor(resolved_backend)
         launch_selection = fixer_wire.SessionLaunchSelection(

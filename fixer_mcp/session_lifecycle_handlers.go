@@ -177,18 +177,24 @@ func CreateTask(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskI
 	var res sql.Result
 	if hasEpicDocColumn {
 		res, err = db.Exec(
-			"INSERT INTO session (project_id, task_description, status, declared_write_scope, epic_doc_id) VALUES (?, ?, 'pending', ?, ?)",
+			"INSERT INTO session (project_id, task_description, status, declared_write_scope, epic_doc_id, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
 			authorizedProjectId,
 			input.TaskDescription,
 			declaredWriteScope,
 			nullableEpicDocID(epicDocID),
+			defaultCliBackend,
+			defaultCliModel,
+			defaultCliReasoning,
 		)
 	} else {
 		res, err = db.Exec(
-			"INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (?, ?, 'pending', ?)",
+			"INSERT INTO session (project_id, task_description, status, declared_write_scope, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
 			authorizedProjectId,
 			input.TaskDescription,
 			declaredWriteScope,
+			defaultCliBackend,
+			defaultCliModel,
+			defaultCliReasoning,
 		)
 	}
 	if err != nil {
@@ -297,6 +303,42 @@ func decodeStructuredFinalReport(raw string) (SessionFinalReport, string, error)
 	return report, string(normalizedPayload), nil
 }
 
+func preserveFinalReportForReview(raw string) (SessionFinalReport, string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return SessionFinalReport{}, "", fmt.Errorf("final_report is required and must be non-empty")
+	}
+	if report, normalized, err := decodeStructuredFinalReport(trimmed); err == nil {
+		return report, normalized, nil
+	}
+	// A worker's report is evidence for Fixer review, not a process-health
+	// signal. Keep human-readable submissions intact when they do not happen
+	// to use the structured envelope; Hands compatibility sessions take the
+	// strict path below and still require the protocol envelope.
+	return SessionFinalReport{
+		FilesChanged:  []string{"(unstructured final report)"},
+		CommandsRun:   []string{"worker submission"},
+		ChecksRun:     []string{"raw final report retained for review"},
+		Blockers:      []string{},
+		ResidualRisks: []string{trimmed},
+	}, trimmed, nil
+}
+
+func isParallelWaveWorkerSession(globalSessionID, projectID int) (bool, error) {
+	if !dbTableHasColumn("parallel_wave_worker", "session_id") {
+		return false, nil
+	}
+	var count int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM parallel_wave_worker WHERE session_id = ? AND project_id = ?",
+		globalSessionID,
+		projectID,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func CompleteTask(ctx context.Context, req *mcp.CallToolRequest, input CompleteTaskInput) (*mcp.CallToolResult, CompleteTaskOutput, error) {
 	if authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("access denied: requires netrunner role")
@@ -318,18 +360,29 @@ func CompleteTask(ctx context.Context, req *mcp.CallToolRequest, input CompleteT
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("session not found in current project")
 	}
 
-	proposalCount, err := countSessionDocProposals(globalSessionID, authorizedProjectId)
+	checkedOutGlobalID, checkedOutLocalID, err := resolveAuthorizedNetrunnerSessionID("complete_task", nil)
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("DB query error: %v", err)
+		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, err
 	}
-	if proposalCount == 0 {
+	if checkedOutGlobalID != globalSessionID || checkedOutLocalID != input.SessionId {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf(
-			"missing mandatory documentation-impact proposal for session %d: submit at least one propose_doc_update before complete_task; session remains open for correction",
+			"complete_task may only submit the checked-out netrunner session %d, got %d",
+			checkedOutLocalID,
 			input.SessionId,
 		)
 	}
 
-	report, normalizedReport, err := decodeStructuredFinalReport(input.FinalReport)
+	_, handsSession, err := handsInstructionForCompatibilitySession(ctx, globalSessionID, authorizedProjectId)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("DB query error: %v", err)
+	}
+	var report SessionFinalReport
+	var normalizedReport string
+	if handsSession {
+		report, normalizedReport, err = decodeStructuredFinalReport(input.FinalReport)
+	} else {
+		report, normalizedReport, err = preserveFinalReportForReview(input.FinalReport)
+	}
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, err
 	}
@@ -504,6 +557,18 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 	if authorizedRole == "fixer" && projectId != authorizedProjectId {
 		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("access denied: session not found in current project")
 	}
+	visibleSessionID := targetSessionID
+	if authorizedRole != "overseer" {
+		visibleSessionID = input.SessionId
+	}
+	if waveWorker, err := isParallelWaveWorkerSession(targetSessionID, projectId); err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", err)
+	} else if waveWorker {
+		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf(
+			"wave-linked session %d lifecycle is governed by Netrunner submission and wave review; use complete_task or wave phase actions",
+			visibleSessionID,
+		)
+	}
 
 	control, _, err := fetchOrchestrationControl(projectId)
 	if err != nil {
@@ -530,10 +595,6 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 	reason := strings.TrimSpace(input.Reason)
 	if reason == "" {
 		reason = strings.TrimSpace(input.Note)
-	}
-	visibleSessionID := targetSessionID
-	if authorizedRole != "overseer" {
-		visibleSessionID = input.SessionId
 	}
 	log.Printf("set_session_status role=%s session_id=%d project_id=%d from=%s to=%s reason=%q", authorizedRole, visibleSessionID, projectId, currentStatus, targetStatus, reason)
 
@@ -618,12 +679,18 @@ func ForkRepairSessionFrom(ctx context.Context, req *mcp.CallToolRequest, input 
 			task_description,
 			status,
 			declared_write_scope,
-			repair_source_session_id
-		) VALUES (?, ?, 'pending', ?, ?)`,
+			repair_source_session_id,
+			cli_backend,
+			cli_model,
+			cli_reasoning
+		) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
 		authorizedProjectId,
 		newTaskDescription,
 		encodedWriteScope,
 		sourceSessionID,
+		defaultCliBackend,
+		defaultCliModel,
+		defaultCliReasoning,
 	)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, ForkRepairSessionFromOutput{}, fmt.Errorf("DB insert error: %v", err)

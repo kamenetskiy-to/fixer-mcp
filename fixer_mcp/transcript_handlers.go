@@ -249,6 +249,39 @@ func transcriptMatchByProjectCWD(path string, projectCWD string, acceptedTypes m
 	return "", false
 }
 
+// antigravitySessionTranscriptRoot is the Antigravity CLI brain directory that
+// holds per-session transcript logs. It is declared here instead of main.go so
+// the transcript port stays inside the worker write scope; a main.go
+// declaration of the same name must not be added on top of this one.
+var antigravitySessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".gemini", "antigravity-cli", "brain")
+
+func findAntigravityTranscriptPath(externalSessionID string, diagnostics *[]string) string {
+	sessionID := strings.TrimSpace(externalSessionID)
+	root := strings.TrimSpace(antigravitySessionTranscriptRoot)
+	if sessionID == "" {
+		*diagnostics = append(*diagnostics, "external session id is empty; cannot resolve Antigravity transcript")
+		return ""
+	}
+	if root == "" {
+		*diagnostics = append(*diagnostics, "Antigravity transcript root is not configured")
+		return ""
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Antigravity transcript root not found: %s", root))
+		return ""
+	}
+
+	logsRoot := filepath.Join(root, sessionID, ".system_generated", "logs")
+	for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+		candidate := filepath.Join(logsRoot, name)
+		if exists, _, _, _ := transcriptFileMetadata(candidate); exists {
+			return candidate
+		}
+	}
+	*diagnostics = append(*diagnostics, fmt.Sprintf("no Antigravity transcript for external session id %q under %s", sessionID, root))
+	return ""
+}
+
 func findCodexTranscriptPathByProjectCWD(projectCWD string, diagnostics *[]string) (string, string) {
 	root := strings.TrimSpace(codexSessionTranscriptRoot)
 	if root == "" {
@@ -465,30 +498,15 @@ func GetNetrunnerTranscriptPath(ctx context.Context, req *mcp.CallToolRequest, i
 	diagnostics := []string{}
 	var transcriptPath string
 	if strings.TrimSpace(externalSessionID) == "" {
-		diagnostics = append(diagnostics, "no external session id persisted yet; scanning transcript store by project cwd")
-		var discoveredSessionID string
-		switch backend {
-		case "codex", "commandcode":
-			transcriptPath, discoveredSessionID = findCodexTranscriptPathByProjectCWD(projectCWD, &diagnostics)
-		case "droid":
-			transcriptPath, discoveredSessionID = findDroidTranscriptPathByProjectCWD(projectCWD, &diagnostics)
-		default:
-			diagnostics = append(diagnostics, fmt.Sprintf("backend %q is unsupported for transcript lookup", backend))
-		}
-		if strings.TrimSpace(discoveredSessionID) != "" {
-			externalSessionID = strings.TrimSpace(discoveredSessionID)
-			if err := persistDiscoveredSessionExternalID(globalSessionID, backend, externalSessionID); err != nil {
-				diagnostics = append(diagnostics, fmt.Sprintf("failed to persist discovered external session id: %v", err))
-			} else {
-				diagnostics = append(diagnostics, "persisted discovered external session id from transcript filename/metadata")
-			}
-		}
+		diagnostics = append(diagnostics, "transcript unavailable: no persisted external session id; transcript identity cannot be proven")
 	} else {
 		switch backend {
 		case "codex", "commandcode":
 			transcriptPath = findCodexTranscriptPath(externalSessionID, &diagnostics)
 		case "droid":
 			transcriptPath = findDroidTranscriptPath(projectCWD, externalSessionID, &diagnostics)
+		case "antigravity":
+			transcriptPath = findAntigravityTranscriptPath(externalSessionID, &diagnostics)
 		default:
 			diagnostics = append(diagnostics, fmt.Sprintf("backend %q is unsupported for transcript lookup", backend))
 		}

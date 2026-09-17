@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 try:
     import tomllib  # Python 3.11+
@@ -18,6 +18,10 @@ except ModuleNotFoundError:  # pragma: no cover
 ROLE_CHOICES = ("fixer", "netrunner", "overseer")
 FORCED_MCP_SERVER = "fixer_mcp"
 HIDDEN_MCP_SERVERS = {FORCED_MCP_SERVER}
+# Mesh browser servers are named playwright-mesh-<device>[-<browser>]. They are
+# device variants of the base Playwright server and are registered on demand, so
+# they are matched by prefix rather than listed explicitly.
+MESH_MCP_PREFIX = "playwright-mesh"
 FIGMA_CONSOLE_MCP_NAME = "figma-console-mcp"
 FIGMA_CONSOLE_MCP_FALLBACK_CATEGORY = "Design"
 FIGMA_CONSOLE_MCP_FALLBACK_HOW_TO = (
@@ -42,6 +46,50 @@ FIXER_MCP_AUTOBUILD_SKIP_ENV = "FIXER_WIRE_SKIP_FIXER_MCP_AUTOBUILD"
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC = 21_600
 FORCED_FIXER_MCP_TIMEOUT_FLOOR_MS = FORCED_FIXER_MCP_TIMEOUT_FLOOR_SEC * 1000
 _FIXER_MCP_BUILD_CHECKED: set[Path] = set()
+
+
+def _sanitize_mcp_server_for_provider_config(
+    server_spec: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep runtime-only MCP values out of provider-owned config artifacts.
+
+    Stdio server environment is inherited from the provider process instead.
+    This is deliberately a structural copy so launch-time bindings remain
+    available to the caller without ever being serialized into a provider
+    command or generated config file.
+    """
+
+    sanitized = dict(server_spec)
+    sanitized.pop("env", None)
+    return sanitized
+
+
+def _sanitize_mcp_servers_for_provider_config(
+    servers: Mapping[str, Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    return {
+        str(name): _sanitize_mcp_server_for_provider_config(spec)
+        for name, spec in servers.items()
+    }
+
+
+def _bind_mcp_server_env_to_launch_env(
+    launch_env: Mapping[str, str],
+    selected_servers: Mapping[str, Mapping[str, object]],
+) -> dict[str, str]:
+    """Inject selected MCP env into the provider process, not its argv/config."""
+
+    bound = dict(launch_env)
+    for server_spec in selected_servers.values():
+        raw_env = server_spec.get("env")
+        if not isinstance(raw_env, Mapping):
+            continue
+        for raw_name, raw_value in raw_env.items():
+            name = str(raw_name).strip()
+            if not name or raw_value is None:
+                continue
+            bound[name] = str(raw_value)
+    return bound
 
 
 def _bind_fixer_db_path_to_server_env(
@@ -419,7 +467,6 @@ def _build_forced_fixer_override_args(spec: dict[str, object]) -> list[str]:
     for field in (
         "command",
         "args",
-        "env",
         "transport",
         "cwd",
         "startup_timeout_sec",

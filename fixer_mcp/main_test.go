@@ -5,11 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testProjectCWD = "/tmp/self_orchestration_test_project"
@@ -25,6 +27,19 @@ func TestResolveFixerDBPathUsesEnvOrDefault(t *testing.T) {
 	t.Setenv(fixerDBPathEnv, "  "+explicitPath+"  ")
 	if got := resolveFixerDBPath(); got != explicitPath {
 		t.Fatalf("expected explicit db path %q, got %q", explicitPath, got)
+	}
+}
+
+func TestWaitDoesNotFinalizeAStillRunningWorkerAttempt(t *testing.T) {
+	live := workerProcessSnapshot{Status: workerStatusRunning, Alive: true}
+	if waitMayReportTerminalSessionStatus(true, live) {
+		t.Fatal("a live worker process must suppress a stale terminal session status")
+	}
+	if !waitMayReportTerminalSessionStatus(false, workerProcessSnapshot{}) {
+		t.Fatal("a session without a recorded worker process may report terminal status")
+	}
+	if !waitMayReportTerminalSessionStatus(true, workerProcessSnapshot{Status: workerStatusExited, Alive: false}) {
+		t.Fatal("an exited worker process must allow terminal status")
 	}
 }
 
@@ -137,6 +152,14 @@ func TestExplicitWaitPendingStartupFailureAppliesOnlyWithoutLiveWorker(t *testin
 				t.Fatalf("explicitWaitPendingStartupFailureApplies(%v, %v) = %v, want %v", testCase.processFound, testCase.workerProcessTerminal, got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestWaitForContextOrDurationHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForContextOrDuration(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForContextOrDuration() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -287,6 +310,14 @@ func TestParallelNetrunnerWaveLifecycleSmoke(t *testing.T) {
 		t.Fatalf("mark winner review-ready: %v", err)
 	}
 	if _, err := testDB.Exec(
+		"UPDATE worker_process SET status = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE parallel_wave_id = ? AND session_id = ?",
+		workerStatusExited,
+		created.WaveId,
+		winnerGlobalSessionID,
+	); err != nil {
+		t.Fatalf("mark winner worker process exited: %v", err)
+	}
+	if _, err := testDB.Exec(
 		"INSERT INTO doc_proposal (project_id, session_id, status, proposed_content, proposed_doc_type) VALUES (1, ?, 'pending', 'phase 7 smoke proposal', 'architecture')",
 		winnerGlobalSessionID,
 	); err != nil {
@@ -334,6 +365,14 @@ func TestParallelNetrunnerWaveLifecycleSmoke(t *testing.T) {
 	}
 	if _, err := testDB.Exec("UPDATE session SET status = 'completed', report = 'phase 7 smoke completed' WHERE id = ?", remainingGlobalSessionID); err != nil {
 		t.Fatalf("mark remaining session completed: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET status = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE parallel_wave_id = ? AND session_id = ?",
+		workerStatusExited,
+		created.WaveId,
+		remainingGlobalSessionID,
+	); err != nil {
+		t.Fatalf("mark remaining worker process exited: %v", err)
 	}
 	callResult, allTerminalOut, err := WaitForNetrunnerWave(context.Background(), nil, WaitForNetrunnerWaveInput{
 		WaveId:              created.WaveId,

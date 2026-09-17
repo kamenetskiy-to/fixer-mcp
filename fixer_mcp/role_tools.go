@@ -45,6 +45,9 @@ var overseerToolNames = []string{
 	"get_project_handoff",
 	"export_project_context_package",
 	"import_project_context_package",
+	"set_project_doc_language",
+	"get_project_doc_localization_status",
+	"set_project_doc_title_localizations",
 	"get_project_balance",
 	"credit_project_balance",
 	"set_fixer_spend_authority",
@@ -64,8 +67,17 @@ var fixerToolNames = []string{
 	"get_backlog_items",
 	"update_backlog_item",
 	"list_mcp_servers",
+	"sync_mcp_servers",
 	"set_project_mcp_servers",
 	"get_project_mcp_servers",
+	"set_project_hands_mcp_servers",
+	"get_project_hands_mcp_servers",
+	"set_project_hands_docs",
+	"get_project_hands_docs",
+	"get_project_hands_docs_content",
+	"set_project_doc_language",
+	"get_project_doc_localization_status",
+	"set_project_doc_title_localizations",
 	"set_session_mcp_servers",
 	"get_session_mcp_servers",
 	"check_current_project_docs",
@@ -98,6 +110,7 @@ var fixerToolNames = []string{
 	"get_project_handoff",
 	"export_project_context_package",
 	"import_project_context_package",
+	"export_project_doc_bundle",
 	"get_project_balance",
 	"record_fixer_spend",
 	"get_balance_ledger",
@@ -144,6 +157,9 @@ var netrunnerToolNames = []string{
 	"checkout_task",
 	"list_mcp_servers",
 	"get_project_mcp_servers",
+	"get_project_hands_mcp_servers",
+	"get_project_hands_docs",
+	"get_project_hands_docs_content",
 	"get_session_mcp_servers",
 	"get_session_attached_docs",
 	"get_attached_project_docs",
@@ -212,7 +228,7 @@ func addMcpTool[In, Out any](server *mcp.Server, name string, description string
 }
 
 func registerBootstrapTools(server *mcp.Server) {
-	addMcpTool(server, "assume_role", "Authenticate your MCP stdio session. Must be called first. Role can be 'fixer', 'netrunner', or 'overseer'. Provide cwd for fixer/netrunner and token for fixer/overseer.", AssumeRole)
+	addMcpTool(server, "assume_role", "Authenticate your MCP stdio session. Must be called first. Role can be 'fixer', 'netrunner', or 'overseer'. Provide cwd for fixer/netrunner.", AssumeRole)
 }
 
 func registerLaunchNetrunnerWaveTool(server *mcp.Server) {
@@ -275,6 +291,9 @@ func registerOverseerTools(server *mcp.Server) {
 	addMcpTool(server, "get_project_handoff", "Read the current project handoff. Fixer reads the bound project; overseer may target any project via project_id.", GetProjectHandoff)
 	addMcpTool(server, "export_project_context_package", "Export the project context (overview, handoff, doc tree, backlog, lightweight session index) into a portable JSON package file. Fixer exports the bound project; overseer must pass project_id.", ExportProjectContextPackage)
 	addMcpTool(server, "import_project_context_package", "Import a portable project-context JSON package into the project: overview, handoff, doc tree (parent links via slug/path), backlog (deduped by title). Refuses non-empty projects unless force=true. Fixer imports into the bound project; overseer must pass project_id.", ImportProjectContextPackage)
+	addMcpTool(server, "set_project_doc_language", "Set the one active localized-title language for a project. English disables localized-title requirements. Overseer must provide project_id.", SetProjectDocLanguage)
+	addMcpTool(server, "get_project_doc_localization_status", "List canonical project-doc titles and localization gaps for the project's active documentation language. Overseer must provide project_id.", GetProjectDocLocalizationStatus)
+	addMcpTool(server, "set_project_doc_title_localizations", "Bulk upsert localized project-doc titles for the project's active documentation language. Overseer must provide project_id.", SetProjectDocTitleLocalizations)
 	addMcpTool(server, "get_project_balance", "Read a project's abstract balance and Fixer spend authority. Overseer must pass project_id.", GetProjectBalance)
 	addMcpTool(server, "credit_project_balance", "Credit a project's abstract balance and write an audit ledger entry. Requires overseer role.", CreditProjectBalance)
 	addMcpTool(server, "set_fixer_spend_authority", "Set a project's Fixer spend authority and write an audit ledger entry. Requires overseer role.", SetFixerSpendAuthority)
@@ -294,8 +313,17 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "get_backlog_items", "List backlog items for the current project. Requires fixer role.", GetBacklogItems)
 	addMcpTool(server, "update_backlog_item", "Update a backlog item in the current project. Requires fixer role.", UpdateBacklogItem)
 	addMcpTool(server, "list_mcp_servers", "List MCP servers from Fixer registry. Requires authenticated role. Returns curated defaults unless include_all=true; archived servers require include_archived=true.", ListMcpServers)
+	addMcpTool(server, "sync_mcp_servers", "Upsert MCP registry from the current project's mcp_config.json or an explicit server list. Requires fixer role.", SyncMcpServers)
 	addMcpTool(server, "set_project_mcp_servers", "Set project-scoped MCP allowlist for the current fixer project.", SetProjectMcpServers)
 	addMcpTool(server, "get_project_mcp_servers", "Get project-scoped MCP allowlist for current project.", GetProjectMcpServers)
+	addMcpTool(server, "set_project_hands_mcp_servers", "Set project-scoped MCP proposals for the permanent project actor Руки. Requires fixer role and does not require a session_id.", SetProjectHandsMcpServers)
+	addMcpTool(server, "get_project_hands_mcp_servers", "Get project-scoped MCP proposals for the permanent project actor Руки.", GetProjectHandsMcpServers)
+	addMcpTool(server, "set_project_hands_docs", "Set project-scoped document proposals for the permanent project actor Руки. Requires fixer role and does not require a session_id.", SetProjectHandsDocs)
+	addMcpTool(server, "get_project_hands_docs", "Get project-scoped document proposal metadata for the permanent project actor Руки.", GetProjectHandsDocs)
+	addMcpTool(server, "get_project_hands_docs_content", "Get full content for docs proposed for the permanent project actor Руки.", GetProjectHandsDocsContent)
+	addMcpTool(server, "set_project_doc_language", "Set the current project's one active localized-title language. English disables localized-title requirements.", SetProjectDocLanguage)
+	addMcpTool(server, "get_project_doc_localization_status", "List canonical project-doc titles and localization gaps for the current project's active documentation language.", GetProjectDocLocalizationStatus)
+	addMcpTool(server, "set_project_doc_title_localizations", "Bulk upsert localized titles for the current project's active documentation language.", SetProjectDocTitleLocalizations)
 	addMcpTool(server, "set_session_mcp_servers", "Assign MCP servers to a specific session. Requires fixer role.", SetSessionMcpServers)
 	addMcpTool(server, "get_session_mcp_servers", "Get MCP server assignments for a specific session in current project.", GetSessionMcpServers)
 	addMcpTool(server, "check_current_project_docs", "List metadata summaries for project docs in current project without returning full content. Requires fixer role.", CheckCurrentProjectDocs)
@@ -307,8 +335,8 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "set_doc_proposal_status", "Approve or reject a document proposal. Requires fixer role. When approval creates a new doc, optional parent_doc_id, slug, and level place it in the canonical doc tree.", SetDocProposalStatus)
 	addMcpTool(server, "view_netrunner_logs", "Read append-only Netrunner progress logs for one project-scoped session in chronological order. Requires fixer role and never mutates canonical docs.", ViewNetrunnerLogs)
 	addMcpTool(server, "get_project_docs", "Get all project documents. Requires authenticated role.", GetProjectDocs)
-	addMcpTool(server, "add_project_doc", "Create a new canonical project document, optionally positioned in the 0..3 documentation tree. Requires 'fixer' role.", AddProjectDoc)
-	addMcpTool(server, "update_project_doc", "Update a specific canonical document's content, type, or tree metadata. Requires 'fixer' role.", UpdateProjectDoc)
+	addMcpTool(server, "add_project_doc", "Create a new canonical English project document, optionally positioned in the 0..3 documentation tree. localized_title is required when the project documentation language is not English. Requires fixer role.", AddProjectDoc)
+	addMcpTool(server, "update_project_doc", "Update a canonical document's English content, type, tree metadata, or localized_title. Existing localization coverage is required. Requires fixer role.", UpdateProjectDoc)
 	addMcpTool(server, "delete_project_doc", "Delete a specific document. Requires 'fixer' role.", DeleteProjectDoc)
 	addMcpTool(server, "update_task", "Append instructions to an existing task. Requires fixer role.", UpdateTask)
 	addMcpTool(server, "set_session_status", "Set session lifecycle status. Fixer can only modify sessions in bound project; overseer can modify any session.", SetSessionStatus)
@@ -328,6 +356,7 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "get_project_handoff", "Read the current project handoff. Fixer reads the bound project; overseer may target any project via project_id.", GetProjectHandoff)
 	addMcpTool(server, "export_project_context_package", "Export the project context (overview, handoff, doc tree, backlog, lightweight session index) into a portable JSON package file. Fixer exports the bound project; overseer must pass project_id.", ExportProjectContextPackage)
 	addMcpTool(server, "import_project_context_package", "Import a portable project-context JSON package into the project: overview, handoff, doc tree (parent links via slug/path), backlog (deduped by title). Refuses non-empty projects unless force=true. Fixer imports into the bound project; overseer must pass project_id.", ImportProjectContextPackage)
+	addMcpTool(server, "export_project_doc_bundle", "Export selected canonical project docs as a portable ZIP bundle. Requires fixer role and compact project-scoped document IDs.", ExportProjectDocBundle)
 	addMcpTool(server, "get_project_balance", "Read the current project's abstract balance and Fixer spend authority. Requires fixer role.", GetProjectBalance)
 	addMcpTool(server, "record_fixer_spend", "Record a Fixer spend under granted authority, decrementing balance and allowance atomically. Requires fixer role.", RecordFixerSpend)
 	addMcpTool(server, "get_balance_ledger", "Read recent balance ledger rows for the current project. Requires fixer role.", GetBalanceLedger)
@@ -374,11 +403,14 @@ func registerNetrunnerTools(server *mcp.Server) {
 	addMcpTool(server, "checkout_task", "For netrunners: Checkout a specific task by its session ID.", CheckoutTask)
 	addMcpTool(server, "list_mcp_servers", "List MCP servers from Fixer registry. Requires authenticated role. Returns curated defaults unless include_all=true; archived servers require include_archived=true.", ListMcpServers)
 	addMcpTool(server, "get_project_mcp_servers", "Get project-scoped MCP allowlist for current project.", GetProjectMcpServers)
+	addMcpTool(server, "get_project_hands_mcp_servers", "Get project-scoped MCP proposals for the permanent project actor Руки.", GetProjectHandsMcpServers)
+	addMcpTool(server, "get_project_hands_docs", "Get project-scoped document proposal metadata for the permanent project actor Руки.", GetProjectHandsDocs)
+	addMcpTool(server, "get_project_hands_docs_content", "Get full content for docs proposed for the permanent project actor Руки.", GetProjectHandsDocsContent)
 	addMcpTool(server, "get_session_mcp_servers", "Get MCP server assignments for a specific session in current project.", GetSessionMcpServers)
 	addMcpTool(server, "get_session_attached_docs", "Get attached document metadata for a session in current project. Requires fixer or netrunner role.", GetSessionAttachedDocs)
 	addMcpTool(server, "get_attached_project_docs", "Get full content for docs attached to a session. Requires fixer or netrunner role.", GetAttachedProjectDocs)
 	addMcpTool(server, "log_netrunner_progress", "Append a durable progress log for the checked-out Netrunner session. Requires netrunner role. Timestamp is generated by the backend.", LogNetrunnerProgress)
-	addMcpTool(server, "propose_doc_update", "Propose an update to canonical project documentation, not history logs. Requires netrunner role.", ProposeDocUpdate)
+	addMcpTool(server, "propose_doc_update", "Propose an update to canonical English project documentation, not history logs. proposed_localized_title is required for a new untargeted doc when the project language is not English. Requires netrunner role.", ProposeDocUpdate)
 	addMcpTool(server, "complete_task", "Complete a task. Requires netrunner role.", CompleteTask)
 	addMcpTool(server, "get_autonomous_run_status", "Read the current autonomous-run status for a project. Fixer/netrunner read their bound project; overseer can read any project.", GetAutonomousRunStatus)
 	addMcpTool(server, "send_operator_telegram_notification", "Send a compact Russian operator notification through Fixer MCP's native Telegram path. Requires configured FIXER_MCP_TELEGRAM_* env vars.", SendOperatorTelegramNotification)

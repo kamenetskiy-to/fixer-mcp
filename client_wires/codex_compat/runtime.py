@@ -12,6 +12,11 @@ from client_wires.codex_compat.ui import Option, single_select_items
 
 
 PLAYWRIGHT_MCP_NAME = "playwright"
+PLAYWRIGHT_MESH_MCP_NAME = "playwright-mesh"
+PLAYWRIGHT_MESH_TARGET_ENV = "PW_MESH_TARGET"
+PLAYWRIGHT_MESH_BROWSER_ENV = "PW_MESH_BROWSER"
+PLAYWRIGHT_MESH_DEVICES_ENV = "PW_MESH_DEVICES"
+PLAYWRIGHT_MESH_DEFAULT = "default"
 PLAYWRIGHT_MODE_ENV = "CODEX_PRO_PLAYWRIGHT_MODE"
 PLAYWRIGHT_CHROME_PROFILE_ENV = "CODEX_PRO_PLAYWRIGHT_CHROME_PROFILE"
 PLAYWRIGHT_CHROME_VIEWPORT_ENV = "CODEX_PRO_PLAYWRIGHT_CHROME_VIEWPORT"
@@ -169,6 +174,163 @@ def maybe_configure_playwright_runtime(
         print("Cancelled.")
         sys.exit(130)
     return apply_playwright_runtime_mode(available_servers, selected_servers, mode=str(selected))
+
+
+def playwright_mesh_devices(
+    available_servers: Dict[str, Dict[str, object]],
+) -> Dict[str, Dict[str, object]]:
+    """Load the mesh device matrix from the Playwright Mesh server definition.
+
+    The matrix is resolved from the launcher path recorded in the MCP server entry
+    (mesh_browser/devices.json next to pw_mesh_mcp.py), so the picker offers exactly
+    the devices the launcher will honour.  PW_MESH_DEVICES overrides it.
+    """
+    import json
+
+    candidates: List[Path] = []
+    env_path = os.environ.get(PLAYWRIGHT_MESH_DEVICES_ENV)
+    if env_path and env_path.strip():
+        candidates.append(Path(env_path).expanduser())
+
+    cfg = available_servers.get(PLAYWRIGHT_MESH_MCP_NAME)
+    if isinstance(cfg, dict):
+        raw_command = cfg.get("command")
+        raw_args = cfg.get("args") or []
+        tokens = [str(raw_command)] if isinstance(raw_command, str) else []
+        tokens.extend(str(item) for item in raw_args)
+        for token in tokens:
+            if token.endswith("pw_mesh_mcp.py"):
+                candidates.append(Path(token).expanduser().parent / "devices.json")
+                break
+
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        devices = data.get("devices")
+        if isinstance(devices, dict) and devices:
+            return {str(key): value for key, value in devices.items() if isinstance(value, dict)}
+    return {}
+
+
+def set_command_flag(args: object, flag: str, value: str) -> List[str]:
+    out = [str(item) for item in (args or [])]  # type: ignore[union-attr]
+    if flag in out:
+        index = out.index(flag)
+        if index + 1 < len(out):
+            out[index + 1] = value
+        else:
+            out.append(value)
+    else:
+        out.extend([flag, value])
+    return out
+
+
+def apply_playwright_mesh_target(
+    available_servers: Dict[str, Dict[str, object]],
+    selected_servers: Dict[str, Dict[str, object]],
+    *,
+    device: Optional[str],
+    browser: Optional[str] = None,
+) -> Optional[str]:
+    """Pin the single Playwright Mesh server to one device/browser for this launch."""
+    if PLAYWRIGHT_MESH_MCP_NAME not in selected_servers:
+        return None
+    source = available_servers.get(PLAYWRIGHT_MESH_MCP_NAME)
+    if not isinstance(source, dict) or not device:
+        return None
+
+    # Mutate the shared config object in place: build_mcp_flags() reads its
+    # command/args overrides from the *available* servers mapping, so a copy
+    # here would silently drop the selected target at launch time.
+    server_cfg = source
+    args = set_command_flag(server_cfg.get("args"), "--target", str(device))
+    if browser:
+        args = set_command_flag(args, "--browser", str(browser))
+    server_cfg["args"] = args
+    server_cfg["transport"] = "stdio"
+    server_cfg["startup_timeout_sec"] = max(int(server_cfg.get("startup_timeout_sec") or 0), 120)
+    server_cfg["tool_timeout_sec"] = max(int(server_cfg.get("tool_timeout_sec") or 0), 600)
+    server_cfg["timeout"] = max(int(server_cfg.get("timeout") or 0), 600)
+    # Mark the entry as runtime-overridden so the launcher emits command/args.
+    server_cfg["_source"] = "preset_mcp"
+    selected_servers[PLAYWRIGHT_MESH_MCP_NAME] = server_cfg
+    return f"{device}" + (f"/{browser}" if browser else "")
+
+
+def maybe_configure_playwright_mesh(
+    selected_servers: Dict[str, Dict[str, object]],
+    available_servers: Dict[str, Dict[str, object]],
+    *,
+    interactive: bool = True,
+) -> Optional[str]:
+    """Ask for a target device and then a browser when Playwright Mesh is selected."""
+    if PLAYWRIGHT_MESH_MCP_NAME not in selected_servers:
+        return None
+
+    env_device = os.environ.get(PLAYWRIGHT_MESH_TARGET_ENV)
+    if env_device and env_device.strip():
+        return apply_playwright_mesh_target(
+            available_servers,
+            selected_servers,
+            device=env_device,
+            browser=os.environ.get(PLAYWRIGHT_MESH_BROWSER_ENV),
+        )
+
+    devices = playwright_mesh_devices(available_servers)
+    if not interactive or not devices:
+        return None
+
+    device_options: List[object] = [
+        Option("Playwright Mesh target device", is_header=True),
+        Option("Use config default", PLAYWRIGHT_MESH_DEFAULT),
+    ]
+    for key in sorted(devices, key=lambda name: (not devices[name].get("local"), name)):
+        cfg = devices[key]
+        label = str(cfg.get("label") or key)
+        browsers = [str(item) for item in (cfg.get("browsers") or [])]
+        detail = ", ".join(browsers) if browsers else "no browser detected"
+        if cfg.get("local"):
+            detail += ", local"
+        device_options.append(Option(f"{label}  [{detail}]", key))
+
+    chosen_device = single_select_items(
+        device_options,
+        title="Select Playwright Mesh target device (enter confirm, q cancel)",
+        preselected_value=PLAYWRIGHT_MESH_DEFAULT,
+    )
+    if chosen_device is None:
+        print("Cancelled.")
+        sys.exit(130)
+    if str(chosen_device) == PLAYWRIGHT_MESH_DEFAULT:
+        return None
+
+    browsers = [
+        str(item) for item in ((devices.get(str(chosen_device)) or {}).get("browsers") or [])
+    ]
+    browser_options: List[object] = [
+        Option(f"Playwright Mesh browser on {chosen_device}", is_header=True),
+        Option("Auto (device default)", "auto"),
+    ]
+    for name in browsers:
+        browser_options.append(Option(name, name))
+
+    chosen_browser = single_select_items(
+        browser_options,
+        title="Select Playwright Mesh browser (enter confirm, q cancel)",
+        preselected_value="auto",
+    )
+    if chosen_browser is None:
+        print("Cancelled.")
+        sys.exit(130)
+
+    return apply_playwright_mesh_target(
+        available_servers,
+        selected_servers,
+        device=str(chosen_device),
+        browser=str(chosen_browser),
+    )
 
 
 def relative_to_cwd(path: Path, cwd: Path) -> str:

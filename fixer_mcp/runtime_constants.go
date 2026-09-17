@@ -22,7 +22,7 @@ const (
 	defaultCliBackend           = "codex"
 	defaultCliModel             = "gpt-5.6-luna"
 	defaultCliReasoning         = "high"
-	defaultCommandCodeCliModel  = "commandcode/deepseek/deepseek-v4-flash"
+	defaultCommandCodeCliModel  = "commandcode/zai-org/glm-5.3-flash"
 	defaultDroidCliModel        = "kimi-k2.6"
 	defaultDroidCliReasoning    = "high"
 	defaultAntigravityReasoning = "default"
@@ -46,8 +46,11 @@ var supportedCliBackends = map[string]struct{}{
 	"grok":        {},
 	"junie":       {},
 	"kimi-code":   {},
+	"pi":          {},
 }
 
+// No alias for "pi": the binary, the catalog provider id, the Python package
+// name and the DB-backed backend name are all already the same two letters.
 var cliBackendAliases = map[string]string{
 	"agy":  "antigravity",
 	"cmd":  "commandcode",
@@ -90,9 +93,9 @@ var supportedGrokCliModels = map[string]struct{}{
 func handsProviderConfig(provider string) (model string, reasoning string, ok bool) {
 	switch provider {
 	case "codex":
-		return "gpt-5.6-luna", "high", true
+		return defaultCliModel, defaultCliReasoning, true
 	case "commandcode":
-		return defaultCommandCodeCliModel, "high", true
+		return defaultCommandCodeCliModel, "medium", true
 	case "claude":
 		return "sonnet", "high", true
 	case "kimi-code":

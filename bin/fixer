@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Executable Fixer MCP launcher and command shim."""
+
+import os
+import sys
+
+# Locate repository root or managed installation root
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(BIN_DIR, ".."))
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from installer.cli import main
+
+if __name__ == "__main__":
+    main()

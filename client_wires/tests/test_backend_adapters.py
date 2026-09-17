@@ -3,6 +3,47 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from client_wires.backends.claude_adapter import ClaudeCodeBackendAdapter
+from client_wires.backends.commandcode_adapter import CommandCodeBackendAdapter
+from client_wires.backends.base import FIXER_ROLE_SKILL_NAMES
+
+
+def test_fixer_roles_materialize_backend_routing_skill() -> None:
+    assert "netrunner-backend-models" in FIXER_ROLE_SKILL_NAMES
+
+
+def test_commandcode_muse_does_not_receive_unsupported_effort_flag() -> None:
+    adapter = CommandCodeBackendAdapter()
+    selection = SimpleNamespace(
+        model="commandcode/meta/muse-spark-1.2-contributor",
+        reasoning_effort="high",
+    )
+
+    assert adapter.build_llm_args(selection) == ["--model", "meta/muse-spark-1.2-contributor"]
+
+
+def test_commandcode_other_models_keep_effort_flag() -> None:
+    adapter = CommandCodeBackendAdapter()
+    selection = SimpleNamespace(
+        model="commandcode/gpt-5.6-luna",
+        reasoning_effort="high",
+    )
+
+    assert adapter.build_llm_args(selection) == ["--model", "gpt-5.6-luna", "--effort", "high"]
+
+
+def test_commandcode_deepseek_flash_promotes_unsupported_medium_effort() -> None:
+    adapter = CommandCodeBackendAdapter()
+    selection = SimpleNamespace(
+        model="commandcode/deepseek/deepseek-v4-flash",
+        reasoning_effort="medium",
+    )
+
+    assert adapter.build_llm_args(selection) == [
+        "--model",
+        "deepseek/deepseek-v4-flash",
+        "--effort",
+        "high",
+    ]
 
 
 def test_claude_headless_command_forwards_explicit_opus_5_and_xhigh() -> None:

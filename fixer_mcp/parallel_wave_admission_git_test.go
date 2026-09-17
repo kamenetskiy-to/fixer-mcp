@@ -39,6 +39,39 @@ func TestNormalizeParallelWaveAdmissionWorkersAllowsOnlySequentialOverlap(t *tes
 	}
 }
 
+func TestNormalizeParallelWaveDeclaredWriteScopeRejectsFoundationPaths(t *testing.T) {
+	for _, scope := range [][]string{
+		{"fixer_mcp/main.go"},
+		{"client_wires/fixer_autonomous.py"},
+		{".codex/netrunner_worktrees"},
+		{"artifacts/runtime.db"},
+	} {
+		if _, err := normalizeParallelWaveDeclaredWriteScope(scope); err == nil || !strings.Contains(err.Error(), "foundation/bootstrap") {
+			t.Fatalf("expected foundation scope %v to be rejected, got %v", scope, err)
+		}
+	}
+
+	if _, err := normalizeParallelWaveDeclaredWriteScope([]string{"docs/runtime.dbx"}); err != nil {
+		t.Fatalf("unexpected rejection for non-database suffix: %v", err)
+	}
+}
+
+func TestSplitGitPathLinesPreservesNULDelimitedSpecialNames(t *testing.T) {
+	got := splitGitPathLines(" docs/leading.txt\x00docs/na\nme.txt\x00docs/trailing.txt \x00")
+	want := []string{" docs/leading.txt", "docs/na\nme.txt", "docs/trailing.txt "}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("splitGitPathLines() = %#v, want %#v", got, want)
+	}
+}
+
+func TestGitTreeGitlinksNormalizesGitlinkPaths(t *testing.T) {
+	raw := []byte("100644 blob abc123\tregular.txt\x00160000 commit deadbeef\tvendor/lib\x00")
+	got := gitTreeGitlinks(raw)
+	if len(got) != 1 || got["vendor/lib"] != "deadbeef" {
+		t.Fatalf("gitTreeGitlinks() = %#v, want vendor/lib -> deadbeef", got)
+	}
+}
+
 func TestGitMergeBranchCommand(t *testing.T) {
 	spec, err := gitMergeBranchCommand("/tmp/child-worktree", "fixer/wave-54/session-1")
 	if err != nil {

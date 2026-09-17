@@ -10,7 +10,7 @@ import 'fixer_genui_tab.dart';
 import 'workroom_models.dart';
 import 'workroom_store.dart';
 
-const _providerOrder = <String>['codex', 'claude', 'kimi-code', 'antigravity'];
+const _providerOrder = <String>['codex', 'commandcode', 'claude', 'kimi-code', 'antigravity'];
 
 List<ProviderModelReasoningOption> _laneSelectorOptions(
   List<HandsProviderLane> lanes,

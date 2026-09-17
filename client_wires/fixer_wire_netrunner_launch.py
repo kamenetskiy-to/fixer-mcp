@@ -12,6 +12,7 @@ import sys
 from typing import Any, Callable, Sequence
 
 from client_wires.backends import is_codex_backend, normalize_backend_name
+from client_wires import fixer_wire_mcp
 from client_wires.fixer_wire_db import SessionLaunchSelection, SessionRow
 
 
@@ -71,6 +72,7 @@ class NetrunnerLaunchCallbacks:
     backend_descriptor: Callable[[str], Any]
     resolve_netrunner_resume_session_id: Callable[..., str]
     maybe_configure_playwright_runtime_mode: Callable[..., str | None]
+    maybe_configure_playwright_mesh_target: Callable[..., str | None]
     bind_fixer_db_path_to_server_env: Callable[..., dict[str, dict[str, object]]]
     bind_netrunner_stateless_auth_to_server_env: Callable[..., dict[str, dict[str, object]]]
     bind_locked_role_to_server_env: Callable[..., dict[str, dict[str, object]]]
@@ -142,17 +144,18 @@ def load_project_hands_state(
             )
 
     lanes = (
+        ProjectHandsLane("commandcode", "commandcode/zai-org/glm-5.3-flash", "medium"),
         ProjectHandsLane("codex", "gpt-5.6-luna", "high"),
-        ProjectHandsLane("commandcode", "commandcode/deepseek/deepseek-v4-flash", "high"),
         ProjectHandsLane("claude", "kimi/k3", "high"),
         ProjectHandsLane("kimi", "kimi-k3-256k", "default"),
         ProjectHandsLane("antigravity", "Gemini 3.7 Flash", "medium"),
+        ProjectHandsLane("grok", "grok-4.6", "default"),
     )
     return ProjectHandsState(
         project_id=project_id,
         display_name=str(actor_row[0] or "Руки"),
         authority_state=str(actor_row[1] or "disabled"),
-        default_lane=_canonical_hands_provider(str(actor_row[2] or "codex")),
+        default_lane=_canonical_hands_provider(str(actor_row[2] or "commandcode")),
         lanes=lanes,
     )
 
@@ -371,6 +374,12 @@ def launch_netrunner(
         available_servers,
         interactive=not dry_run,
     )
+    callbacks.maybe_configure_playwright_mesh_target(
+        adapter,
+        selected_servers,
+        available_servers,
+        interactive=not dry_run,
+    )
     if callbacks.forced_mcp_server in selected_servers:
         selected_servers = callbacks.bind_fixer_db_path_to_server_env(selected_servers, db_path=db_path)
         selected_servers = callbacks.bind_netrunner_stateless_auth_to_server_env(selected_servers, project_cwd=cwd)
@@ -464,10 +473,11 @@ def launch_netrunner(
                 netrunner_kind=netrunner_kind,
             )
         if prompt:
-            # Project Hands Kimi is interactive-only. Do not reintroduce the
-            # non-interactive -p/--print path here; use the same TUI flow as
-            # fixer -> fixer and let the operator submit the prompt manually.
-            codex_cmd.extend(adapter.build_prompt_args(prompt))
+            build_interactive_command = getattr(adapter, "build_interactive_command", None)
+            if callable(build_interactive_command):
+                codex_cmd = list(build_interactive_command(option_args, prompt))
+            else:
+                codex_cmd.extend(adapter.build_prompt_args(prompt))
 
     env = callbacks.build_backend_launch_env(
         adapter,
@@ -476,6 +486,7 @@ def launch_netrunner(
         load_llm_env=_load_llm_env,
         merge_env_with_os=_merge_env_with_os,
     )
+    env = fixer_wire_mcp._bind_mcp_server_env_to_launch_env(env, selected_servers)
     for server_name, config_path in selected_config_paths.items():
         env_var = config_env_vars.get(server_name)
         if env_var:
@@ -495,8 +506,9 @@ def launch_netrunner(
         and prompt
         and not resume_external_session_id
         and not dry_run
+        and not callable(getattr(adapter, "build_interactive_command", None))
     ):
-        print("[fixer-wire] kimi shell mode cannot auto-submit; paste the following into the Kimi TUI:")
+        print("[fixer-wire] provider shell mode cannot auto-submit; paste the following into the provider TUI:")
         print(prompt)
     if dry_run:
         return 0

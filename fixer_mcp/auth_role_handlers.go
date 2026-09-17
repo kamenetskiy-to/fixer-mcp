@@ -108,9 +108,8 @@ func ensureNetrunnerGateProjectBinding() error {
 }
 
 type AssumeRoleInput struct {
-	Role  string `json:"role" jsonschema:"the role to assume: 'fixer', 'netrunner', or 'overseer'"`
-	Cwd   string `json:"cwd,omitempty" jsonschema:"The absolute path to the project root directory. Not required for overseer."`
-	Token string `json:"token,omitempty" jsonschema:"secret token for fixer or overseer"`
+	Role string `json:"role" jsonschema:"the role to assume: 'fixer', 'netrunner', or 'overseer'"`
+	Cwd  string `json:"cwd,omitempty" jsonschema:"The absolute path to the project root directory. Not required for overseer."`
 }
 
 type AssumeRoleOutput struct {
@@ -145,9 +144,6 @@ func AssumeRole(ctx context.Context, req *mcp.CallToolRequest, input AssumeRoleI
 	authorizedSessionId = 0
 
 	if requestedRole == "overseer" {
-		if lockedRole != "overseer" && input.Token != "supersecret" {
-			return &mcp.CallToolResult{IsError: true}, AssumeRoleOutput{Status: "error", Message: "invalid token"}, nil
-		}
 		authorizedRole = "overseer"
 		authorizedProjectId = 0
 		return nil, AssumeRoleOutput{Status: "success", Message: "Authenticated as Overseer. Global view granted.", RolePreprompt: getRolePreprompt("overseer")}, nil
@@ -180,9 +176,6 @@ func AssumeRole(ctx context.Context, req *mcp.CallToolRequest, input AssumeRoleI
 
 	switch requestedRole {
 	case "fixer":
-		if lockedRole != "fixer" && input.Token != "supersecret" { // hardcoded for demo, normally check env
-			return &mcp.CallToolResult{IsError: true}, AssumeRoleOutput{Status: "error", Message: "invalid token"}, nil
-		}
 		authorizedRole = "fixer"
 		authorizedProjectId = projId
 		return nil, AssumeRoleOutput{Status: "success", Message: "Authenticated as Fixer. Full access granted.", RolePreprompt: getRolePreprompt("fixer")}, nil
