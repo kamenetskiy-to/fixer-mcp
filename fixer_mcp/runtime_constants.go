@@ -104,6 +104,8 @@ func handsProviderConfig(provider string) (model string, reasoning string, ok bo
 		return "Gemini 3.7 Flash", "medium", true
 	case "grok":
 		return defaultGrokCliModel, defaultGrokCliReasoning, true
+	case "pi":
+		return "openai-codex/gpt-5.6-luna", "high", true
 	default:
 		return "", "", false
 	}

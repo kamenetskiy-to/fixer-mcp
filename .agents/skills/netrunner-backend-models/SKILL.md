@@ -18,8 +18,8 @@ When you choose the backend/model yourself, run the executable `check-my-limits`
 | Task class | Default route | Notes |
 |---|---|---|
 | Base harness (Pi) | `pi + opencode-go + deepseek-v4.1-flash + high` | The Architect's base agent harness: one CLI over the OpenAI, OpenCode Go and CommandCode subscriptions. On this model the only sendable levels are `high` and `max`; `low`, `medium` and `xhigh` are declared unsupported by the model's own `thinkingLevelMap`, and `pi --thinking low` clamps silently to `high` (the adapter's guard rejects an undeclared level loudly instead). Never advertise `ultra` for any Pi model. |
-| Simple / small / ordinary implementation | `codex + gpt-5.6-luna + high` | OpenAI subscription baseline. Use another route only when explicitly selected. |
-| Complex implementation or research | `codex + gpt-5.6-luna + high` | OpenAI subscription baseline unless the Architect explicitly selects another model. |
+| Simple / small / ordinary implementation | `pi + openai-codex + gpt-5.6-luna + high` | Default worker route since 2026-09-17 (Architect decision): the same Codex subscription the `codex` backend uses, reached through the `pi` harness. When the Codex subscription windows are depleted, fall back to the OpenCode Go subscription on the same backend (`pi + deepseek-v4.1-flash + high`, sendable levels `high`/`max`). |
+| Complex implementation or research | `pi + openai-codex + gpt-5.6-luna + high` | Same default route; escalate the model (for example `gpt-5.6-sol`) or move to a Claude/Kimi-native route only when explicitly selected. |
 | Complex Claude-native task | `claude + opus + high` | Use for tasks where Claude's native workflow is the better fit. |
 | Complex Kimi-native or very large-context task | `kimi-code + kimi-k3` | Use `kimi-k3-256k` when the task specifically needs the larger context; native Kimi has no per-invocation effort flag. |
 | Browser/UI or Gemini-suitable fallback | `antigravity + Gemini 3.7 Flash + medium` | New Agy default; Antigravity encodes reasoning in the model name. |
@@ -37,7 +37,9 @@ When you choose the backend/model yourself, run the executable `check-my-limits`
 ## Hard bans and cautions
 
 - Claude Fable remains banned.
-- Keep `codex + gpt-5.6-luna + high` as the ordinary-worker default until the Architect explicitly changes the route.
+- The ordinary-worker default is `pi + openai-codex/gpt-5.6-luna + high` (Codex subscription through Pi). The `codex` backend remains a valid explicit route, but it is no longer the default. Both are subscription routes, so prefer the one with live capacity instead of burning the other.
+- Fallback rule: before a wave, when `check-my-limits` shows the Codex subscription windows low (5h/7d nearly exhausted, or reset far away while work must start), route the same workers to `pi + deepseek-v4.1-flash` (`high` or `max`) on OpenCode Go and say so in the launch report. Never silently switch a worker off the named route mid-wave.
+- Host policy is canon everywhere: the Ubuntu operator host and `macbook-air-lizok` install the canonical model policy from this skill. There is no host-local model override.
 - Muse Spark Contributor via OpenCode Go remains an explicit non-default option; do not silently treat allowance availability as execution proof.
 - MiniMax M3 remains optional speculative breadth until endpoint latency and load are measured.
 - Do not claim a reasoning control exists unless the adapter actually passes it.

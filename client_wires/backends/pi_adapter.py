@@ -43,6 +43,7 @@ PI_MODEL_INTERNAL_IDS: dict[str, str] = {
     "deepseek-v4-pro": "opencode-go/deepseek-v4-pro",
     "commandcode/deepseek/deepseek-v4-flash": "commandcode/deepseek/deepseek-v4-flash",
     "openai-codex/gpt-5.3-codex-spark": "openai-codex/gpt-5.3-codex-spark",
+    "openai-codex/gpt-5.6-luna": "openai-codex/gpt-5.6-luna",
     "kimi-coding/k3": "kimi-coding/k3",
 }
 
@@ -105,6 +106,16 @@ PI_MODEL_THINKING_LEVELS: dict[str, dict[str, str | None]] = {
     # this model, so `max` is not a supported level for it.
     "openai-codex/gpt-5.3-codex-spark": {
         "xhigh": "xhigh",
+        "minimal": "low",
+    },
+    # `thinkingLevelMap` as `openai-codex` declares it in models-store.json
+    # (probed 2026-09-17): xhigh and max are real levels, `minimal` aliases to
+    # `low`. `low`, `medium` and `high` are absent from the map, so Pi passes
+    # them through unchanged - which is exactly what keeps `high` sendable for
+    # a Pi Hands lane on this model.
+    "openai-codex/gpt-5.6-luna": {
+        "xhigh": "xhigh",
+        "max": "max",
         "minimal": "low",
     },
     "kimi-coding/k3": {

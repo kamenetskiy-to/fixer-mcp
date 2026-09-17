@@ -67,8 +67,16 @@ func TestPermanentHandsIdentityAndProviderDefaultsAreAvailable(t *testing.T) {
 		t.Fatalf("repeat migration duplicated identity: %d", identityCount)
 	}
 	lanes := readHandsLanes()
-	if len(lanes) != 6 || lanes[0].Provider != "commandcode" || lanes[0].Model != "commandcode/zai-org/glm-5.3-flash" || lanes[0].Reasoning != "medium" || lanes[3].Model != "kimi-k3-256k" || lanes[5].Provider != "grok" {
+	if len(lanes) != 7 || lanes[0].Provider != "commandcode" || lanes[0].Model != "commandcode/zai-org/glm-5.3-flash" || lanes[0].Reasoning != "medium" || lanes[3].Model != "kimi-k3-256k" || lanes[5].Provider != "grok" {
 		t.Fatalf("unexpected provider defaults: %+v", lanes)
+	}
+	piLane := lanes[6]
+	if piLane.Provider != "pi" || piLane.Model != "openai-codex/gpt-5.6-luna" || piLane.Reasoning != "high" {
+		t.Fatalf("pi lane mismatch: %+v", piLane)
+	}
+	piModel, piReasoning, piOK := handsProviderConfig("pi")
+	if !piOK || piModel != "openai-codex/gpt-5.6-luna" || piReasoning != "high" {
+		t.Fatalf("handsProviderConfig(pi) mismatch: model=%q reasoning=%q ok=%v", piModel, piReasoning, piOK)
 	}
 }
 

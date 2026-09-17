@@ -1987,7 +1987,7 @@ class ClaudeRuntimeMaterializationTests(unittest.TestCase):
                 "fixer_mcp": {
                     "command": "/tmp/fixer_mcp",
                     "args": ["--serve"],
-                    "env": {"PGPASSWORD": "fixer_password"},
+                    "env": {"PGPASSWORD": "fixture-not-a-secret"},
                     "transport": "stdio",
                     "startup_timeout_sec": 30,
                     "timeout": 21600,
@@ -2014,7 +2014,7 @@ class ClaudeRuntimeMaterializationTests(unittest.TestCase):
                                 "FIXER_MCP_DEFAULT_CWD": str(cwd.resolve()),
                                 "FIXER_MCP_DEFAULT_ROLE": "netrunner",
                                 "FIXER_MCP_LOCKED_ROLE": "fixer",
-                                "PGPASSWORD": "fixer_password",
+                                "PGPASSWORD": "fixture-not-a-secret",
                                 "TOKEN": "secret",
                             },
                             "startup_timeout_sec": 30,
@@ -2471,7 +2471,7 @@ class CodexBackendAdapterTests(unittest.TestCase):
             available={
                 "fixer_mcp": {
                     "command": "/tmp/fixer_mcp",
-                    "env": {"PGPASSWORD": "fixer_password"},
+                    "env": {"PGPASSWORD": "fixture-not-a-secret"},
                 },
             },
         )

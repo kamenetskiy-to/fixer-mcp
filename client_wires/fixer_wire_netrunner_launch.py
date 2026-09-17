@@ -23,6 +23,10 @@ HANDS_PROVIDER_BACKENDS = {
     "kimi": "kimi-code",
     "antigravity": "antigravity",
     "grok": "grok",
+    # Pi is the Fixer MCP base harness; its provider key and backend name match,
+    # so a durable `pi` Project Hands lane resolves to the `pi` backend without
+    # an alias hop.
+    "pi": "pi",
 }
 
 

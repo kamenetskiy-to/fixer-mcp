@@ -119,6 +119,24 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
         self.assertEqual(state.lanes[5].model, "grok-4.6")
         self.assertEqual(state.lanes[5].reasoning, "default")
 
+    def test_project_hands_pi_provider_maps_to_the_pi_backend(self) -> None:
+        # A permanent `pi` Hands lane reaches the launcher as provider="pi".
+        # The provider key and the backend name are equal here, unlike the kimi
+        # asymmetry, so the map must resolve without an alias hop.
+        self.assertEqual(fixer_wire_netrunner_launch.HANDS_PROVIDER_BACKENDS["pi"], "pi")
+        self.assertEqual(fixer_wire_netrunner_launch.HANDS_PROVIDER_BACKENDS["kimi"], "kimi-code")
+        self.assertEqual(fixer_wire_netrunner_launch._canonical_hands_provider("pi"), "pi")
+
+        lane = fixer_wire_netrunner_launch.ProjectHandsLane(
+            "pi",
+            "openai-codex/gpt-5.6-luna",
+            "high",
+        )
+
+        self.assertEqual(lane.provider, "pi")
+        self.assertEqual(lane.backend, "pi")
+        self.assertEqual(lane.model, "openai-codex/gpt-5.6-luna")
+
     def test_project_hands_facade_bootstraps_go_schema_before_reading_state(self) -> None:
         cwd = Path("/tmp/project")
         db_path = Path("/tmp/fixer.db")
