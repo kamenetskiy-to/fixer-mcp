@@ -10,9 +10,9 @@ fixer update         --descriptor <descriptor-url-or-path>
 
 Canonical descriptors (replace the platform as needed):
 
-- linux_amd64: `https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/fixer-mcp-0.3.0-linux_amd64.json`
-- darwin_arm64 (Apple silicon): `.../releases/fixer-mcp-0.3.0-darwin_arm64.json`
-- darwin_amd64 (Intel): `.../releases/fixer-mcp-0.3.0-darwin_amd64.json`
+- linux_amd64: `https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/fixer-mcp-0.3.1-linux_amd64.json`
+- darwin_arm64 (Apple silicon): `.../releases/fixer-mcp-0.3.1-darwin_arm64.json`
+- darwin_amd64 (Intel): `.../releases/fixer-mcp-0.3.1-darwin_amd64.json`
 
 A relative `payload_url` inside a descriptor resolves against the descriptor's
 own location, so descriptor and payload must travel together.

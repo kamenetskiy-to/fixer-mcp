@@ -1,0 +1,15 @@
+{
+  "changelog": "Fixer MCP release 0.3.1 for linux_amd64",
+  "changelog_url": "",
+  "created_at": "2026-09-18T14:19:07Z",
+  "format": 1,
+  "min_os": "Linux (glibc 2.31+)",
+  "payload_path": "fixer-mcp-0.3.1-linux_amd64.tar.gz",
+  "payload_sha256": "41d88de4e129433b81939bc6f0055e9624385abc262d00558694da2d08a40b9f",
+  "payload_url": "fixer-mcp-0.3.1-linux_amd64.tar.gz",
+  "platform": "linux_amd64",
+  "schema_compatibility_class": "project-workroom-v1",
+  "sha256": "41d88de4e129433b81939bc6f0055e9624385abc262d00558694da2d08a40b9f",
+  "source_revision": "602dfb8985f749a0aa898d7c61503628898e7505",
+  "version": "0.3.1"
+}
