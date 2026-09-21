@@ -10,12 +10,14 @@ fixer update         --descriptor <descriptor-url-or-path>
 
 Canonical descriptors (replace the platform as needed):
 
-- linux_amd64: `https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/fixer-mcp-0.3.1-linux_amd64.json`
-- darwin_arm64 (Apple silicon): `.../releases/fixer-mcp-0.3.1-darwin_arm64.json`
-- darwin_amd64 (Intel): `.../releases/fixer-mcp-0.3.1-darwin_amd64.json`
+- linux_amd64: `https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/fixer-mcp-0.3.9-linux_amd64.json`
+- darwin_arm64 (Apple silicon): `.../releases/fixer-mcp-0.3.9-darwin_arm64.json`
+- darwin_amd64 (Intel): `.../releases/fixer-mcp-0.3.9-darwin_amd64.json`
 
 A relative `payload_url` inside a descriptor resolves against the descriptor's
 own location, so descriptor and payload must travel together.
+
+Release 0.3.9 (2026-09-21): unified native Fixer Super-TUI, persistent work sessions, resources/machines/network/Fleet workspaces, and portable control-plane packaging.
 
 Release 0.3.0 (2026-09-17): pi as a first-class Hands lane, platform-aware
 release pipeline (linux + darwin), fleet installs on Ubuntu and
