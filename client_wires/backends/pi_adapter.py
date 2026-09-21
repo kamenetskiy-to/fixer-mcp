@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .base import (
     CANONICAL_SKILLS_RELATIVE_ROOT,
@@ -128,6 +131,94 @@ PI_MODEL_THINKING_LEVELS: dict[str, dict[str, str | None]] = {
         "max": "max",
     },
 }
+
+# The `pi-mcp-adapter` extension owns MCP for Pi. It registers the `--mcp-config <path>` extension flag
+# (`pi` also installs this extension itself on first launch; Fixer MCP provisions it
+# beforehand so a failure cannot surface as a Node stack dump mid-session).
+PI_MCP_ADAPTER_PACKAGE = "pi-mcp-adapter"
+PI_ADAPTER_PREPARE_ENV = "FIXER_PI_ADAPTER_AUTOPREPARE"
+
+
+class PiAdapterInstallError(RuntimeError):
+    """The `pi` MCP adapter extension is missing and could not be installed."""
+
+
+def _pi_agent_dir() -> Path:
+    override = os.environ.get("PI_AGENT_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".pi" / "agent"
+
+
+def ensure_mcp_adapter_extension(
+    *,
+    agent_dir: Path | None = None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] | None = None,
+) -> None:
+    """Provision the `pi` MCP adapter before launch, with one clean-cache retry.
+
+    `pi` installs its own MCP extension on first launch and treats a failure as
+    fatal, which left the operator with a Node stack dump and no MCP (fresh WSL
+    host, 2026-09-19: the same install succeeded into /tmp and on the second
+    launch). Provisioning here makes it either a no-op (already installed, no npm
+    call) or one actionable line; a launch never proceeds silently without MCP.
+
+    Set `FIXER_PI_ADAPTER_AUTOPREPARE=0` to disable (tests, or hosts where the
+    extension is managed outside Fixer MCP).
+    """
+
+    if os.environ.get(PI_ADAPTER_PREPARE_ENV, "").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    agent = (agent_dir or _pi_agent_dir()).expanduser()
+    npm_prefix = agent / "npm"
+    package_json = npm_prefix / "node_modules" / PI_MCP_ADAPTER_PACKAGE / "package.json"
+    if package_json.is_file():
+        return
+
+    run = runner or subprocess.run
+    log_path = npm_prefix / "pi-mcp-adapter-install.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="pi-adapter-cache-") as cache:
+        attempts = [
+            ["npm", "install", PI_MCP_ADAPTER_PACKAGE, "--prefix", str(npm_prefix), "--legacy-peer-deps"],
+            [
+                "npm", "install", PI_MCP_ADAPTER_PACKAGE, "--prefix", str(npm_prefix), "--legacy-peer-deps",
+                "--cache", cache, "--prefer-online", "--no-audit", "--no-fund",
+            ],
+        ]
+        for index, command in enumerate(attempts, start=1):
+            try:
+                completed = run(command, capture_output=True, text=True, check=False)
+            except OSError as exc:  # npm missing, permissions, ...
+                problems.append("attempt %d: npm could not run (%s)" % (index, exc))
+                break
+            output = "%s\n%s" % (completed.stdout or "", completed.stderr or "")
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("$ %s\n%s\n" % (" ".join(command), output))
+            if completed.returncode == 0 and package_json.is_file():
+                return
+            problems.append("attempt %d: exit %s" % (index, completed.returncode))
+
+    tail = ""
+    if log_path.is_file():
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = "\n".join(lines[-8:])
+    raise PiAdapterInstallError(
+        "The pi MCP adapter extension is missing and could not be installed (%s).\n"
+        "Run this by hand, then relaunch:\n"
+        "  npm install %s --prefix %s --legacy-peer-deps\n"
+        "Install log: %s%s"
+        % (
+            "; ".join(problems) or "unknown failure",
+            PI_MCP_ADAPTER_PACKAGE,
+            npm_prefix,
+            log_path,
+            ("\n" + tail) if tail else "",
+        )
+    )
+
 
 # The `pi-mcp-adapter` extension owns MCP for Pi. It registers the
 # `--mcp-config <path>` extension flag and reads the same `mcpServers` shape as
@@ -462,6 +553,7 @@ class PiBackendAdapter(BackendAdapter):
         available: Mapping[str, Mapping[str, object]],
     ) -> None:
         del selection
+        ensure_mcp_adapter_extension()
         mcp_servers: dict[str, dict[str, object]] = {}
         for name, config in sorted(selected.items()):
             source = dict(available.get(name, {}))

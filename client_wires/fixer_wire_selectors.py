@@ -23,8 +23,10 @@ from client_wires.backends.codex_adapter import (
     codex_model_options_for_family,
 )
 from client_wires.backends.commandcode_adapter import commandcode_reasoning_options
+from client_wires.backends.pi_adapter import pi_supported_thinking_levels
 from client_wires.codex_compat.ui import BACK_VALUE, BackNavigation
 from client_wires import fixer_wire_db
+from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_prompts
 from client_wires import ai_limits
@@ -46,6 +48,12 @@ ALWAYS_VISIBLE_MCP_NAMES = {fixer_wire_mcp.FIGMA_CONSOLE_MCP_NAME}
 MESH_MCP_PREFIX = fixer_wire_mcp.MESH_MCP_PREFIX
 NETRUNNER_KIND_MANUAL = fixer_wire_prompts.NETRUNNER_KIND_MANUAL
 NETRUNNER_KIND_ACCEPTANCE = fixer_wire_prompts.NETRUNNER_KIND_ACCEPTANCE
+
+# Set only while a Project Hands lane is being chosen: a wire-injected backend
+# picker that delegates to `_select_backend_interactive` without forwarding
+# `allowed_backends` still sees the registered-lane filter. Always reset after
+# the picker returns (see `_select_project_hands_lane_interactive`).
+_HANDS_ACTIVE_ALLOWED_BACKENDS: set[str] | None = None
 
 SessionRow = fixer_wire_db.SessionRow
 RegistryMcpMetadata = fixer_wire_db.RegistryMcpMetadata
@@ -393,20 +401,51 @@ def _select_project_hands_lane_interactive(
     *,
     select_backend_interactive: Callable[..., str] | None = None,
     select_model_interactive: Callable[..., str] | None = None,
+    lane_inventory: Callable[..., Sequence[Any]] | None = None,
 ) -> Any:
     if not lanes:
         raise RuntimeError("No provider lanes are registered for the current project's `Руки` actor.")
 
     by_provider = {str(lane.provider): lane for lane in lanes}
-    backend_for_provider = {
+    # Provider -> backend is derived from the *registered* lanes, never from a
+    # hardcoded macOS-centric list. A backend that is not backed by a durable
+    # lane (for example `pi` while it is not a control-plane lane) is therefore
+    # not offered and can never reach the lane resolution below.
+    known_backends = {
         "codex": "codex",
         "commandcode": "commandcode",
         "claude": "claude",
         "kimi": "kimi-code",
         "antigravity": "antigravity",
         "grok": "grok",
+        "pi": "pi",
     }
+
+    def _lane_backend(lane: Any) -> str:
+        provider = str(lane.provider)
+        try:
+            backend = str(getattr(lane, "backend", "") or "")
+        except KeyError:
+            backend = ""
+        return backend or known_backends.get(provider, provider)
+
+    backend_for_provider = {str(lane.provider): _lane_backend(lane) for lane in lanes}
     provider_for_backend = {backend: provider for provider, backend in backend_for_provider.items()}
+    allowed_backends = {backend_for_provider[provider] for provider in by_provider}
+
+    inventory_builder = lane_inventory or fixer_wire_hands_context.hands_lane_inventory
+    inventory = tuple(inventory_builder(lanes))
+    availability_by_provider = {str(entry.provider): entry for entry in inventory}
+
+    def _governed_lane_error(message: str) -> None:
+        inventory_block = fixer_wire_hands_context.render_hands_lane_inventory(inventory)
+        lines = [f"[fixer-wire] {message}"]
+        lines.extend(f"[fixer-wire] {line}" for line in inventory_block.splitlines())
+        lines.append(
+            "[fixer-wire] Register the lane through the Fixer MCP control plane, install the "
+            "missing provider CLI, or pick an available Project Hands lane."
+        )
+        raise SystemExit("\n".join(lines))
 
     select_backend = select_backend_interactive or _select_backend_interactive
     select_model = select_model_interactive or _select_model_interactive
@@ -416,16 +455,26 @@ def _select_project_hands_lane_interactive(
     nav = FixerTuiNavigator()
 
     def _pick_backend() -> str:
+        global _HANDS_ACTIVE_ALLOWED_BACKENDS
         preferred_backend = backend_for_provider.get(preferred_provider, preferred_provider)
         if select_backend_interactive is None:
             selected_backend = _select_backend_interactive(
                 preferred_backend,
                 Option,
                 single_select_items,
-                allowed_backends={backend_for_provider[provider] for provider in by_provider},
+                allowed_backends=allowed_backends,
             )
         else:
-            selected_backend = select_backend(preferred_backend, Option, single_select_items)
+            # A wire-injected picker may be a thin wrapper over the module-level
+            # one and therefore not forward `allowed_backends`. Publish the
+            # registered-lane filter so that wrapper still only offers lanes
+            # that actually exist for this project.
+            previous_filter = _HANDS_ACTIVE_ALLOWED_BACKENDS
+            _HANDS_ACTIVE_ALLOWED_BACKENDS = allowed_backends
+            try:
+                selected_backend = select_backend(preferred_backend, Option, single_select_items)
+            finally:
+                _HANDS_ACTIVE_ALLOWED_BACKENDS = previous_filter
         return normalize_backend_name(selected_backend)
 
     def _pick_model() -> Any:
@@ -433,7 +482,14 @@ def _select_project_hands_lane_interactive(
         selected_provider = provider_for_backend.get(selected_backend, selected_backend)
         lane = by_provider.get(selected_provider)
         if lane is None:
-            raise RuntimeError(f"Selected Project Hands lane {selected_backend!r} is unavailable.")
+            _governed_lane_error(
+                f"Project Hands lane {selected_backend!r} is not a registered lane for this project."
+            )
+        availability = availability_by_provider.get(selected_provider)
+        if availability is not None and not availability.available:
+            _governed_lane_error(
+                f"Project Hands lane {selected_provider!r} is unavailable: {availability.reason}."
+            )
         preferred_model = str(getattr(lane, "model", "") or "").strip()
         selected_model = select_model(
             selected_backend,
@@ -686,6 +742,8 @@ def _select_backend_interactive(
     *,
     allowed_backends: set[str] | None = None,
 ) -> str:
+    if allowed_backends is None:
+        allowed_backends = _HANDS_ACTIVE_ALLOWED_BACKENDS
     descriptors = {descriptor.name: descriptor for descriptor in subscribed_backend_descriptors()}
     order = ("codex", "commandcode", "antigravity", "grok", "claude", "kimi-code")
     ordered = [name for name in order if name in descriptors]
@@ -824,6 +882,13 @@ def _select_reasoning_interactive(
         if not model_options:
             return descriptor.default_reasoning
         reasoning_options = model_options
+    elif backend == "pi" and model:
+        # Pi declares its reasoning surface per model (`thinkingLevelMap`); offering
+        # the static backend list lets the operator pick a level the adapter guard
+        # then refuses at launch (observed on Ubuntu: `low` for deepseek-v4.1-flash).
+        model_levels = pi_supported_thinking_levels(model)
+        if model_levels:
+            reasoning_options = list(model_levels)
     preferred_value = preferred_reasoning.strip() or descriptor.default_reasoning
     if preferred_value not in reasoning_options:
         preferred_value = (

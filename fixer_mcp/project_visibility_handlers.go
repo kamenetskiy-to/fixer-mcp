@@ -62,8 +62,12 @@ type RegisterProjectOutput struct {
 }
 
 func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input RegisterProjectInput) (*mcp.CallToolResult, RegisterProjectOutput, error) {
-	if authorizedRole != "overseer" {
-		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("access denied: requires overseer role")
+	// Onboarding moved to the Fixer (program item 4, 2026-09-19): a Fixer must be
+	// able to register a project for an unknown cwd, otherwise a single shared
+	// database cannot serve a new machine, a new checkout or a new operator path.
+	// Netrunners still cannot onboard.
+	if authorizedRole != "overseer" && authorizedRole != "fixer" {
+		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("access denied: requires fixer or overseer role")
 	}
 
 	normalizedCWD, err := normalizeProjectCWD(input.Cwd)
@@ -72,12 +76,16 @@ func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input Regist
 	}
 
 	info, err := os.Stat(normalizedCWD)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("invalid cwd: path does not exist")
-	}
-	if !info.IsDir() {
+	switch {
+	case err == nil && !info.IsDir():
 		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("invalid cwd: path is not a directory")
+	case err != nil && !os.IsNotExist(err):
+		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("invalid cwd: %v", err)
 	}
+	// A path that does not exist on *this* host is still accepted: with one shared
+	// database the server runs on the database host while the project lives on the
+	// agent host (macOS/Windows/Linux paths never exist on the DB host). Existence is
+	// validated by the launcher on the agent host; the server records the path.
 
 	if projectID, storedName, storedCWD, findErr := findProjectByCWD(normalizedCWD); findErr == nil {
 		return nil, RegisterProjectOutput{

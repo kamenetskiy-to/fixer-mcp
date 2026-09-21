@@ -4,6 +4,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,40 @@ class DoctorReport:
         return "\n".join(lines)
 
 
+def _launcher_resolved_db_path(release_root: str) -> tuple[str, str]:
+    """Ask the launcher's own resolver which database it would use.
+
+    Returns `(path, error)`; `error` is non-empty when the resolver raised, which
+    is exactly the "Could not locate fixer.db" failure the operator would see.
+    """
+    script = (
+        "import sys; sys.path.insert(0, sys.argv[1]);"
+        "from pathlib import Path;"
+        "from client_wires import fixer_wire_db as db;"
+        "print(db._resolve_fixer_db_path(Path(sys.argv[2]), repo_root=Path(sys.argv[3])))"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script, release_root, os.path.expanduser("~"), release_root],
+            cwd=os.path.expanduser("~"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never crash
+        return "", f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        message = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = message[-1] if message else f"exit code {proc.returncode}"
+        stderr_text = proc.stderr or ""
+        if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text:
+            # Not a real release tree (for example a synthetic test payload):
+            # there is nothing to compare, and this is not an operator problem.
+            return "", ""
+        return "", tail
+    return proc.stdout.strip(), ""
+
+
 def run_doctor(
     managed_root: Optional[str] = None,
     state_dir: Optional[str] = None,
@@ -103,6 +138,22 @@ def run_doctor(
     runtime_binary_exists = os.path.isfile(candidate_binary)
     if not runtime_binary_exists and not is_dev:
         issues.append(f"Runtime binary not found at {candidate_binary}")
+
+    # The launcher resolves its database independently of the installer's paths.
+    # They disagreed once (release 0.3.0: doctor said the state directory, the
+    # launcher searched only repository-relative paths and refused to start on a
+    # machine without a checkout), so verify they agree here rather than relying
+    # on the operator to find out.
+    launcher_db, launcher_db_error = "", ""
+    if not is_dev and os.path.isdir(current_link):
+        launcher_db, launcher_db_error = _launcher_resolved_db_path(current_link)
+    if launcher_db_error:
+        issues.append(f"Launcher database resolution failed: {launcher_db_error}")
+    elif launcher_db and os.path.abspath(launcher_db) != os.path.abspath(d_path):
+        issues.append(
+            "Launcher would use a different database than this report: "
+            f"launcher={launcher_db} doctor={d_path}"
+        )
 
     # Check shim
     shim_path = os.path.join(b_dir, "fixer")

@@ -6,12 +6,137 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
+import sys
+from typing import Any, Sequence
 
 
 HANDS_WORKTREE_ROOT = ".codex/hands_worktrees"
 HANDS_DOCS_DIR = ".hands/project_docs"
+
+# Backend -> candidate CLI binaries. This is the single source of truth for
+# "is this lane's provider actually installed on the host that will run it?".
+# It is deliberately computed at runtime instead of assuming a macOS-only set:
+# the same wire ships to Linux/WSL hosts where `agy`, `cmd`, `kimi` and `grok`
+# are frequently absent.
+HANDS_BACKEND_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "codex": ("codex",),
+    "commandcode": ("cmd", "cmdc", "command-code"),
+    "claude": ("claude",),
+    "kimi-code": ("kimi",),
+    "antigravity": ("agy",),
+    "grok": ("grok",),
+    "pi": ("pi",),
+    "droid": ("droid",),
+    "junie": ("junie",),
+}
+
+# Backend -> platforms on which the provider CLI is known not to be available,
+# even though the binary might collide by name. Today this is Google's
+# Antigravity CLI (`agy`), which only ships a macOS build (backlog 178).
+HANDS_BACKEND_UNSUPPORTED_PLATFORMS: dict[str, frozenset[str]] = {
+    "antigravity": frozenset({"linux", "linux2"}),
+}
+
+
+@dataclass(frozen=True)
+class HandsLaneAvailability:
+    """One registered Project Hands lane, resolved against the running host."""
+
+    provider: str
+    backend: str
+    command: str
+    available: bool
+    reason: str = ""
+
+
+def _host_platform(platform: str) -> str:
+    return str(platform).strip().lower()
+
+
+def backend_executable_candidates(backend: str) -> tuple[str, ...]:
+    normalized = str(backend).strip().lower()
+    return HANDS_BACKEND_EXECUTABLES.get(normalized, (normalized,))
+
+
+def resolve_backend_executable(backend: str, *, which: Any = shutil.which) -> str:
+    """Return the first installed candidate binary, or "" when none is present."""
+    for candidate in backend_executable_candidates(backend):
+        if which(candidate):
+            return candidate
+    return ""
+
+
+def hands_lane_availability(
+    provider: str,
+    backend: str,
+    *,
+    which: Any = shutil.which,
+    platform: str | None = None,
+) -> HandsLaneAvailability:
+    """Resolve a single lane's availability on the host that will run it."""
+    host = _host_platform(platform if platform is not None else sys.platform)
+    candidates = backend_executable_candidates(backend)
+    command = candidates[0] if candidates else str(backend)
+    unsupported = HANDS_BACKEND_UNSUPPORTED_PLATFORMS.get(str(backend).strip().lower())
+    if unsupported and host in unsupported:
+        return HandsLaneAvailability(
+            provider=str(provider),
+            backend=str(backend),
+            command=command,
+            available=False,
+            reason=f"unsupported on this platform ({host})",
+        )
+    for candidate in candidates:
+        if which(candidate):
+            return HandsLaneAvailability(
+                provider=str(provider),
+                backend=str(backend),
+                command=candidate,
+                available=True,
+            )
+    joined = ", ".join(repr(candidate) for candidate in candidates)
+    return HandsLaneAvailability(
+        provider=str(provider),
+        backend=str(backend),
+        command=command,
+        available=False,
+        reason=f"{'command' if len(candidates) == 1 else 'commands'} {joined} not installed or not on PATH",
+    )
+
+
+def hands_lane_inventory(
+    lanes: Sequence[Any],
+    *,
+    which: Any = shutil.which,
+    platform: str | None = None,
+) -> tuple[HandsLaneAvailability, ...]:
+    """Build the per-lane availability inventory for the current host."""
+    return tuple(
+        hands_lane_availability(
+            str(getattr(lane, "provider", "") or ""),
+            str(getattr(lane, "backend", "") or getattr(lane, "provider", "") or ""),
+            which=which,
+            platform=platform,
+        )
+        for lane in lanes
+    )
+
+
+def render_hands_lane_inventory(inventory: Sequence[HandsLaneAvailability]) -> str:
+    """Render the inventory as a plain-text block safe for a curses pane."""
+    lines = ["  Project Hands lane inventory on this host:"]
+    if not inventory:
+        lines.append("    (no provider lanes are registered for this project's `Руки` actor)")
+        return "\n".join(lines)
+    for entry in inventory:
+        if entry.available:
+            lines.append(f"    - {entry.provider} [{entry.command}]: available")
+        else:
+            lines.append(f"    - {entry.provider} [{entry.command}]: unavailable - {entry.reason}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)

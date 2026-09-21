@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1000,6 +1004,51 @@ func TestMCPBinaryRestartStateBlocksUntilFreshExactBuildIsConfirmed(t *testing.T
 	}
 }
 
+func TestMCPBinaryRestartMarkRequiredWithRunningBuildClearsRequirement(t *testing.T) {
+	// Regression for the 2026-09-17 incident: a session that already runs the
+	// newest binary must be able to clear a stale requirement. Recalling
+	// mark_required with the build identity this process is running means the
+	// requirement is satisfied by construction; refusing it blocks wave creation
+	// for every later session because Go build identities are not reproducible
+	// once the required binary has been rebuilt again.
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	originalBuildID, originalProcessIdentity := mcpRunningBuildID, mcpProcessIdentity
+	defer func() {
+		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
+		mcpRunningBuildID, mcpProcessIdentity = originalBuildID, originalProcessIdentity
+	}()
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	mcpRunningBuildID = "sha256:old"
+	mcpProcessIdentity = "pid:20:start:300"
+	if _, _, err := SetMCPBinaryRestartState(context.Background(), nil, SetMCPBinaryRestartStateInput{Action: "mark_required", BuildEpoch: 3, BuildId: "sha256:stale", Reason: "stale requirement"}); err != nil {
+		t.Fatalf("mark stale requirement: %v", err)
+	}
+	if err := ensureMCPBinaryRestartNotRequired(1); err == nil {
+		t.Fatal("expected the stale requirement to block wave creation")
+	}
+
+	// The session restarts onto the newest binary and recalls mark_required for it.
+	mcpRunningBuildID = "sha256:newest"
+	mcpProcessIdentity = "pid:21:start:400"
+	_, satisfied, err := SetMCPBinaryRestartState(context.Background(), nil, SetMCPBinaryRestartStateInput{Action: "mark_required", BuildEpoch: 4, BuildId: "sha256:newest", Reason: "already running the required build"})
+	if err != nil {
+		t.Fatalf("mark_required with the running build must be accepted: %v", err)
+	}
+	if satisfied.State.RestartRequired {
+		t.Fatalf("requirement must be satisfied when the running build is the required build: %+v", satisfied.State)
+	}
+	if satisfied.State.RunningBuildEpoch != 4 || satisfied.State.RunningBuildId != "sha256:newest" {
+		t.Fatalf("unexpected satisfied state: %+v", satisfied.State)
+	}
+	if err := ensureMCPBinaryRestartNotRequired(1); err != nil {
+		t.Fatalf("satisfied requirement must unblock wave creation: %v", err)
+	}
+}
+
 func TestMCPBinaryRestartMarkRequiredCASIsMonotonicAndPreservesEvidence(t *testing.T) {
 	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
 	originalBuildID, originalProcessIdentity := mcpRunningBuildID, mcpProcessIdentity
@@ -1290,6 +1339,288 @@ func TestReleaseParallelWaveWorkerScopeLeases(t *testing.T) {
 			t.Fatalf("expected shared scope lease to remain held while sibling is running, got %d", held)
 		}
 	})
+}
+
+func requirePOSIXProcessSemantics(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("wave worker liveness relies on POSIX process identity and process groups")
+	}
+}
+
+func deadTestProcessPID(t *testing.T) int {
+	t.Helper()
+	command := exec.Command("sh", "-c", "exit 0")
+	if err := command.Start(); err != nil {
+		t.Fatalf("start throwaway process: %v", err)
+	}
+	pid := command.Process.Pid
+	if err := command.Wait(); err != nil {
+		t.Fatalf("reap throwaway process: %v", err)
+	}
+	if isProcessAlive(pid) {
+		t.Fatalf("throwaway process %d is unexpectedly still alive", pid)
+	}
+	return pid
+}
+
+func setupReconcileLivenessWave(t *testing.T) (string, *sql.DB, CreateNetrunnerWaveOutput, NetrunnerWaveSnapshot) {
+	t.Helper()
+	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
+	t.Cleanup(func() { db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID })
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{1}})
+	if err != nil {
+		t.Fatalf("create liveness wave: %v", err)
+	}
+	wave := markTestWaveRunningWithWorktrees(t, testDB, repoDir, created)
+	return repoDir, testDB, created, wave
+}
+
+func TestParseOSProcessElapsed(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+		ok   bool
+	}{
+		{raw: "00:00", want: 0, ok: true},
+		{raw: "05:07", want: 5*time.Minute + 7*time.Second, ok: true},
+		{raw: "01:00:00", want: time.Hour, ok: true},
+		{raw: "02-01:33:45", want: 2*24*time.Hour + time.Hour + 33*time.Minute + 45*time.Second, ok: true},
+		{raw: ""},
+		{raw: "not-a-time"},
+		{raw: "12"},
+		{raw: "1:2:3:4"},
+	}
+	for _, test := range tests {
+		t.Run(test.raw, func(t *testing.T) {
+			got, ok := parseOSProcessElapsed(test.raw)
+			if ok != test.ok || (ok && got != test.want) {
+				t.Fatalf("parseOSProcessElapsed(%q) = (%s, %t), want (%s, %t)", test.raw, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestParallelWaveWorkerHeartbeatStaleWindowHonorsFloor(t *testing.T) {
+	t.Setenv("FIXER_WAVE_WORKER_HEARTBEAT_STALE_SECONDS", "10")
+	if got, want := parallelWaveWorkerHeartbeatStaleWindow(), time.Duration(minimumParallelWaveWorkerHeartbeatStaleSeconds)*time.Second; got != want {
+		t.Fatalf("stale window must not drop below the floor: got %s want %s", got, want)
+	}
+	t.Setenv("FIXER_WAVE_WORKER_HEARTBEAT_STALE_SECONDS", "900")
+	if got, want := parallelWaveWorkerHeartbeatStaleWindow(), 900*time.Second; got != want {
+		t.Fatalf("stale window must honor a sane override: got %s want %s", got, want)
+	}
+}
+
+func TestReconcileStaleParallelWaveWorkersFailsDeadWorkerProcess(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	repoDir, testDB, _, wave := setupReconcileLivenessWave(t)
+	deadPID := deadTestProcessPID(t)
+	worker := testWaveWorkerBySession(t, wave, 1)
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET pid = ?, started_at = CURRENT_TIMESTAMP WHERE id = ?",
+		deadPID,
+		worker.WorkerProcessId,
+	); err != nil {
+		t.Fatalf("point worker process at a dead pid: %v", err)
+	}
+
+	reconciled, err := reconcileStaleParallelWaveWorkers(repoDir, wave)
+	if err != nil {
+		t.Fatalf("reconcile dead worker process: %v", err)
+	}
+	got := testWaveWorkerBySession(t, reconciled, 1)
+	if got.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("a worker whose process is gone must reconcile to failed, got %q (%s)", got.Status, got.FailureReason)
+	}
+	if !strings.Contains(got.FailureReason, strconv.Itoa(deadPID)) || !strings.Contains(got.FailureReason, "dead") {
+		t.Fatalf("failure reason must name the dead worker process %d, got %q", deadPID, got.FailureReason)
+	}
+	if got.TerminalOutcome != parallelWaveWorkerStatusFailed {
+		t.Fatalf("dead worker must persist a failed terminal outcome, got %q", got.TerminalOutcome)
+	}
+}
+
+func TestReconcileStaleParallelWaveWorkersKeepsLiveHeartbeatWorker(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	repoDir, testDB, _, wave := setupReconcileLivenessWave(t)
+	worker := testWaveWorkerBySession(t, wave, 1)
+	heartbeatPath := filepath.Join(t.TempDir(), "session-1-headless.log")
+	if err := os.WriteFile(heartbeatPath, []byte("worker still writing\n"), 0o644); err != nil {
+		t.Fatalf("write fresh heartbeat: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"UPDATE parallel_wave_worker SET headless_log_path = ? WHERE id = ?",
+		heartbeatPath,
+		worker.Id,
+	); err != nil {
+		t.Fatalf("record fresh heartbeat path: %v", err)
+	}
+	refreshed, err := fetchNetrunnerWaveSnapshot(wave.Id, 1)
+	if err != nil {
+		t.Fatalf("fetch live heartbeat wave: %v", err)
+	}
+
+	reconciled, err := reconcileStaleParallelWaveWorkers(repoDir, refreshed)
+	if err != nil {
+		t.Fatalf("reconcile live worker: %v", err)
+	}
+	got := testWaveWorkerBySession(t, reconciled, 1)
+	if got.Status != parallelWaveWorkerStatusRunning {
+		t.Fatalf("a live worker with a fresh heartbeat must never be reconciled away, got %q (%s)", got.Status, got.FailureReason)
+	}
+	if strings.TrimSpace(got.FailureReason) != "" {
+		t.Fatalf("live worker must not gain a failure reason, got %q", got.FailureReason)
+	}
+}
+
+func TestReconcileStaleParallelWaveWorkersDeadProcessIsIdempotent(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	repoDir, testDB, _, wave := setupReconcileLivenessWave(t)
+	deadPID := deadTestProcessPID(t)
+	worker := testWaveWorkerBySession(t, wave, 1)
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET pid = ?, started_at = CURRENT_TIMESTAMP WHERE id = ?",
+		deadPID,
+		worker.WorkerProcessId,
+	); err != nil {
+		t.Fatalf("point worker process at a dead pid: %v", err)
+	}
+
+	first, err := reconcileStaleParallelWaveWorkers(repoDir, wave)
+	if err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	firstWorker := testWaveWorkerBySession(t, first, 1)
+	if firstWorker.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("first reconcile must fail the dead worker, got %+v", firstWorker)
+	}
+
+	second, err := reconcileStaleParallelWaveWorkers(repoDir, first)
+	if err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	secondWorker := testWaveWorkerBySession(t, second, 1)
+	if secondWorker.Status != firstWorker.Status || secondWorker.TerminalAt != firstWorker.TerminalAt {
+		t.Fatalf("reconcile must not rewrite a terminal worker: first=%+v second=%+v", firstWorker, secondWorker)
+	}
+	if secondWorker.FailureReason != firstWorker.FailureReason {
+		t.Fatalf("reconcile must not double-report the dead process: first=%q second=%q", firstWorker.FailureReason, secondWorker.FailureReason)
+	}
+	if occurrences := strings.Count(secondWorker.FailureReason, strconv.Itoa(deadPID)); occurrences != 1 {
+		t.Fatalf("dead process must be reported exactly once, got %d occurrences in %q", occurrences, secondWorker.FailureReason)
+	}
+}
+
+func TestEvaluateParallelWaveWorkerLivenessDetectsRecycledPID(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	_, testDB, _, wave := setupReconcileLivenessWave(t)
+	worker := testWaveWorkerBySession(t, wave, 1)
+	// The recorded launch is two hours old but the pid is this live test
+	// process, so the kernel has clearly recycled the recorded pid.
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET pid = ?, started_at = datetime('now', '-2 hours') WHERE id = ?",
+		os.Getpid(),
+		worker.WorkerProcessId,
+	); err != nil {
+		t.Fatalf("seed recycled pid: %v", err)
+	}
+
+	liveness, err := evaluateParallelWaveWorkerLiveness(1, worker, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("evaluate recycled pid liveness: %v", err)
+	}
+	if !liveness.Dead || !liveness.IdentityMismatch {
+		t.Fatalf("a pid started after the recorded launch must be treated as recycled, got %+v", liveness)
+	}
+	if !strings.Contains(liveness.Reason, "recycled") {
+		t.Fatalf("recycled-pid reason must be explicit, got %q", liveness.Reason)
+	}
+}
+
+func TestEvaluateParallelWaveWorkerLivenessDetectsFrozenHeartbeat(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	_, testDB, _, wave := setupReconcileLivenessWave(t)
+	worker := testWaveWorkerBySession(t, wave, 1)
+	heartbeatPath := filepath.Join(t.TempDir(), "frozen-headless.log")
+	if err := os.WriteFile(heartbeatPath, []byte("frozen\n"), 0o644); err != nil {
+		t.Fatalf("write frozen heartbeat: %v", err)
+	}
+	frozenAt := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(heartbeatPath, frozenAt, frozenAt); err != nil {
+		t.Fatalf("freeze heartbeat mtime: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"UPDATE parallel_wave_worker SET headless_log_path = ? WHERE id = ?",
+		heartbeatPath,
+		worker.Id,
+	); err != nil {
+		t.Fatalf("record frozen heartbeat path: %v", err)
+	}
+	worker.HeadlessLogPath = heartbeatPath
+
+	liveness, err := evaluateParallelWaveWorkerLiveness(1, worker, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("evaluate frozen heartbeat liveness: %v", err)
+	}
+	if !liveness.Dead || !liveness.HeartbeatStale || liveness.IdentityMismatch {
+		t.Fatalf("a live pid with a frozen heartbeat must be treated as dead, got %+v", liveness)
+	}
+	if !strings.Contains(liveness.Reason, "heartbeat") {
+		t.Fatalf("frozen-heartbeat reason must be explicit, got %q", liveness.Reason)
+	}
+
+	// The same worker with a fresh heartbeat stays alive.
+	if err := os.Chtimes(heartbeatPath, time.Now(), time.Now()); err != nil {
+		t.Fatalf("refresh heartbeat mtime: %v", err)
+	}
+	fresh, err := evaluateParallelWaveWorkerLiveness(1, worker, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("evaluate fresh heartbeat liveness: %v", err)
+	}
+	if fresh.Dead || fresh.HeartbeatStale {
+		t.Fatalf("a fresh heartbeat must not be reconciled away, got %+v", fresh)
+	}
+}
+
+func TestTerminateParallelWaveWorkerProcessGroupStopsOrphans(t *testing.T) {
+	requirePOSIXProcessSemantics(t)
+	command := exec.Command("sh", "-c", "sleep 300 >/dev/null 2>&1 & exit 0")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start process-group fixture: %v", err)
+	}
+	pid := command.Process.Pid
+	t.Cleanup(func() {
+		if group, err := os.FindProcess(-pid); err == nil {
+			_ = group.Signal(syscall.SIGKILL)
+		}
+		_ = command.Wait()
+	})
+	// The leader exits immediately and leaves an orphaned child holding the
+	// worker's process group, mirroring a leftover shell blocked on a dead
+	// stdout pipe after the provider CLI is gone.
+	_ = command.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for !processGroupAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !processGroupAlive(pid) {
+		t.Fatalf("fixture process group %d never became observable", pid)
+	}
+	if isProcessAlive(pid) {
+		t.Fatalf("fixture leader %d must be gone before orphan termination", pid)
+	}
+
+	if err := terminateParallelWaveWorkerProcessGroup(parallelWaveWorkerLiveness{PID: pid, ProcessFound: true, PIDAlive: false}); err != nil {
+		t.Fatalf("terminate orphaned worker process group: %v", err)
+	}
+	if processGroupAlive(pid) {
+		t.Fatalf("orphaned worker process group %d survived reconcile termination", pid)
+	}
 }
 
 func TestTransitionNetrunnerWavePhaseReconcilesStaleCompletedWorker(t *testing.T) {

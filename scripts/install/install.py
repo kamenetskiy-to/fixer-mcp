@@ -14,7 +14,7 @@ if REPO_ROOT not in sys.path:
 from installer.doctor import run_doctor
 from installer.engine import InstallEngine
 from installer.paths import resolve_managed_root, resolve_user_bin_dir
-from installer.shim import configure_path_in_shell_rc, install_command_shim
+from installer.shim import configure_path_in_shell_rc, install_command_shim, install_fixerctl_shim
 
 
 def main():
@@ -80,6 +80,11 @@ def main():
         # Install command shim in user_bin_dir
         shim_path = install_command_shim(engine.user_bin_dir, engine.managed_root)
         print(f"[OK] Installed command shim at {shim_path}")
+
+        # Track б: put the control plane on PATH when this payload ships it.
+        fixerctl_path = install_fixerctl_shim(engine.user_bin_dir, engine.managed_root)
+        if fixerctl_path:
+            print(f"[OK] Installed control plane at {fixerctl_path}")
 
         # Configure PATH block if explicitly requested
         if args.add_to_path:

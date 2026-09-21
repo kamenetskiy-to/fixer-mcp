@@ -1,0 +1,8 @@
+# Build output from `go build -o ./fixerctl ./cmd/fixerctl`
+/fixerctl
+
+# Local Fixer MCP runtime artifacts: never part of the control-plane module
+/fixer.db
+/fixer.db-shm
+/fixer.db-wal
+/fixer_mcp.log

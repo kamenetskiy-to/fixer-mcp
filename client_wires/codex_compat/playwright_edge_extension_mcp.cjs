@@ -11,11 +11,13 @@ const OFFICIAL_EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
 const ALL_TABS_EXTENSION_ID = 'ffmbpfogmjdlbhnepmmhgahagoemdjkm';
 const EDGE_EXECUTABLE = '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';
 const LOG_PATH = process.env.CODEX_PRO_EDGE_LOG ||
-  '/home/operator/Desktop/projects/mcp_servers/logs/edge_mcp.log';
+  path.join(process.env.HOME || require('os').homedir(),
+    'Desktop/projects/mcp_servers/logs/edge_mcp.log');
 const TAB_PROBE_TIMEOUT_MS = positiveIntegerEnv('CODEX_PRO_EDGE_TAB_PROBE_TIMEOUT_MS', 3000);
 const NEW_TAB_PROBE_TIMEOUT_MS = positiveIntegerEnv('CODEX_PRO_EDGE_NEW_TAB_PROBE_TIMEOUT_MS', 10000);
 const TAB_HEADER_TIMEOUT_MS = positiveIntegerEnv('CODEX_PRO_EDGE_TAB_HEADER_TIMEOUT_MS', 2000);
 const SNAPSHOT_TIMEOUT_MS = positiveIntegerEnv('CODEX_PRO_EDGE_SNAPSHOT_TIMEOUT_MS', 5000);
+const TAB_INITIALIZE_TIMEOUT_MS = positiveIntegerEnv('CODEX_PRO_EDGE_TAB_INITIALIZE_TIMEOUT_MS', 3000);
 const TRACE_ENABLED = /^(1|true|yes)$/i.test(process.env.CODEX_PRO_EDGE_TRACE || '');
 const BACKGROUND_MODE = !/^(1|true|yes)$/i.test(process.env.CODEX_PRO_EDGE_ALLOW_FOREGROUND || '');
 const EDGE_BUNDLE_ID = 'com.microsoft.edgemac';
@@ -187,6 +189,7 @@ globalThis.__codexProEdgeTrace = message => {
 globalThis.__codexProEdgeTabProbeTimeoutMs = TAB_PROBE_TIMEOUT_MS;
 globalThis.__codexProEdgeNewTabProbeTimeoutMs = NEW_TAB_PROBE_TIMEOUT_MS;
 globalThis.__codexProEdgeSnapshotTimeoutMs = SNAPSHOT_TIMEOUT_MS;
+globalThis.__codexProEdgeTabInitializeTimeoutMs = TAB_INITIALIZE_TIMEOUT_MS;
 globalThis.__codexProEdgeTabHeaderSnapshot = async (tab, index) => {
   const fallback = () => ({
     title: '[unresponsive tab]',
@@ -362,6 +365,12 @@ Module._extensions['.js'] = function loadJavaScript(module, filename) {
   const responseTabHeaderMarker = 'const tabHeaders = await Promise.all(this._context.tabs().map((tab2) => tab2.headerSnapshot()));';
   const responseSnapshotMarker = 'const tabSnapshot = this._context.currentTab() ? await this._context.currentTabOrDie().captureSnapshot(this._includeSnapshotRoot, this._includeSnapshotDepth, this._includeSnapshotBoxes, this._clientWorkspace) : void 0;';
   const ariaSnapshotMarker = 'const ariaSnapshot = root ? await root.ariaSnapshot({ mode: "ai", depth, boxes }) : await this.page.ariaSnapshot({ mode: "ai", depth, boxes });';
+  const ensureTabInitializedMarker = 'await this._currentTab.waitForInitialized();';
+  const tabInitializePromiseMarker = 'this._initializedPromise = this._initialize();';
+  const tabToolEnsureMarker = 'const tab2 = await context2.ensureTab();';
+  const tabToolInvokeMarker = 'return tool.handle(tab2, params2, response2, signal);';
+  const evaluateWaitMarker = 'await tab.waitForCompletion(async () => {';
+  const evaluatePageMarker = 'evalResult = await tab.page.evaluate(async (expr) => {';
   for (const marker of [
     sendMarker,
     responseMarker,
@@ -380,6 +389,12 @@ Module._extensions['.js'] = function loadJavaScript(module, filename) {
     responseTabHeaderMarker,
     responseSnapshotMarker,
     ariaSnapshotMarker,
+    ensureTabInitializedMarker,
+    tabInitializePromiseMarker,
+    tabToolEnsureMarker,
+    tabToolInvokeMarker,
+    evaluateWaitMarker,
+    evaluatePageMarker,
   ]) {
     if (!patched.includes(marker))
       fail(`the installed Playwright core bundle no longer contains patch marker: ${marker}`);
@@ -458,12 +473,14 @@ Module._extensions['.js'] = function loadJavaScript(module, filename) {
     .replace(
       toolCallMarker,
       `${toolCallMarker}
+        globalThis.__codexProEdgeTrace?.(\`tool start name=\${name}\`);
         const previousFrontmostApp = globalThis.__codexProEdgeCaptureFrontmostApp?.();
         const focusGuard = globalThis.__codexProEdgeStartFocusGuard?.(previousFrontmostApp);`,
     )
     .replace(
       toolFinallyMarker,
       `${toolFinallyMarker}
+          globalThis.__codexProEdgeTrace?.(\`tool finish name=\${name}\`);
           await globalThis.__codexProEdgeStopFocusGuard?.(focusGuard, previousFrontmostApp);`,
     )
     .replace(
@@ -498,6 +515,47 @@ Module._extensions['.js'] = function loadJavaScript(module, filename) {
     .replace(
       ariaSnapshotMarker,
       'const ariaSnapshot = root ? await root.ariaSnapshot({ mode: "ai", depth, boxes, timeout: globalThis.__codexProEdgeSnapshotTimeoutMs }) : await this.page.ariaSnapshot({ mode: "ai", depth, boxes, timeout: globalThis.__codexProEdgeSnapshotTimeoutMs });',
+    )
+    .replace(
+      ensureTabInitializedMarker,
+      `await globalThis.__codexProEdgeWithTimeout(
+          this._currentTab.waitForInitialized(),
+          globalThis.__codexProEdgeTabInitializeTimeoutMs,
+          "current tab initialization"
+        ).catch(error => {
+          globalThis.__codexProEdgeTrace?.("continuing after tab initialization timeout error=" + error.message);
+        });`,
+    )
+    .replace(
+      tabInitializePromiseMarker,
+      `this._initializedPromise = globalThis.__codexProEdgeWithTimeout(
+          this._initialize(),
+          globalThis.__codexProEdgeTabInitializeTimeoutMs,
+          "tab initialization"
+        ).catch(error => {
+          globalThis.__codexProEdgeTrace?.("tab initialization degraded error=" + error.message);
+        });`,
+    )
+    .replace(
+      tabToolEnsureMarker,
+      `globalThis.__codexProEdgeTrace?.("tab tool ensure start name=" + tool.schema.name);
+      ${tabToolEnsureMarker}
+      globalThis.__codexProEdgeTrace?.("tab tool ensure done name=" + tool.schema.name + " url=" + (tab2.page?.url?.() || ""));`,
+    )
+    .replace(
+      tabToolInvokeMarker,
+      `globalThis.__codexProEdgeTrace?.("tab tool invoke name=" + tool.schema.name);
+        ${tabToolInvokeMarker}`,
+    )
+    .replace(
+      evaluateWaitMarker,
+      `globalThis.__codexProEdgeTrace?.("evaluate wait start url=" + (tab.page?.url?.() || ""));
+        ${evaluateWaitMarker}`,
+    )
+    .replace(
+      evaluatePageMarker,
+      `globalThis.__codexProEdgeTrace?.("evaluate page call");
+            ${evaluatePageMarker}`,
     );
   patchedBundle = true;
   module._compile(patched, filename);

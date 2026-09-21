@@ -71,6 +71,17 @@ def _expected_codex_overrides(home: Path) -> list[str]:
     ]
 
 
+def _assert_overrides_are_present(actual: list[str], expected: list[str]) -> None:
+    """The codex CLI accepts the `-c` overrides in any order, so assert presence.
+
+    Flag order is not part of the contract: a new limit flag inserted in front of
+    the provider overrides broke exact-list assertions without changing behavior
+    (observed 2026-09-19). The set of flags and their values is the contract.
+    """
+    missing = [item for item in expected if item not in actual]
+    assert not missing, f"missing overrides: {missing}\nactual: {actual}"
+
+
 def test_codex_interactive_command_uses_catalog_driven_openrouter_overrides(
     codex_adapter: CodexBackendAdapter, tmp_path: Path
 ) -> None:
@@ -78,13 +89,8 @@ def test_codex_interactive_command_uses_catalog_driven_openrouter_overrides(
     with patch.object(Path, "home", return_value=tmp_path):
         args = codex_adapter.build_llm_args(selection)
 
-    assert args == [
-        "--model",
-        CODEX_MODEL,
-        "-c",
-        'model_reasoning_effort="high"',
-        *_expected_codex_overrides(tmp_path),
-    ]
+    assert args[:4] == ["--model", CODEX_MODEL, "-c", 'model_reasoning_effort="high"']
+    _assert_overrides_are_present(args, _expected_codex_overrides(tmp_path))
 
 
 def test_codex_headless_command_uses_exact_proven_model_configuration(
@@ -102,7 +108,7 @@ def test_codex_headless_command_uses_exact_proven_model_configuration(
     assert command[:4] == ["codex", "--model", CODEX_MODEL, "-c"]
     assert command[4] == 'model_reasoning_effort="high"'
     expected_overrides = _expected_codex_overrides(tmp_path)
-    assert command[5 : 5 + len(expected_overrides)] == expected_overrides
+    _assert_overrides_are_present(command, expected_overrides)
     assert command[-3:] == ["exec", "--skip-git-repo-check", "Do the task"]
 
 

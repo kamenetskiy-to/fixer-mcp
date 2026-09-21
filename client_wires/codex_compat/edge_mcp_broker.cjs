@@ -8,6 +8,7 @@ const PORT = 55712;
 const POLL_TIMEOUT_MS = 20000;
 let nextCursor = 1;
 let pendingCommand;
+let lastEvent = 'startup';
 const pollers = new Set();
 
 function json(response, status, value) {
@@ -24,7 +25,10 @@ function safeRelayUrl(value) {
   try {
     const parsed = new URL(value);
     return parsed.protocol === 'ws:' &&
-      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+      (parsed.hostname === '127.0.0.1' ||
+        parsed.hostname === 'localhost' ||
+        parsed.hostname === '[::1]' ||
+        parsed.hostname === '::1') &&
       parsed.pathname.startsWith('/extension/');
   } catch {
     return false;
@@ -46,12 +50,18 @@ function flushPollers() {
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, `http://${HOST}:${PORT}`);
   if (request.method === 'GET' && url.pathname === '/health') {
-    json(response, 200, { status: 'ok', pending: Boolean(pendingCommand) });
+    json(response, 200, {
+      status: 'ok',
+      pending: Boolean(pendingCommand),
+      cursor: pendingCommand?.cursor ?? null,
+      lastEvent,
+    });
     return;
   }
   if (request.method === 'GET' && url.pathname === '/poll') {
     const cursor = Number.parseInt(url.searchParams.get('cursor') || '0', 10);
     if (pendingCommand && pendingCommand.cursor > cursor) {
+      lastEvent = `poll-deliver:${pendingCommand.cursor}`;
       deliver(response);
       return;
     }
@@ -95,12 +105,15 @@ const server = http.createServer((request, response) => {
           relayUrl: body.relayUrl,
           protocolVersion: body.protocolVersion,
         };
+        lastEvent = `connect:${pendingCommand.cursor}`;
         json(response, 202, { cursor: pendingCommand.cursor });
         flushPollers();
         return;
       }
-      if (pendingCommand?.cursor === body.cursor)
+      if (pendingCommand?.cursor === body.cursor) {
         pendingCommand = undefined;
+        lastEvent = `ack:${body.cursor}`;
+      }
       json(response, 200, { acknowledged: body.cursor });
     });
     return;

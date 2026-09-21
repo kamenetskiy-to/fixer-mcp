@@ -117,3 +117,24 @@ def test_luna_headless_command_uses_the_fully_qualified_model_id(adapter: PiBack
     assert command[command.index("--model") + 1] == LUNA
     assert command[command.index("--thinking") + 1] == "high"
     assert command[-2:] == ["-p", "probe"]
+
+
+def test_stale_low_reasoning_for_deepseek_flux_is_corrected_not_crashed():
+    """A stored `low` for a Pi model that declares only high/max must not explode.
+
+    Regression for the Ubuntu Fixer launcher: the TUI/stored selection offered
+    `low` (the backend-wide option list) while the model's thinkingLevelMap
+    declares only high and max, so the adapter guard raised at launch time.
+    """
+    from client_wires import fixer_wire_db
+    descriptor = fixer_wire_db._backend_descriptor("pi")
+    reasoning = fixer_wire_db._normalize_backend_reasoning(
+        descriptor, "low", "deepseek-v4.1-flash"
+    )
+    assert reasoning == "high"
+
+    # A level the model does declare is kept as-is.
+    assert (
+        fixer_wire_db._normalize_backend_reasoning(descriptor, "max", "deepseek-v4.1-flash")
+        == "max"
+    )

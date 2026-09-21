@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +34,26 @@ class FixerWireDbExtractionTests(unittest.TestCase):
 
 
 class ResolveFixerDbPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Isolate the managed-install lookup. On a machine that really holds a
+        # managed installation (every operator machine since 2026-09-19),
+        # installer.paths.resolve_db_path() returns a database outside the temp
+        # tree and shadows the fixtures below, so these tests failed with the
+        # fleet installed even though the resolver behaved correctly.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        managed_db = Path(tmp.name) / "managed-state" / "fixer.db"
+        real_import = fixer_wire_db.importlib.import_module
+
+        def fake_import(name, *args, **kwargs):
+            if name == "installer.paths":
+                return types.SimpleNamespace(resolve_db_path=lambda: str(managed_db))
+            return real_import(name, *args, **kwargs)
+
+        patcher = patch.object(fixer_wire_db.importlib, "import_module", fake_import)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_prefers_repo_local_db_over_cwd_db(self) -> None:
         with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
             repo_root = Path(repo_tmp)

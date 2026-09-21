@@ -1,4 +1,9 @@
-"""Descriptor schema (format=1) and validation for Fixer MCP release packages."""
+"""Descriptor schema (format=1) and validation for Fixer MCP release packages.
+
+Format=1 release descriptors declare release identity, payload hashes, platform,
+and the supported host and runtime floors, including the minimum Python floor
+(min_python, floor is Python 3.9).
+"""
 
 import datetime
 import json
@@ -24,6 +29,10 @@ REQUIRED_DESCRIPTOR_FIELDS = [
     "changelog",
 ]
 
+DEFAULT_MIN_PYTHON = "3.9"
+
+SUPPORTED_PLATFORM_PREFIXES = ("darwin_", "linux_")
+
 
 def create_release_descriptor(
     version: str,
@@ -35,6 +44,7 @@ def create_release_descriptor(
     changelog: Optional[str] = None,
     changelog_url: Optional[str] = None,
     min_os: str = "macOS 12.0",
+    min_python: str = DEFAULT_MIN_PYTHON,
     created_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a format=1 machine-readable release descriptor."""
@@ -60,6 +70,7 @@ def create_release_descriptor(
         "changelog": changelog.strip(),
         "changelog_url": changelog_url or "",
         "min_os": min_os,
+        "min_python": min_python.strip(),
         "created_at": created_at,
     }
 
@@ -95,10 +106,23 @@ def validate_release_descriptor(descriptor: Dict[str, Any]) -> None:
     if descriptor.get("payload_sha256") != sha256:
         raise DescriptorValidationError("Field 'payload_sha256' must match 'sha256'")
 
-    # Validate platform
+    # Validate platform. The fleet is mixed (macOS laptops plus Linux operator
+    # hosts), so both darwin_* and linux_* releases are first class.
     platform = descriptor.get("platform", "")
-    if not platform.startswith("darwin_"):
-        raise DescriptorValidationError(f"Target platform must be macOS (darwin_*), got {platform!r}")
+    if not platform.startswith(SUPPORTED_PLATFORM_PREFIXES):
+        raise DescriptorValidationError(
+            f"Target platform must be macOS (darwin_*) or Linux (linux_*), got {platform!r}"
+        )
+
+    # Validate min_python if specified
+    min_python = descriptor.get("min_python")
+    if min_python is not None:
+        if not isinstance(min_python, str) or not min_python.strip():
+            raise DescriptorValidationError(f"Field 'min_python' must be a non-empty string, got {min_python!r}")
+        if not re.match(r"^\d+\.\d+(\.\d+)?$", min_python.strip()):
+            raise DescriptorValidationError(
+                f"Invalid min_python format: {min_python!r}, expected version string like '3.9'"
+            )
 
     # Check for personal paths or secrets leaked in any string value
     personal_path_regex = re.compile(r"(/Users/[^/\s]+|/home/[^/\s]+|/private/var|/var/folders)", re.IGNORECASE)

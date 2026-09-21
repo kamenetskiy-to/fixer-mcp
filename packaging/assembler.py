@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from packaging.allowlist import (
     DangerousFileError,
@@ -16,10 +16,16 @@ from packaging.allowlist import (
     collect_allowed_files,
     is_allowed_bin_file,
     is_allowed_client_wire_file,
+    is_allowed_control_plane_file,
     is_allowed_fixer_mcp_file,
     is_allowed_installer_file,
+    is_allowed_install_script_file,
     is_allowed_packaging_file,
     is_allowed_skill_file,
+)
+from packaging.syntax import (
+    PythonSyntaxFloorError,
+    verify_python_syntax_floor,
 )
 from packaging.archive import (
     calculate_sha256,
@@ -61,6 +67,65 @@ def detect_macos_platform() -> str:
     elif machine in ("x86_64", "amd64"):
         return "darwin_amd64"
     return f"darwin_{machine}"
+
+
+def resolve_go_target(platform_id: str) -> Tuple[str, str]:
+    """Resolve and validate GOOS and GOARCH for the given platform ID.
+
+    Cross-compilation must be honest: fail loudly if the platform ID is unknown
+    or unsupported instead of silently falling back to the host architecture.
+    """
+    normalized = platform_id.replace("-", "_").lower()
+    platform_map = {
+        "darwin_arm64": ("darwin", "arm64"),
+        "darwin_amd64": ("darwin", "amd64"),
+        "linux_amd64": ("linux", "amd64"),
+        "linux_arm64": ("linux", "arm64"),
+    }
+    if normalized in platform_map:
+        return platform_map[normalized]
+    raise AssemblerError(f"Cannot cross-compile: unsupported or unmapped platform '{platform_id}'")
+
+
+def verify_binary_architecture(binary_path: str, target_goos: str, target_goarch: str) -> None:
+    """Verify that the compiled binary actually matches the target GOOS and GOARCH."""
+    if not os.path.isfile(binary_path):
+        raise AssemblerError(f"Binary was not produced at {binary_path}")
+
+    with open(binary_path, "rb") as f:
+        header = f.read(64)
+
+    if len(header) < 20:
+        raise AssemblerError(f"Binary at {binary_path} is too small to verify header")
+
+    if target_goos == "darwin":
+        # Mach-O 64-bit: magic is 0xfeedfacf (little endian: cf fa ed fe)
+        magic = header[:4]
+        if magic != b"\xcf\xfa\xed\xfe":
+            raise AssemblerError(
+                f"Binary at {binary_path} does not have Mach-O 64-bit magic header (got {magic.hex()})"
+            )
+        cputype = int.from_bytes(header[4:8], byteorder="little")
+        # CPU_TYPE_ARM64 = 0x0100000C
+        # CPU_TYPE_X86_64 = 0x01000007
+        expected_cpu = 0x0100000C if target_goarch == "arm64" else (0x01000007 if target_goarch == "amd64" else None)
+        if expected_cpu and cputype != expected_cpu:
+            raise AssemblerError(
+                f"Binary at {binary_path} has CPU type {hex(cputype)}, expected {hex(expected_cpu)} for {target_goarch}"
+            )
+    elif target_goos == "linux":
+        # ELF: magic is \x7fELF
+        if header[:4] != b"\x7fELF":
+            raise AssemblerError(f"Binary at {binary_path} does not have ELF magic header")
+        if header[4] != 2:
+            raise AssemblerError(f"Binary at {binary_path} is not ELF 64-bit")
+        machine = int.from_bytes(header[18:20], byteorder="little")
+        # EM_X86_64 = 62 (0x3E), EM_AARCH64 = 183 (0xB7)
+        expected_machine = 183 if target_goarch == "arm64" else (62 if target_goarch == "amd64" else None)
+        if expected_machine and machine != expected_machine:
+            raise AssemblerError(
+                f"Binary at {binary_path} has ELF machine {hex(machine)}, expected {hex(expected_machine)} for {target_goarch}"
+            )
 
 
 def resolve_client_wires_path(repo_root: str, explicit_path: Optional[str] = None) -> str:
@@ -154,6 +219,31 @@ def resolve_go_module_dir(repo_root: str, explicit_path: Optional[str] = None) -
     )
 
 
+def resolve_control_plane_dir(repo_root: str, explicit_path: Optional[str] = None) -> str:
+    """
+    Resolve the control_plane directory containing cmd/fixerctl.
+    """
+    if explicit_path:
+        explicit_abs = os.path.abspath(explicit_path)
+        if os.path.isdir(explicit_abs) and os.path.isfile(os.path.join(explicit_abs, "cmd", "fixerctl", "main.go")):
+            return explicit_abs
+        raise AssemblerError(f"Specified control_plane directory does not have cmd/fixerctl/main.go: {explicit_path}")
+
+    candidates = [
+        os.path.abspath(os.path.join(repo_root, "control_plane")),
+        os.path.abspath(repo_root),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, "cmd", "fixerctl", "main.go")):
+            return candidate
+
+    raise AssemblerError(
+        "control_plane directory with cmd/fixerctl/main.go not found. Looked in: "
+        + ", ".join(candidates)
+        + ". Pass --control-plane-dir to override."
+    )
+
+
 class ReleaseAssembler:
     """Builds and packages a release payload for macOS."""
 
@@ -166,18 +256,29 @@ class ReleaseAssembler:
         platform_id: Optional[str] = None,
         changelog: Optional[str] = None,
         go_module_dir: Optional[str] = None,
+        control_plane_dir: Optional[str] = None,
     ):
         self.repo_root = os.path.abspath(repo_root or os.getcwd())
         self.client_wires_src = resolve_client_wires_path(self.repo_root, client_wires_src)
         self.go_module_dir = resolve_go_module_dir(self.repo_root, go_module_dir)
+        self.control_plane_dir = resolve_control_plane_dir(self.repo_root, control_plane_dir)
         self.out_dir = os.path.abspath(out_dir)
         self.version = version
         self.platform_id = platform_id or detect_macos_platform()
         self.changelog = changelog or f"Fixer MCP release {self.version} for {self.platform_id}"
 
     def build_go_binary(self, target_binary_path: str) -> None:
-        """Compile the Fixer MCP Go server binary without host path leakage."""
+        """Compile the Fixer MCP Go server binary without host path leakage.
+
+        The target platform decides GOOS/GOARCH, so a Linux release can be
+        assembled on a macOS machine (and vice versa) without a second toolchain.
+        """
         os.makedirs(os.path.dirname(target_binary_path), exist_ok=True)
+        target_goos, target_goarch = resolve_go_target(self.platform_id)
+        build_env = os.environ.copy()
+        build_env["GOOS"] = target_goos
+        build_env["GOARCH"] = target_goarch
+        build_env["CGO_ENABLED"] = "0"
         cmd = [
             "go",
             "build",
@@ -192,14 +293,53 @@ class ReleaseAssembler:
             cwd=self.go_module_dir,
             capture_output=True,
             text=True,
+            env=build_env,
         )
         if res.returncode != 0:
-            raise AssemblerError(f"Go build failed (code {res.returncode}):\n{res.stderr}")
+            raise AssemblerError(
+                f"Go build for fixer_mcp failed ({target_goos}/{target_goarch}, code {res.returncode}):\n{res.stderr}"
+            )
 
         if not os.path.isfile(target_binary_path):
             raise AssemblerError(f"Go binary was not produced at {target_binary_path}")
 
+        verify_binary_architecture(target_binary_path, target_goos, target_goarch)
         # Set executable permissions
+        os.chmod(target_binary_path, 0o755)
+
+    def build_fixerctl_binary(self, target_binary_path: str) -> None:
+        """Compile the fixerctl binary from control_plane/cmd/fixerctl."""
+        os.makedirs(os.path.dirname(target_binary_path), exist_ok=True)
+        target_goos, target_goarch = resolve_go_target(self.platform_id)
+        build_env = os.environ.copy()
+        build_env["GOOS"] = target_goos
+        build_env["GOARCH"] = target_goarch
+        build_env["CGO_ENABLED"] = "0"
+        cmd = [
+            "go",
+            "build",
+            "-trimpath",
+            f"-ldflags=-s -w -X main.version={self.version}",
+            "-o",
+            target_binary_path,
+            "./cmd/fixerctl",
+        ]
+        res = subprocess.run(
+            cmd,
+            cwd=self.control_plane_dir,
+            capture_output=True,
+            text=True,
+            env=build_env,
+        )
+        if res.returncode != 0:
+            raise AssemblerError(
+                f"Go build for fixerctl failed ({target_goos}/{target_goarch}, code {res.returncode}):\n{res.stderr}"
+            )
+
+        if not os.path.isfile(target_binary_path):
+            raise AssemblerError(f"Go binary was not produced at {target_binary_path}")
+
+        verify_binary_architecture(target_binary_path, target_goos, target_goarch)
         os.chmod(target_binary_path, 0o755)
 
     def assemble(self) -> Dict[str, Any]:
@@ -218,18 +358,45 @@ class ReleaseAssembler:
             # staging/fixer_mcp/
             # staging/client_wires/
             # staging/.agents/skills/
+            # staging/bin/
+            # staging/control_plane/
             fixer_mcp_stage = os.path.join(staging_temp, "fixer_mcp")
             client_wires_stage = os.path.join(staging_temp, "client_wires")
             skills_stage = os.path.join(staging_temp, ".agents", "skills")
+            bin_stage = os.path.join(staging_temp, "bin")
+            control_plane_stage = os.path.join(staging_temp, "control_plane")
 
             os.makedirs(fixer_mcp_stage, exist_ok=True)
             os.makedirs(client_wires_stage, exist_ok=True)
             os.makedirs(skills_stage, exist_ok=True)
+            os.makedirs(bin_stage, exist_ok=True)
+            os.makedirs(control_plane_stage, exist_ok=True)
 
             # 1. Build and stage fixer_mcp binary
             binary_dest = os.path.join(fixer_mcp_stage, "fixer_mcp")
             self.build_go_binary(binary_dest)
             assert_not_dangerous("fixer_mcp/fixer_mcp")
+
+            # 1b. Build and stage the unified console. Keep fixerctl as a
+            # compatibility filename, but both names execute the same binary.
+            console_bin_dest = os.path.join(bin_stage, "fixer-console")
+            self.build_fixerctl_binary(console_bin_dest)
+            assert_not_dangerous("bin/fixer-console")
+
+            fixerctl_bin_dest = os.path.join(bin_stage, "fixerctl")
+            shutil.copy2(console_bin_dest, fixerctl_bin_dest)
+            os.chmod(fixerctl_bin_dest, 0o755)
+            assert_not_dangerous("bin/fixerctl")
+
+            fixerctl_cp_dest = os.path.join(control_plane_stage, "fixerctl")
+            shutil.copy2(console_bin_dest, fixerctl_cp_dest)
+            os.chmod(fixerctl_cp_dest, 0o755)
+            assert_not_dangerous("control_plane/fixerctl")
+
+            cp_readme = os.path.join(self.control_plane_dir, "README.md")
+            if os.path.isfile(cp_readme):
+                shutil.copy2(cp_readme, os.path.join(control_plane_stage, "README.md"))
+                assert_not_dangerous("control_plane/README.md")
 
             # Stage clean portable MCP configuration (no personal paths)
             clean_mcp_cfg = {
@@ -308,6 +475,8 @@ class ReleaseAssembler:
             if os.path.isdir(bin_src):
                 bin_files = collect_allowed_files(bin_src, is_allowed_bin_file)
                 for src_abs, rel_path in bin_files:
+                    if rel_path == "fixerctl":
+                        continue
                     assert_not_dangerous(f"bin/{rel_path}")
                     dest_file = os.path.join(bin_stage, rel_path)
                     os.makedirs(os.path.dirname(dest_file), exist_ok=True)
@@ -325,7 +494,25 @@ class ReleaseAssembler:
                     os.makedirs(os.path.dirname(dest_file), exist_ok=True)
                     shutil.copy2(src_abs, dest_file)
 
-            # 8. Create deterministic archive
+            # 8. Collect and stage scripts/install for standalone payload bootstrap
+            scripts_install_stage = os.path.join(staging_temp, "scripts", "install")
+            scripts_install_src = os.path.join(self.repo_root, "scripts", "install")
+            if os.path.isdir(scripts_install_src):
+                install_script_files = collect_allowed_files(scripts_install_src, is_allowed_install_script_file)
+                for src_abs, rel_path in install_script_files:
+                    assert_not_dangerous(f"scripts/install/{rel_path}")
+                    dest_file = os.path.join(scripts_install_stage, rel_path)
+                    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+                    shutil.copy2(src_abs, dest_file)
+                    os.chmod(dest_file, 0o755)
+
+            # 9. Verify Python syntax compatibility floor (Python 3.9) across all staged Python files
+            try:
+                verify_python_syntax_floor(staging_temp, min_version=(3, 9))
+            except PythonSyntaxFloorError as e:
+                raise AssemblerError(f"Release assembly failed minimum Python syntax check: {e}") from e
+
+            # 10. Create deterministic archive
             archive_filename = f"fixer-mcp-{self.version}-{self.platform_id}.tar.gz"
             archive_path = os.path.join(self.out_dir, archive_filename)
             sha256_hex = create_deterministic_tar_gz(
@@ -334,8 +521,9 @@ class ReleaseAssembler:
                 root_prefix="payload",
             )
 
-            # 5. Create and validate format=1 descriptor
+            # 11. Create and validate format=1 descriptor
             source_revision = get_git_revision(self.repo_root)
+            min_os = "macOS 12.0" if self.platform_id.startswith("darwin_") else "Linux (glibc 2.31+)"
             descriptor = create_release_descriptor(
                 version=self.version,
                 source_revision=source_revision,
@@ -344,6 +532,8 @@ class ReleaseAssembler:
                 sha256_hex=sha256_hex,
                 schema_compatibility_class="project-workroom-v1",
                 changelog=self.changelog,
+                min_os=min_os,
+                min_python="3.9",
             )
 
             # Write descriptor files (release.json and version-specific json)

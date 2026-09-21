@@ -3,10 +3,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -1016,13 +1023,364 @@ func blockParallelWaveWorkersWithFailedParents(wave NetrunnerWaveSnapshot) error
 	return nil
 }
 
+const (
+	// defaultParallelWaveWorkerHeartbeatStaleSeconds bounds how long a worker
+	// whose OS process is still alive may go without touching its own output
+	// before the wave engine treats the worker as dead. It is deliberately
+	// generous: a provider or a long test suite can legitimately stay quiet for
+	// a while, and a false failure is worse than a slow detection.
+	defaultParallelWaveWorkerHeartbeatStaleSeconds = 1800
+	// minimumParallelWaveWorkerHeartbeatStaleSeconds keeps an operator override
+	// from turning the bound into a hair trigger.
+	minimumParallelWaveWorkerHeartbeatStaleSeconds = 300
+	// parallelWaveWorkerLaunchClockSkewSeconds absorbs the delay between a
+	// worker process starting and its launch row being persisted, plus the
+	// difference between the DB clock and the process start clock.
+	parallelWaveWorkerLaunchClockSkewSeconds = 300
+	// parallelWaveWorkerTerminationGrace is how long a reconciled worker's
+	// process group gets to exit after SIGTERM before SIGKILL.
+	parallelWaveWorkerTerminationGrace = 250 * time.Millisecond
+)
+
+// parallelWaveWorkerLiveness is the result of re-verifying a scheduled worker's
+// recorded OS process on the wave reconcile path. Presence of a pid is not
+// identity: the kernel recycles pids, so a worker is only alive when the pid is
+// running, was started by this launcher, and has recently touched its own
+// output.
+type parallelWaveWorkerLiveness struct {
+	ProcessID        int
+	PID              int
+	ProcessFound     bool
+	ProcessRunning   bool
+	PIDAlive         bool
+	ProcessStart     time.Time
+	LaunchTime       time.Time
+	StartKnown       bool
+	IdentityMismatch bool
+	HeartbeatPath    string
+	HeartbeatAt      time.Time
+	HeartbeatKnown   bool
+	HeartbeatStale   bool
+	Dead             bool
+	Reason           string
+}
+
+// parseOSProcessElapsed decodes the POSIX `ps -o etime=` format, which is
+// either "[[dd-]hh:]mm:ss". It is locale-independent, unlike `lstart`.
+func parseOSProcessElapsed(raw string) (time.Duration, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, false
+	}
+	days := 0
+	if idx := strings.Index(trimmed, "-"); idx >= 0 {
+		parsedDays, err := strconv.Atoi(strings.TrimSpace(trimmed[:idx]))
+		if err != nil || parsedDays < 0 {
+			return 0, false
+		}
+		days = parsedDays
+		trimmed = trimmed[idx+1:]
+	}
+	parts := strings.Split(trimmed, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	seconds := 0
+	for _, part := range parts {
+		value, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || value < 0 {
+			return 0, false
+		}
+		seconds = seconds*60 + value
+	}
+	return time.Duration(days)*24*time.Hour + time.Duration(seconds)*time.Second, true
+}
+
+// parallelWaveOSProcessStartTime returns the wall-clock start time of pid as
+// reported by the operating system. ok is false when the start time cannot be
+// observed (unsupported platform, missing ps, dead pid). Callers must treat
+// that as "identity unknown", never as proof that the worker is dead.
+func parallelWaveOSProcessStartTime(pid int) (time.Time, bool) {
+	if pid <= 0 || runtime.GOOS == "windows" {
+		return time.Time{}, false
+	}
+	command := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid))
+	// LC_ALL=C keeps the output in the C locale on every host.
+	command.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := command.Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	elapsed, ok := parseOSProcessElapsed(string(output))
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Now().UTC().Add(-elapsed), true
+}
+
+// parallelWaveWorkerHeartbeatAt returns the newest modification time across the
+// launcher artifacts for a worker. The headless log is the stream the provider
+// CLI writes into; the launcher log and worker metadata are touched by the
+// launcher itself at startup. Any of them moving is evidence of a live worker.
+func parallelWaveWorkerHeartbeatAt(worker NetrunnerWaveWorkerSnapshot) (time.Time, string, bool) {
+	var newest time.Time
+	newestPath := ""
+	for _, candidate := range []string{worker.HeadlessLogPath, worker.LauncherLogPath, worker.WorkerMetadataPath} {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
+		}
+		info, err := os.Stat(trimmed)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if newestPath == "" || info.ModTime().After(newest) {
+			newest = info.ModTime()
+			newestPath = trimmed
+		}
+	}
+	if newestPath == "" {
+		return time.Time{}, "", false
+	}
+	return newest.UTC(), newestPath, true
+}
+
+// parallelWaveWorkerHeartbeatStaleWindow resolves the heartbeat bound, honoring
+// an operator override through FIXER_WAVE_WORKER_HEARTBEAT_STALE_SECONDS while
+// never dropping below the safety floor.
+func parallelWaveWorkerHeartbeatStaleWindow() time.Duration {
+	window := defaultParallelWaveWorkerHeartbeatStaleSeconds
+	if raw := strings.TrimSpace(os.Getenv("FIXER_WAVE_WORKER_HEARTBEAT_STALE_SECONDS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			window = parsed
+		}
+	}
+	if window < minimumParallelWaveWorkerHeartbeatStaleSeconds {
+		window = minimumParallelWaveWorkerHeartbeatStaleSeconds
+	}
+	return time.Duration(window) * time.Second
+}
+
+// parseWorkerProcessStartedAt decodes the launch timestamp persisted in
+// worker_process.started_at. SQLite CURRENT_TIMESTAMP is UTC.
+func parseWorkerProcessStartedAt(raw string) time.Time {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// evaluateParallelWaveWorkerLiveness re-verifies whether a scheduled worker's
+// recorded OS process is still the process the launcher started. It fails
+// closed only on positive evidence:
+//
+//   - the recorded process row is not running or the pid is gone, or
+//   - the pid is alive but started after the worker was launched, which means
+//     the kernel recycled the pid and it now belongs to something else, or
+//   - the pid is alive but the worker has not touched its own output for longer
+//     than the heartbeat bound.
+//
+// A worker with no recorded process linkage is deliberately left to the
+// session-aware inspection path so a completed session is never failed by
+// bookkeeping gaps.
+func evaluateParallelWaveWorkerLiveness(projectID int, worker NetrunnerWaveWorkerSnapshot, now time.Time) (parallelWaveWorkerLiveness, error) {
+	liveness := parallelWaveWorkerLiveness{ProcessID: worker.WorkerProcessId}
+	if worker.WorkerProcessId <= 0 {
+		return liveness, nil
+	}
+	processRow, found, err := fetchWorkerProcessByID(worker.WorkerProcessId, projectID)
+	if err != nil {
+		return parallelWaveWorkerLiveness{}, err
+	}
+	if !found {
+		return liveness, nil
+	}
+	liveness.ProcessFound = true
+	liveness.PID = processRow.PID
+	liveness.ProcessRunning = processRow.Status == workerStatusRunning
+	liveness.PIDAlive = processRow.Alive
+	liveness.LaunchTime = parseWorkerProcessStartedAt(processRow.StartedAt)
+	liveness.StartKnown = !liveness.LaunchTime.IsZero()
+
+	if !liveness.ProcessRunning || !liveness.PIDAlive {
+		liveness.Dead = true
+		liveness.Reason = fmt.Sprintf(
+			"worker process %d is dead: recorded status %q, pid alive=%t",
+			processRow.PID,
+			processRow.Status,
+			processRow.Alive,
+		)
+		return liveness, nil
+	}
+
+	if observedStart, ok := parallelWaveOSProcessStartTime(processRow.PID); ok {
+		liveness.ProcessStart = observedStart
+		skew := time.Duration(parallelWaveWorkerLaunchClockSkewSeconds) * time.Second
+		if liveness.StartKnown && observedStart.After(liveness.LaunchTime.Add(skew)) {
+			liveness.IdentityMismatch = true
+			liveness.Dead = true
+			liveness.Reason = fmt.Sprintf(
+				"worker process %d was started at %s, after its recorded launch at %s: the recorded pid was recycled and no longer belongs to this worker",
+				processRow.PID,
+				observedStart.Format(time.RFC3339),
+				liveness.LaunchTime.Format(time.RFC3339),
+			)
+			return liveness, nil
+		}
+	}
+
+	heartbeatAt, heartbeatPath, known := parallelWaveWorkerHeartbeatAt(worker)
+	if known {
+		liveness.HeartbeatKnown = true
+		liveness.HeartbeatAt = heartbeatAt
+		liveness.HeartbeatPath = heartbeatPath
+		staleWindow := parallelWaveWorkerHeartbeatStaleWindow()
+		if now.UTC().Sub(heartbeatAt) > staleWindow {
+			liveness.HeartbeatStale = true
+			liveness.Dead = true
+			liveness.Reason = fmt.Sprintf(
+				"worker process %d is alive but its heartbeat %s has been frozen since %s (%s without output; stale bound %s)",
+				processRow.PID,
+				heartbeatPath,
+				heartbeatAt.Format(time.RFC3339),
+				now.UTC().Sub(heartbeatAt).Truncate(time.Second),
+				staleWindow,
+			)
+		}
+	}
+	return liveness, nil
+}
+
+func isProcessGoneError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrProcessDone) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such process") || strings.Contains(message, "process already finished")
+}
+
+func processGroupAlive(pid int) bool {
+	if pid <= 0 || runtime.GOOS == "windows" {
+		return false
+	}
+	group, err := os.FindProcess(-pid)
+	if err != nil {
+		return false
+	}
+	return group.Signal(syscall.Signal(0)) == nil
+}
+
+// terminateParallelWaveWorkerProcessGroup stops a reconciled worker's whole
+// process group, not just its leader pid. The launcher spawns every worker with
+// its own session (start_new_session=True), so the recorded pid is also the
+// process-group id and orphaned children keep that group after the leader dies.
+// Signalling -pid is what stops a leftover child shell blocked on a stdout pipe
+// that nobody drains. When the pid was provably recycled by an unrelated
+// process, the group is left alone rather than risking an innocent victim.
+func terminateParallelWaveWorkerProcessGroup(liveness parallelWaveWorkerLiveness) error {
+	if runtime.GOOS == "windows" || liveness.PID <= 0 {
+		return nil
+	}
+	if liveness.IdentityMismatch {
+		return nil
+	}
+	group, err := os.FindProcess(-liveness.PID)
+	if err != nil {
+		return nil
+	}
+	if signalErr := group.Signal(syscall.SIGTERM); signalErr != nil && !isProcessGoneError(signalErr) {
+		return signalErr
+	}
+	time.Sleep(parallelWaveWorkerTerminationGrace)
+	if !processGroupAlive(liveness.PID) {
+		return nil
+	}
+	force, findErr := os.FindProcess(-liveness.PID)
+	if findErr != nil {
+		return nil
+	}
+	if killErr := force.Signal(syscall.SIGKILL); killErr != nil && !isProcessGoneError(killErr) {
+		return killErr
+	}
+	return nil
+}
+
+// reconcileDeadParallelWaveWorkerProcesses finalizes workers whose recorded OS
+// process is provably gone and terminates their process group so no orphan is
+// left blocked on a dead pipe. A worker whose session already reached
+// review/completed is skipped: that durable outcome is finalized by the
+// session-aware inspection path, and a missing process row there is bookkeeping
+// rather than a dead provider.
+func reconcileDeadParallelWaveWorkerProcesses(projectCWD string, wave NetrunnerWaveSnapshot) error {
+	for _, worker := range wave.Workers {
+		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
+			continue
+		}
+		if worker.Status == parallelWaveWorkerStatusCreated || worker.WorkerProcessId <= 0 {
+			continue
+		}
+		globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, wave.ProjectId)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		status, _, _, _, _, _, _, err := fetchSessionWaitSnapshot(globalSessionID, wave.ProjectId)
+		if err != nil {
+			return err
+		}
+		if status == "review" || status == "completed" {
+			continue
+		}
+
+		liveness, err := evaluateParallelWaveWorkerLiveness(wave.ProjectId, worker, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if !liveness.Dead {
+			continue
+		}
+		if err := terminateParallelWaveWorkerProcessGroup(liveness); err != nil {
+			log.Printf(
+				"warning: failed to terminate worker %d process group %d before failing it: %v",
+				worker.SessionId,
+				liveness.PID,
+				err,
+			)
+		}
+		if _, err := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusFailed, liveness.Reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // reconcileStaleParallelWaveWorkers deterministically re-inspects every
-// non-terminal, scheduled worker. A worker whose session already completed or
-// whose recorded process is gone is finalized instead of remaining "running"
-// forever, so phase transitions and cleanup are not stranded by metadata that
-// the wait loop never observed again.
+// non-terminal, scheduled worker. A worker whose recorded process is provably
+// gone (dead pid, recycled pid, or frozen heartbeat) is failed and has its
+// process group terminated instead of remaining "running" forever, so phase
+// transitions and cleanup are not stranded by metadata that the wait loop never
+// observed again. A worker whose session already completed is still finalized
+// from its durable session outcome.
 func reconcileStaleParallelWaveWorkers(projectCWD string, wave NetrunnerWaveSnapshot) (NetrunnerWaveSnapshot, error) {
 	normalizedProjectCWD, err := normalizeProjectCWD(projectCWD)
+	if err != nil {
+		return NetrunnerWaveSnapshot{}, err
+	}
+	if err := reconcileDeadParallelWaveWorkerProcesses(normalizedProjectCWD, wave); err != nil {
+		return NetrunnerWaveSnapshot{}, err
+	}
+	wave, err = fetchNetrunnerWaveSnapshot(wave.Id, wave.ProjectId)
 	if err != nil {
 		return NetrunnerWaveSnapshot{}, err
 	}
@@ -1328,7 +1686,45 @@ func SetMCPBinaryRestartState(ctx context.Context, req *mcp.CallToolRequest, inp
 			return &mcp.CallToolResult{IsError: true}, SetMCPBinaryRestartStateOutput{}, fmt.Errorf("build_id is required to prove the exact replacement binary")
 		}
 		if requiredBuildID == mcpRunningBuildID {
-			return &mcp.CallToolResult{IsError: true}, SetMCPBinaryRestartStateOutput{}, fmt.Errorf("required build identity must differ from the currently running build %q", mcpRunningBuildID)
+			// The required build identity is the build this process already runs, so
+			// the requirement is satisfied by construction. Record it as confirmed
+			// instead of refusing: otherwise a Fixer that already runs the newest
+			// binary can never clear a stale requirement (the required build may
+			// have been rebuilt again in the meantime), and wave creation stays
+			// blocked for every later session. Nothing needs freezing here, because
+			// there is no newer build left to observe.
+			_, execErr := db.ExecContext(ctx, `
+				INSERT INTO mcp_binary_state (
+					project_id, running_build_epoch, required_build_epoch, restart_required,
+					running_build_id, required_build_id, running_process_identity, required_by_process_identity,
+					reason, confirmed_at, updated_at
+				 ) VALUES (?, ?, ?, 0, ?, '', ?, '', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				 ON CONFLICT(project_id) DO UPDATE SET
+					running_build_epoch = excluded.running_build_epoch,
+					required_build_epoch = excluded.required_build_epoch,
+					restart_required = 0,
+					running_build_id = excluded.running_build_id,
+					required_build_id = '',
+					running_process_identity = excluded.running_process_identity,
+					required_by_process_identity = '',
+					reason = excluded.reason,
+					confirmed_at = CURRENT_TIMESTAMP,
+					updated_at = CURRENT_TIMESTAMP`,
+				authorizedProjectId,
+				input.BuildEpoch,
+				input.BuildEpoch,
+				mcpRunningBuildID,
+				mcpProcessIdentity,
+				strings.TrimSpace(input.Reason),
+			)
+			if execErr != nil {
+				return &mcp.CallToolResult{IsError: true}, SetMCPBinaryRestartStateOutput{}, fmt.Errorf("DB update error: %v", execErr)
+			}
+			state, fetchErr := fetchMCPBinaryRestartState(authorizedProjectId)
+			if fetchErr != nil {
+				return &mcp.CallToolResult{IsError: true}, SetMCPBinaryRestartStateOutput{}, fmt.Errorf("DB query error: %v", fetchErr)
+			}
+			return nil, SetMCPBinaryRestartStateOutput{Status: "success", State: state}, nil
 		}
 	}
 	tx, err := db.BeginTx(ctx, nil)

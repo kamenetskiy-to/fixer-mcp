@@ -220,6 +220,7 @@ def verify_payload_archive(
         "payload/client_wires/fixer_wire.py",
         "payload/installer/cli.py",
         "payload/bin/fixer",
+        "payload/scripts/install/install.py",
     ]
     for req in required_files:
         if req not in member_names:
@@ -249,6 +250,12 @@ def verify_payload_archive(
                 st_b = os.stat(bin_fixer_path)
                 if not (st_b.st_mode & stat.S_IXUSR):
                     raise PermissionError(f"Extracted bin/fixer is not executable: {bin_fixer_path}")
+
+            install_py_path = os.path.join(extract_dir, "payload", "scripts", "install", "install.py")
+            if os.path.isfile(install_py_path):
+                st_i = os.stat(install_py_path)
+                if not (st_i.st_mode & stat.S_IXUSR):
+                    raise PermissionError(f"Extracted scripts/install/install.py is not executable: {install_py_path}")
         finally:
             if cleanup_temp and os.path.exists(extract_dir):
                 shutil.rmtree(extract_dir, ignore_errors=True)

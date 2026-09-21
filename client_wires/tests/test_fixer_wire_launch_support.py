@@ -79,7 +79,9 @@ class LaunchSupportFacadePatchabilityTests(unittest.TestCase):
         self.assertEqual(selection.reasoning, "normalized-patched-reasoning")
         select_backend.assert_called_once()
         select_model.assert_called_once_with("patched-backend", "default-model", _DummyOption, ANY)
-        select_reasoning.assert_called_once_with("patched-backend", "default-reasoning", _DummyOption, ANY)
+        select_reasoning.assert_called_once_with(
+            "patched-backend", "default-reasoning", _DummyOption, ANY, model="patched-model"
+        )
         backend_descriptor.assert_called_once_with("patched-backend")
 
     def test_resolve_netrunner_launch_selection_uses_patched_facade_callbacks(self) -> None:

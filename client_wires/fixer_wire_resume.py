@@ -1343,7 +1343,11 @@ PI_SESSION_STORE_RELATIVE_ROOT = Path(".pi") / "agent" / "sessions"
 def _pi_project_session_dir(cwd: Path, *, store_root: Path | None = None) -> Path:
     resolved = str(cwd.resolve())
     trimmed = resolved[1:] if resolved[:1] in {"/", "\\"} else resolved
-    safe_path = f"--{re.sub(r'[/\\:]', '-', trimmed)}--"
+    # Build the sanitized segment outside the f-string: a backslash inside an
+    # f-string expression is a SyntaxError before Python 3.12, and this module
+    # must import on 3.9/3.11 hosts (macOS Air, older Linux boxes).
+    sanitized_trimmed = re.sub(r"[/\\:]", "-", trimmed)
+    safe_path = f"--{sanitized_trimmed}--"
     return (store_root or (Path.home() / PI_SESSION_STORE_RELATIVE_ROOT)) / safe_path
 
 

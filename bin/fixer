@@ -1,17 +1,34 @@
 #!/usr/bin/env python3
-"""Executable Fixer MCP launcher and command shim."""
+"""Managed Fixer entry point.
+
+Maintenance commands stay in installer.cli; ordinary operator work is handed
+straight to the sibling native Super-TUI binary. This file is also kept in the
+release payload for compatibility with direct ``payload/bin/fixer`` use.
+"""
 
 import os
 import sys
 
-# Locate repository root or managed installation root
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(BIN_DIR, ".."))
+CONSOLE = os.path.join(BIN_DIR, "fixer-console")
+CONSOLE_COMMANDS = {
+    "console", "open", "workroom", "quota", "resources", "providers", "machines",
+    "network", "myip", "vpn-status", "vpn-up", "vpn-down", "fleet", "agent",
+    "-print", "--print", "-run", "--run",
+    "-json", "--json",
+}
+
+if os.path.isfile(CONSOLE) and os.access(CONSOLE, os.X_OK) and (
+    not sys.argv[1:] or sys.argv[1] in CONSOLE_COMMANDS
+):
+    os.environ.setdefault("FIXER_RUNTIME_ROOT", REPO_ROOT)
+    os.execv(CONSOLE, [CONSOLE, *sys.argv[1:]])
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from installer.cli import main
+from installer.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

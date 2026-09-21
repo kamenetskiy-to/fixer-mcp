@@ -164,7 +164,7 @@ func AssumeRole(ctx context.Context, req *mcp.CallToolRequest, input AssumeRoleI
 			return &mcp.CallToolResult{IsError: true}, AssumeRoleOutput{
 				Status: "error",
 				Message: fmt.Sprintf(
-					"Auth Error: Unknown CWD (%s). Project onboarding is Overseer-only. Authenticate as overseer and call register_project(cwd=%q, name=%q). Do not retry assume_role as fixer/netrunner for onboarding.",
+					"Auth Error: Unknown CWD (%s). Projects are onboarded by the Fixer (or the Overseer while it exists): authenticate as fixer in a known project, then call register_project(cwd=%q, name=%q); after that assume_role succeeds for this cwd. Do not retry assume_role for onboarding.",
 					normalizedCWD,
 					normalizedCWD,
 					defaultProjectName(normalizedCWD),

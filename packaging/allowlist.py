@@ -209,7 +209,37 @@ def is_allowed_bin_file(rel_path: str) -> bool:
     normalized = rel_path.replace("\\", "/").strip("/")
     if is_dangerous_name_or_path(normalized):
         return False
-    return normalized == "fixer"
+    return normalized in ("fixer", "fixerctl", "fixer-console")
+
+
+CONTROL_PLANE_ALLOWED_NAMES = {
+    "fixerctl",
+    "README.md",
+}
+
+
+def is_allowed_control_plane_file(rel_path: str) -> bool:
+    """Check if a file from control_plane/ is permitted in the release payload."""
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if is_dangerous_name_or_path(normalized):
+        return False
+    parts = normalized.split("/")
+    if len(parts) == 1:
+        return parts[0] in CONTROL_PLANE_ALLOWED_NAMES
+    return False
+
+
+def is_allowed_install_script_file(rel_path: str) -> bool:
+    """Check if a file from scripts/install/ is permitted in the release payload."""
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if is_dangerous_name_or_path(normalized):
+        return False
+    parts = normalized.split("/")
+    if any(p.startswith(".") for p in parts):
+        return False
+    if parts[0] == "__pycache__":
+        return False
+    return normalized in ("install.py", "install.sh")
 
 
 

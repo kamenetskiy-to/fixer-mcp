@@ -57,6 +57,24 @@ class ApplyResult(NamedTuple):
     message: Optional[str] = None
 
 
+def _normalize_descriptor_source(descriptor_source: str) -> str:
+    """Return a descriptor source that can be re-resolved later.
+
+    Local paths are made absolute (and `~` expanded); URLs and other scheme-based
+    sources are returned unchanged. Without this, installing with a relative
+    `--descriptor ../release.json` records a path that `fixer update --check`
+    later resolves against a different working directory and can never find.
+    """
+    source = (descriptor_source or "").strip()
+    if not source:
+        return descriptor_source
+    if "://" in source or source.startswith("file:"):
+        return source
+    if os.path.isabs(source):
+        return source
+    return os.path.abspath(os.path.expanduser(source))
+
+
 class InstallEngine:
     """
     Manages local stage, verification, candidate check, and atomic switch
@@ -108,6 +126,11 @@ class InstallEngine:
                 f"Directory {self.managed_root} is a development checkout. "
                 "Auto-update is disabled for development checkouts."
             )
+
+        # A relative local descriptor path must be recorded relative to nothing:
+        # the install records it for `fixer update --check` to re-resolve later,
+        # in a different working directory. Normalize local paths to absolute.
+        descriptor_source = _normalize_descriptor_source(descriptor_source)
 
         with InstallLock(self.managed_root):
             descriptor = fetch_descriptor(descriptor_source, timeout=min(timeout, 5.0))

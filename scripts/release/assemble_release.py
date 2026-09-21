@@ -32,6 +32,11 @@ def main():
         help="Path to the Go module directory containing main.go (default: <repo-root> or <repo-root>/fixer_mcp)",
     )
     parser.add_argument(
+        "--control-plane-dir",
+        default=None,
+        help="Path to control_plane directory containing cmd/fixerctl (default: <repo-root>/control_plane)",
+    )
+    parser.add_argument(
         "--out-dir",
         default="dist",
         help="Directory to place output release archive and descriptor",
@@ -62,6 +67,7 @@ def main():
         platform_id=args.platform,
         changelog=args.changelog,
         go_module_dir=args.go_module_dir,
+        control_plane_dir=args.control_plane_dir,
     )
 
     try:

@@ -1,5 +1,7 @@
 """Command shim installation, shadowing detection, and idempotent PATH configuration."""
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -16,6 +18,14 @@ SHIM_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 # Fixer MCP managed command shim
 import os
 import sys
+
+MIN_PYTHON_VERSION = (3, 9)
+if sys.version_info < MIN_PYTHON_VERSION:
+    sys.stderr.write(
+        f"Fixer MCP requires Python {MIN_PYTHON_VERSION[0]}.{MIN_PYTHON_VERSION[1]} or newer "
+        f"(running on Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}).\\n"
+    )
+    sys.exit(1)
 
 MANAGED_ROOT = "__MANAGED_ROOT_PLACEHOLDER__"
 USER_MANAGED_ROOT = os.environ.get("FIXER_MANAGED_ROOT", MANAGED_ROOT)
@@ -39,6 +49,19 @@ if release_root not in sys.path:
 
 os.environ["FIXER_RUNTIME_ROOT"] = release_root
 os.environ["FIXER_MANAGED_ROOT"] = USER_MANAGED_ROOT
+
+# The managed `fixer` executable is the unified Go console. Installer
+# maintenance commands remain in Python so an update can replace the active
+# release safely, but ordinary operator work never enters the legacy alias/wire
+# palette implicitly.
+console_candidates = [
+    os.path.join(release_root, "bin", "fixer-console"),
+    os.path.join(release_root, "bin", "fixerctl"),
+]
+console_path = next((path for path in console_candidates if os.path.isfile(path) and os.access(path, os.X_OK)), None)
+console_commands = {"console", "open", "workroom", "quota", "resources", "providers", "machines", "network", "myip", "vpn-status", "vpn-up", "vpn-down", "fleet", "agent", "-print", "--print", "-run", "--run", "-json", "--json"}
+if console_path and (not sys.argv[1:] or sys.argv[1] in console_commands):
+    os.execv(console_path, [console_path, *sys.argv[1:]])
 
 # Ensure PYTHONPATH carries release_root for child processes
 cur_pp = os.environ.get("PYTHONPATH", "")
@@ -186,3 +209,32 @@ def configure_path_in_shell_rc(
         f.write(f"{separator}\n{block_str}")
 
     return True
+
+
+def install_fixerctl_shim(user_bin_dir: str, managed_root: str) -> str | None:
+    """Install the control-plane binary next to the fixer shim when the release ships one.
+
+    Returns the installed path, or None for payloads without `fixerctl` (older
+    releases), so installing an older payload stays compatible. Track б / backlog 168.
+    """
+    user_bin_dir = os.path.abspath(os.path.expanduser(user_bin_dir))
+    candidates = [
+        os.path.join(managed_root, "current", "bin", "fixer-console"),
+        os.path.join(managed_root, "current", "payload", "bin", "fixer-console"),
+        # Older payloads only have fixerctl; keep updates backwards compatible.
+        os.path.join(managed_root, "current", "bin", "fixerctl"),
+        os.path.join(managed_root, "current", "payload", "bin", "fixerctl"),
+    ]
+    target_src = next((path for path in candidates if os.path.exists(path)), None)
+    if target_src is None:
+        return None
+
+    os.makedirs(user_bin_dir, exist_ok=True)
+    target_bin = os.path.join(user_bin_dir, "fixerctl")
+    if os.path.islink(target_bin) or os.path.exists(target_bin):
+        try:
+            os.unlink(target_bin)
+        except OSError:
+            pass
+    os.symlink(target_src, target_bin)
+    return target_bin

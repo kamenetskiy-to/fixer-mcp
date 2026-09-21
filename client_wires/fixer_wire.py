@@ -771,8 +771,8 @@ def _normalize_backend_model(descriptor: Any, model: str | None) -> str:
     return fixer_wire_db._normalize_backend_model(descriptor, model)
 
 
-def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None) -> str:
-    return fixer_wire_db._normalize_backend_reasoning(descriptor, reasoning)
+def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None, model: str | None = None) -> str:
+    return fixer_wire_db._normalize_backend_reasoning(descriptor, reasoning, model)
 
 
 def _load_session_external_id(conn: sqlite3.Connection, session_id: int, backend: str) -> str:

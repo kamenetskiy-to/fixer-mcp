@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from typing import Any, Callable, Sequence
 
 from client_wires.backends import is_codex_backend, normalize_backend_name
 from client_wires.backends.codex_adapter import codex_default_model_for_family
+from client_wires import fixer_wire_hands_context
 from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_prompts
 from client_wires import fixer_wire_resume
@@ -187,6 +190,54 @@ def _forced_fixer_mcp_names(
     return []
 
 
+def _require_provider_executable(adapter: Any, *, role: str, backend: str) -> None:
+    """Fail with an actionable message when the provider CLI is not installed.
+
+    A release install on a host that only has some providers used to die with a
+    raw `FileNotFoundError: [Errno 2] ... 'pi'` traceback after printing the whole
+    command line. Say which binary is missing, what is installed instead, and how
+    to proceed.
+    """
+    executable = str(getattr(adapter, "command", "") or "").strip()
+    if not executable:
+        return
+    if os.path.sep in executable:
+        if os.path.exists(executable):
+            return
+    elif shutil.which(executable):
+        return
+    known_backends = (
+        ("pi", "pi"),
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("antigravity", "agy"),
+        ("kimi-code", "kimi"),
+        ("droid", "droid"),
+        ("junie", "junie"),
+        ("grok", "grok"),
+    )
+    installed = [
+        name
+        for name, _binary in known_backends
+        if name != backend
+        and any(
+            shutil.which(candidate)
+            for candidate in fixer_wire_hands_context.backend_executable_candidates(name)
+        )
+    ]
+    hint = (
+        "Installed provider backends on this host: " + ", ".join(installed) + "."
+        if installed
+        else "No provider CLI was found on this host."
+    )
+    raise SystemExit(
+        f"[fixer-wire] Cannot start the {role} session: backend {backend!r} needs the "
+        f"{executable!r} command, which is not installed or not on PATH.\n"
+        f"[fixer-wire] {hint} Pick another backend in the launcher selector, or install "
+        f"the provider CLI (see the provider docs mirror)."
+    )
+
+
 def launch_fresh_role_session(
     role: str,
     prompt: str,
@@ -318,6 +369,7 @@ def launch_fresh_role_session(
         return 0
 
     adapter.ensure_runtime_files(cwd, llm_selection, selected_servers, available_servers)
+    _require_provider_executable(adapter, role=role, backend=launch_selection.backend)
     return subprocess.call(command, env=env, cwd=str(cwd))
 
 

@@ -747,17 +747,39 @@ func TestRegisterProject_DeniesNonOverseerAndValidatesCWD(t *testing.T) {
 	}()
 
 	db = testDB
-	authorizedRole = "fixer"
+	authorizedRole = "netrunner"
 	authorizedProjectId = 1
 
 	deniedResult, _, deniedErr := RegisterProject(context.Background(), nil, RegisterProjectInput{
 		Cwd: testProjectCWD,
 	})
 	if deniedErr == nil {
-		t.Fatal("expected access denied for non-overseer role")
+		t.Fatal("expected access denied for the netrunner role")
 	}
 	if deniedResult == nil || !deniedResult.IsError {
-		t.Fatal("expected MCP error result for non-overseer registration attempt")
+		t.Fatal("expected MCP error result for netrunner registration attempt")
+	}
+	if !strings.Contains(deniedErr.Error(), "requires fixer or overseer role") {
+		t.Fatalf("unexpected error: %v", deniedErr)
+	}
+
+	// Onboarding moved to the Fixer: a fixer must be able to register a project
+	// for a cwd the database does not know yet (single shared database use case).
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	fixerResult, fixerOut, fixerErr := RegisterProject(context.Background(), nil, RegisterProjectInput{
+		Cwd:  testProjectCWD,
+		Name: "Fixer Onboarded",
+	})
+	if fixerErr != nil {
+		t.Fatalf("fixer registration should be allowed, got error: %v", fixerErr)
+	}
+	if fixerResult != nil && fixerResult.IsError {
+		t.Fatalf("fixer registration returned an MCP error result: %+v", fixerResult)
+	}
+	if fixerOut.ProjectId == 0 {
+		t.Fatalf("expected a project id from the fixer registration, got: %+v", fixerOut)
 	}
 
 	authorizedRole = "overseer"
@@ -805,13 +827,13 @@ func TestAssumeRole_UnknownCWD_InstructsOverseerRegistrationOnly(t *testing.T) {
 	if out.Status != "error" {
 		t.Fatalf("expected error status, got: %+v", out)
 	}
-	if !strings.Contains(out.Message, "Project onboarding is Overseer-only") {
-		t.Fatalf("expected overseer-only guidance, got: %q", out.Message)
+	if !strings.Contains(out.Message, "Projects are onboarded by the Fixer") {
+		t.Fatalf("expected fixer onboarding guidance, got: %q", out.Message)
 	}
 	if !strings.Contains(out.Message, "register_project") {
 		t.Fatalf("expected register_project guidance, got: %q", out.Message)
 	}
-	if !strings.Contains(out.Message, "Do not retry assume_role as fixer/netrunner") {
+	if !strings.Contains(out.Message, "Do not retry assume_role for onboarding") {
 		t.Fatalf("expected explicit no-fallback guidance, got: %q", out.Message)
 	}
 }
@@ -2070,5 +2092,49 @@ func TestSendOperatorTelegramNotification_BlockedWhenNotificationsDisabled(t *te
 	}
 	if !strings.Contains(err.Error(), "notifications are disabled") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRegisterProject_AcceptsPathMissingOnThisHost(t *testing.T) {
+	// Single-database mode runs the server on the database host while the project
+	// lives on the agent host, so the path legitimately does not exist here.
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+	authorizedSessionId = 0
+
+	remoteCWD := "/home/other-machine/projects/single-db-check"
+	if _, err := os.Stat(remoteCWD); err == nil {
+		t.Skipf("test path unexpectedly exists on this host: %s", remoteCWD)
+	}
+
+	callResult, out, err := RegisterProject(context.Background(), nil, RegisterProjectInput{
+		Cwd:  remoteCWD,
+		Name: "Remote Agent Project",
+	})
+	if err != nil {
+		t.Fatalf("expected the missing-on-this-host path to be accepted, got: %v", err)
+	}
+	if callResult != nil && callResult.IsError {
+		t.Fatalf("unexpected MCP error result: %+v", callResult)
+	}
+	if out.ProjectId == 0 || out.Cwd != remoteCWD || out.Status == "" {
+		t.Fatalf("unexpected registration output: %+v", out)
 	}
 }

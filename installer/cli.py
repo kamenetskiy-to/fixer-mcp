@@ -85,10 +85,52 @@ def handle_update_command(args: List[str], engine: InstallEngine) -> int:
             print(f"\n[!] {apply_res.message}")
             return 0
         print(f"\n[OK] Fixer MCP updated to version {apply_res.version}.")
+        ensure_control_plane_on_path(engine)
         return 0
     except Exception as e:
         sys.stderr.write(f"Update failed: {e}\n")
         return 1
+
+
+def ensure_control_plane_on_path(engine: InstallEngine) -> None:
+    """Install/refresh the fixerctl shim after an install or update (track б).
+
+    The self-update path does not reinstall shims, so a release that ships the
+    control plane must publish it here as well; payloads without it are a no-op.
+    """
+
+    try:
+        # Prefer the shim implementation from the newly active payload. The
+        # installer process itself is imported from the previous release while
+        # an update is being applied; importing that stale template would
+        # recreate an old `fixer` entry point.
+        import importlib.util
+
+        shim_module = None
+        active_root = current_link_path(engine.managed_root)
+        if os.path.isdir(os.path.join(active_root, "payload")):
+            active_root = os.path.join(active_root, "payload")
+        active_shim = os.path.join(active_root, "installer", "shim.py")
+        if os.path.isfile(active_shim):
+            spec = importlib.util.spec_from_file_location("fixer_active_shim", active_shim)
+            if spec and spec.loader:
+                shim_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(shim_module)
+        if shim_module is None:
+            from installer import shim as shim_module
+
+        # Refresh both names after a self-update. The active Python installer
+        # may predate the release that introduced the native console, so the
+        # canonical `fixer` shim must be regenerated from the newly active
+        # payload before the next shell invocation.
+        command_shim = shim_module.install_command_shim(engine.user_bin_dir, engine.managed_root)
+        if command_shim:
+            print(f"[OK] Command shim available at {command_shim}")
+        installed = shim_module.install_fixerctl_shim(engine.user_bin_dir, engine.managed_root)
+        if installed:
+            print(f"[OK] Control plane available at {installed}")
+    except Exception as exc:  # never fail an update because of the extra binary
+        sys.stderr.write(f"[!] Could not install the control plane: {exc}\n")
 
 
 def is_bypass_command(args: List[str]) -> bool:
@@ -141,6 +183,7 @@ def maybe_prompt_and_update(engine: InstallEngine) -> None:
                 print(f"[!] {apply_res.message}")
             else:
                 print(f"[OK] Updated to {apply_res.version}.\n")
+                ensure_control_plane_on_path(engine)
         except Exception as e:
             sys.stderr.write(f"Update failed: {e}\nContinuing with installed version...\n")
     elif decision == "skip":

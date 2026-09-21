@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -213,6 +215,31 @@ def _ensure_wire_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _db_is_initialized(path: Path) -> bool:
+    """True when the file is a usable Fixer database (has the project table).
+
+    An existing-but-empty file must not win over a populated checkout database:
+    the out-of-band managed install on a machine that also holds a source
+    checkout can leave an empty state database behind, and choosing it made the
+    launcher die with "no such table: project" while the real canonical
+    database sat one candidate later.
+    """
+    try:
+        uri = "file:%s?mode=ro" % path
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project' LIMIT 1"
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
     from_env = os.environ.get(FIXER_DB_PATH_ENV)
     if from_env and from_env.strip():
@@ -231,8 +258,24 @@ def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
         cwd / PRIMARY_FIXER_DB_FILENAME,
     ]
 
+    # A managed installation keeps its database in the user state directory
+    # (~/.local/state/fixer-client-wires/fixer.db), not in a repository tree:
+    # a release payload has no checkout, so the repo/cwd candidates above all
+    # miss and the launcher dies with "Could not locate fixer.db" on a machine
+    # that never held a source tree. Consult the installer's own resolution
+    # first so the launcher and `fixer doctor` agree on one path.
+    managed_db: Path | None = None
+    try:
+        installer_paths = importlib.import_module("installer.paths")
+        managed_db = Path(installer_paths.resolve_db_path()).expanduser()
+    except Exception:  # noqa: BLE001 - installer is optional outside a managed install
+        managed_db = None
+    if managed_db is not None:
+        candidates.insert(0, managed_db)
+
     checked: list[Path] = []
     seen: set[Path] = set()
+    existing: list[Path] = []
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved in seen:
@@ -240,14 +283,22 @@ def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
         seen.add(resolved)
         checked.append(resolved)
         if resolved.is_file():
-            return resolved
+            existing.append(resolved)
+
+    # Prefer a database that is actually initialized; fall back to any existing
+    # file so a fresh managed installation (where the Go server bootstraps the
+    # schema on first run) still resolves to its own empty state database.
+    for candidate in existing:
+        if _db_is_initialized(candidate):
+            return candidate
+    if existing:
+        return existing[0]
 
     checked_text = ", ".join(str(path) for path in checked)
     raise RuntimeError(
         f"Could not locate {PRIMARY_FIXER_DB_FILENAME}. Checked: {checked_text}. "
         f"Set {FIXER_DB_PATH_ENV} to override."
     )
-
 
 def _default_project_name(cwd: Path) -> str:
     return cwd.name or "project"
@@ -662,7 +713,7 @@ def _normalize_backend_model(descriptor: Any, model: str | None) -> str:
     return candidate
 
 
-def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None) -> str:
+def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None, model: str | None = None) -> str:
     candidate = (reasoning or "").strip() or descriptor.default_reasoning
     if descriptor.name == "droid" and candidate in {"", "none"}:
         candidate = "high"
@@ -670,6 +721,29 @@ def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None) -> str:
         candidate = candidate.lower()
         if candidate == "thinking":
             candidate = "high"
+    if descriptor.name == "pi":
+        # Pi's reasoning surface is per model (`thinkingLevelMap`), not per backend.
+        # A stored or selected level the model does not declare makes the adapter
+        # guard raise at launch time ("does not support reasoning 'low'"), which is
+        # the right failure for a genuinely wrong request but a confusing one for a
+        # stale saved selection. Correct it to the model's default and say so.
+        from client_wires.backends.pi_adapter import pi_supported_thinking_levels
+
+        supported = pi_supported_thinking_levels(model or "")
+        if supported:
+            if candidate in supported:
+                return candidate
+            preferred = (
+                descriptor.default_reasoning
+                if descriptor.default_reasoning in supported
+                else supported[-1]
+            )
+            print(
+                f"[fixer-wire] Pi model {model!r} does not support reasoning {candidate!r}; "
+                f"using {preferred!r}. Supported: {', '.join(supported)}.",
+                file=sys.stderr,
+            )
+            return preferred
     if candidate not in descriptor.reasoning_options:
         supported = ", ".join(descriptor.reasoning_options)
         raise RuntimeError(
@@ -759,6 +833,7 @@ def _persist_session_launch_selection(
         normalize_antigravity_reasoning_alias(selection.model, selection.reasoning)
         if descriptor.name == "antigravity"
         else selection.reasoning,
+        resolved_model,
     )
     stored_backend = normalize_backend_name(session_row.cli_backend)
     started = bool(session_row.external_session_id.strip())
@@ -774,7 +849,7 @@ def _persist_session_launch_selection(
                 if descriptor.name == "antigravity"
                 else stored_reasoning_raw
             )
-            stored_reasoning = normalize_backend_reasoning(descriptor, stored_reasoning_input)
+            stored_reasoning = normalize_backend_reasoning(descriptor, stored_reasoning_input, stored_model)
 
     if started and stored_backend != normalized_backend:
         raise RuntimeError(
