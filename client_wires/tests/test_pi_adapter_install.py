@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -97,6 +98,80 @@ class EnsureMcpAdapterExtensionTests(unittest.TestCase):
                 pi_adapter.ensure_mcp_adapter_extension(agent_dir=agent, runner=runner)
 
             self.assertEqual(runner.calls, [])
+            self.assertFalse((agent / "settings.json").exists())
+
+    def test_installed_package_is_registered_in_settings(self) -> None:
+        # d0lsi, 2026-09-25: the npm package was present but pi refused
+        # --mcp-config ("Unknown option") because settings.json `packages`
+        # lacked the entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp)
+            target = agent / "npm" / "node_modules" / pi_adapter.PI_MCP_ADAPTER_PACKAGE
+            target.mkdir(parents=True)
+            (target / "package.json").write_text("{}\n", encoding="utf-8")
+            (agent / "settings.json").write_text(
+                json.dumps({"theme": "dark", "packages": ["npm:pi-unified-model-picker@0.1.1"]})
+                + "\n",
+                encoding="utf-8",
+            )
+            runner = _FakeRunner(succeed_on=None, agent_dir=agent)
+
+            with patch.dict("os.environ", {pi_adapter.PI_ADAPTER_PREPARE_ENV: "1"}):
+                pi_adapter.ensure_mcp_adapter_extension(agent_dir=agent, runner=runner)
+
+            self.assertEqual(runner.calls, [])
+            settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(settings["theme"], "dark")
+            self.assertEqual(
+                settings["packages"],
+                ["npm:pi-mcp-adapter", "npm:pi-unified-model-picker@0.1.1"],
+            )
+
+    def test_registration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp)
+            target = agent / "npm" / "node_modules" / pi_adapter.PI_MCP_ADAPTER_PACKAGE
+            target.mkdir(parents=True)
+            (target / "package.json").write_text("{}\n", encoding="utf-8")
+            settings_path = agent / "settings.json"
+            original = {"packages": ["npm:pi-mcp-adapter"], "theme": "dark"}
+            settings_path.write_text(json.dumps(original) + "\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {pi_adapter.PI_ADAPTER_PREPARE_ENV: "1"}):
+                pi_adapter.ensure_mcp_adapter_extension(
+                    agent_dir=agent, runner=_FakeRunner(succeed_on=None, agent_dir=agent)
+                )
+
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), original
+            )
+
+    def test_fresh_host_gets_settings_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp)
+            runner = _FakeRunner(succeed_on=1, agent_dir=agent)
+
+            with patch.dict("os.environ", {pi_adapter.PI_ADAPTER_PREPARE_ENV: "1"}):
+                pi_adapter.ensure_mcp_adapter_extension(agent_dir=agent, runner=runner)
+
+            settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(settings["packages"], ["npm:pi-mcp-adapter"])
+
+    def test_unreadable_settings_raises_actionable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp)
+            target = agent / "npm" / "node_modules" / pi_adapter.PI_MCP_ADAPTER_PACKAGE
+            target.mkdir(parents=True)
+            (target / "package.json").write_text("{}\n", encoding="utf-8")
+            (agent / "settings.json").write_text("{ not json", encoding="utf-8")
+
+            with patch.dict("os.environ", {pi_adapter.PI_ADAPTER_PREPARE_ENV: "1"}):
+                with self.assertRaises(pi_adapter.PiAdapterInstallError) as raised:
+                    pi_adapter.ensure_mcp_adapter_extension(
+                        agent_dir=agent, runner=_FakeRunner(succeed_on=None, agent_dir=agent)
+                    )
+
+            self.assertIn("settings.json", str(raised.exception))
 
 
 if __name__ == "__main__":

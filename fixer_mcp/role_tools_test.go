@@ -297,14 +297,14 @@ func TestLockedRoleToolSurfacesHideForeignAndAdminTools(t *testing.T) {
 		{
 			name:       "overseer",
 			lockedRole: "overseer",
-			present:    []string{"assume_role", "get_projects", "launch_and_wait_fixers", "append_overseer_fixer_message", "get_project_balance", "credit_project_balance", "set_fixer_spend_authority", "get_balance_ledger"},
-			absent:     []string{"create_task", "checkout_task", "log_netrunner_progress", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "wake_fixer_autonomous", "record_fixer_spend", "export_project_doc_bundle"},
+			present:    []string{"assume_role", "get_projects", "launch_and_wait_fixers", "append_overseer_fixer_message"},
+			absent:     []string{"create_task", "checkout_task", "log_netrunner_progress", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "sync_mcp_servers", "clear_project_handoff", "wake_fixer_autonomous", "get_project_balance", "credit_project_balance", "set_fixer_spend_authority", "get_balance_ledger", "record_fixer_spend", "export_project_doc_bundle"},
 		},
 		{
 			name:       "fixer",
 			lockedRole: "fixer",
-			present:    []string{"assume_role", "create_task", "sync_mcp_servers", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "review_doc_proposals", "get_project_balance", "record_fixer_spend", "get_balance_ledger", "export_project_doc_bundle"},
-			absent:     []string{"get_projects", "checkout_task", "log_netrunner_progress", "complete_task", "clear_project_handoff", "wake_fixer_autonomous", "credit_project_balance", "set_fixer_spend_authority"},
+			present:    []string{"assume_role", "create_task", "sync_mcp_servers", "view_netrunner_logs", "create_netrunner_wave", "get_netrunner_wave", "launch_netrunner_wave", "wait_for_netrunner_wave", "launch_netrunner_waves", "wait_for_netrunner_waves", "transition_netrunner_wave_phase", "set_netrunner_wave_control_state", "get_mcp_binary_restart_state", "set_mcp_binary_restart_state", "cleanup_netrunner_wave", "review_doc_proposals", "export_project_doc_bundle"},
+			absent:     []string{"get_projects", "checkout_task", "log_netrunner_progress", "complete_task", "clear_project_handoff", "wake_fixer_autonomous", "get_project_balance", "record_fixer_spend", "get_balance_ledger", "credit_project_balance", "set_fixer_spend_authority"},
 		},
 		{
 			name:       "netrunner",
@@ -437,11 +437,6 @@ func TestUnlockedToolSurfaceKeepsLegacyBroadTools(t *testing.T) {
 		"set_mcp_binary_restart_state",
 		"cleanup_netrunner_wave",
 		"wake_fixer_autonomous",
-		"get_project_balance",
-		"credit_project_balance",
-		"set_fixer_spend_authority",
-		"record_fixer_spend",
-		"get_balance_ledger",
 		"sync_mcp_servers",
 		"clear_project_handoff",
 	} {

@@ -18,7 +18,7 @@ import (
 
 	"github.com/fixer-mcp/control-plane/internal/config"
 	"github.com/fixer-mcp/control-plane/internal/console"
-	"github.com/fixer-mcp/control-plane/internal/fleet"
+	"github.com/fixer-mcp/control-plane/internal/launch"
 	"github.com/fixer-mcp/control-plane/internal/machines"
 	"github.com/fixer-mcp/control-plane/internal/network"
 	"github.com/fixer-mcp/control-plane/internal/registry"
@@ -57,11 +57,14 @@ func run(args []string) (int, error) {
 		fmt.Fprintln(flags.Output(), "usage: fixer [command] [flags]")
 		fmt.Fprintln(flags.Output(), "\nCommands:")
 		fmt.Fprintln(flags.Output(), "  console              open the unified operator console (default)")
-		fmt.Fprintln(flags.Output(), "  workroom             open the governed Fixer Workroom")
-		fmt.Fprintln(flags.Output(), "  quota [--json]       inspect provider clients and cached quotas")
-		fmt.Fprintln(flags.Output(), "  machines|network|fleet  open the corresponding console workspace")
+		fmt.Fprintln(flags.Output(), "  hands                open the native Project Hands screen")
+		fmt.Fprintln(flags.Output(), "  workroom             open the native Fixer screen")
+		fmt.Fprintln(flags.Output(), "  quota [--json]       print the live cml limits report")
+		fmt.Fprintln(flags.Output(), "  machines             open logical machines and transport controls")
+		fmt.Fprintln(flags.Output(), "  network|myip         print the current route (non-interactive)")
 		fmt.Fprintln(flags.Output(), "  doctor|update        use the managed installer service command")
-		fmt.Fprintln(flags.Output(), "\nKeys in the console: n new work · Enter open · 1..5 workspace · / search · ? help")
+		fmt.Fprintln(flags.Output(), "\nWork modes never enter legacy line selectors: Руки/Fиксер are native screens.")
+		fmt.Fprintln(flags.Output(), "\nKeys in the console: Enter Руки · h Hands · f Fixer · 1..3 spaces · / search · ? help")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -112,7 +115,9 @@ func run(args []string) (int, error) {
 		return runConsoleAt(0, remaining[1])
 	case "resources", "providers", "quota":
 		if command == "quota" || *jsonMode {
-			snapshot := resources.RefreshQuota(nilContext())
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			snapshot := resources.RefreshQuota(ctx)
 			if *jsonMode {
 				payload, err := resources.JSON(snapshot)
 				if err != nil {
@@ -144,7 +149,8 @@ func run(args []string) (int, error) {
 		if *jsonMode || command != "network" {
 			return printJSON(status)
 		}
-		return runConsole(3)
+		fmt.Printf("маршрут: %s\negress: %s\n", status.State, status.Egress)
+		return 0, nil
 	case "vpn-up", "vpn-down":
 		action := "up"
 		if command == "vpn-down" {
@@ -158,6 +164,8 @@ func run(args []string) (int, error) {
 		}
 		return exitCode(err), err
 	case "fleet":
+		// Compatibility only for managed provisioning scripts. Fleet is not a
+		// console workspace or operator workflow.
 		if len(remaining) > 1 && remaining[1] == "env" {
 			fleetArgs := append([]string(nil), remaining[2:]...)
 			if *jsonMode {
@@ -165,27 +173,24 @@ func run(args []string) (int, error) {
 			}
 			return runFleetEnv(fleetArgs)
 		}
-		if *jsonMode {
-			root := *repoRoot
-			if root == "" {
-				root = fleet.FindRoot(currentDirectory())
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-			defer cancel()
-			return printJSON(fleet.Check(ctx, root))
+		return 2, errors.New("`fleet` is not a Fixer workspace; use `fixer doctor` for installation diagnostics")
+	case "hands":
+		if len(remaining) > 1 {
+			return 2, errors.New("`fixer hands` открывает нативный экран Super-TUI; опции выбираются там, а не строковыми аргументами")
 		}
-		return runConsole(4)
+		return runConsoleWorkMode(launch.KindHands)
 	case "workroom":
-		return runWorkroom(remaining[1:])
+		if len(remaining) > 1 {
+			return 2, errors.New("`fixer workroom` открывает нативный экран Super-TUI; опции выбираются там, а не строковыми аргументами")
+		}
+		return runConsoleWorkMode(launch.KindWorkroom)
 	case "doctor", "update":
 		return runInstallerCommand(command, remaining[1:])
 	case "help":
 		flags.Usage()
 		return 0, nil
 	default:
-		// Preserve the old launcher's useful behavior: unknown arguments are
-		// forwarded to the Workroom rather than to a shell alias.
-		return runWorkroom(remaining)
+		return 2, fmt.Errorf("unknown command %q; run `fixer help`", command)
 	}
 }
 
@@ -193,31 +198,24 @@ func runConsole(tab int) (int, error) {
 	return runConsoleAt(tab, "")
 }
 
+func runConsoleWorkMode(kind string) (int, error) {
+	root := runtimeRoot()
+	return 0, console.Run(console.Options{
+		RuntimeRoot:     root,
+		Version:         version,
+		InitialTab:      0,
+		InitialWorkMode: kind,
+	})
+}
+
 func runConsoleAt(tab int, path string) (int, error) {
 	root := runtimeRoot()
 	return 0, console.Run(console.Options{
 		RuntimeRoot: root,
-		RepoRoot:    root,
 		Version:     version,
 		InitialTab:  tab,
 		InitialPath: path,
 	})
-}
-
-func runWorkroom(args []string) (int, error) {
-	root := runtimeRoot()
-	wire := filepath.Join(root, "client_wires", "fixer_wire.py")
-	if _, err := os.Stat(wire); err != nil {
-		return 2, fmt.Errorf("Fixer Workroom is unavailable: %s", wire)
-	}
-	cmd := exec.Command("python3", append([]string{wire}, args...)...)
-	cmd.Env = os.Environ()
-	cmd.Dir = currentDirectory()
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return exitCode(err), err
-	}
-	return 0, nil
 }
 
 func runFleetEnv(args []string) (int, error) {
@@ -286,8 +284,6 @@ func currentDirectory() string {
 	return cwd
 }
 
-func nilContext() context.Context { return context.Background() }
-
 func printJSON(value any) (int, error) {
 	payload, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -298,6 +294,10 @@ func printJSON(value any) (int, error) {
 }
 
 func printQuota(snapshot resources.Snapshot) {
+	if output := strings.TrimSpace(snapshot.CMLOutput); output != "" {
+		fmt.Println(output)
+		return
+	}
 	fmt.Printf("fixer quota (%s)\n", resources.PlatformLabel())
 	for _, provider := range snapshot.Providers {
 		status := "missing"

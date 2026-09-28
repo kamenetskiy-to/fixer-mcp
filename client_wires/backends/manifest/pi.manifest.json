@@ -11,7 +11,12 @@
       "commandcode/deepseek/deepseek-v4-flash",
       "openai-codex/gpt-5.3-codex-spark",
       "openai-codex/gpt-5.6-luna",
-      "kimi-coding/k3"
+      "kimi-coding/k3",
+      "opencode-personal/mimo-v2.6-flash",
+      "opencode-personal/mimo-v2.6-pro",
+      "commandcode/xiaomi/mimo-v2.6-flash",
+      "commandcode/xiaomi/mimo-v2.6-pro",
+      "opencode-stas/claude-opus-5-5"
     ],
     "default": "deepseek-v4.1-flash",
     "internal_id_map": {
@@ -22,7 +27,12 @@
       "commandcode/deepseek/deepseek-v4-flash": "commandcode/deepseek/deepseek-v4-flash",
       "openai-codex/gpt-5.3-codex-spark": "openai-codex/gpt-5.3-codex-spark",
       "openai-codex/gpt-5.6-luna": "openai-codex/gpt-5.6-luna",
-      "kimi-coding/k3": "kimi-coding/k3"
+      "kimi-coding/k3": "kimi-coding/k3",
+      "opencode-personal/mimo-v2.6-flash": "opencode-personal/mimo-v2.6-flash",
+      "opencode-personal/mimo-v2.6-pro": "opencode-personal/mimo-v2.6-pro",
+      "commandcode/xiaomi/mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
+      "commandcode/xiaomi/mimo-v2.6-pro": "commandcode/xiaomi/mimo-v2.6-pro",
+      "opencode-stas/claude-opus-5-5": "opencode-stas/claude-opus-5-5"
     },
     "byok": false,
     "auth": "subscription"

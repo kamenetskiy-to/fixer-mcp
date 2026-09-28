@@ -314,9 +314,17 @@
         "commandcode/xiaomi/mimo-v2.5-pro",
         "commandcode/qwen/qwen3.8-27b",
         "commandcode/qwen/qwen3.8-max",
-        "commandcode/poolside/laguna-s-2.1-free"
+        "commandcode/poolside/laguna-s-2.1-free",
+        "commandcode/xiaomi/mimo-v2.6-flash",
+        "commandcode/xiaomi/mimo-v2.6-pro"
       ],
-      "reasoning_options": ["low", "medium", "high", "xhigh", "max"],
+      "reasoning_options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
       "resume_supported": true
     },
     "droid": {
@@ -409,7 +417,12 @@
         "commandcode/deepseek/deepseek-v4-flash",
         "openai-codex/gpt-5.3-codex-spark",
         "openai-codex/gpt-5.6-luna",
-        "kimi-coding/k3"
+        "kimi-coding/k3",
+        "opencode-personal/mimo-v2.6-flash",
+        "opencode-personal/mimo-v2.6-pro",
+        "commandcode/xiaomi/mimo-v2.6-flash",
+        "commandcode/xiaomi/mimo-v2.6-pro",
+        "opencode-stas/claude-opus-5-5"
       ],
       "reasoning_options": [
         "low",

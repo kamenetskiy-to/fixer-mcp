@@ -50,15 +50,17 @@ func GetProjects(ctx context.Context, req *mcp.CallToolRequest, input GetProject
 }
 
 type RegisterProjectInput struct {
-	Cwd  string `json:"cwd" jsonschema:"required absolute path"`
-	Name string `json:"name,omitempty" jsonschema:"optional; default basename(cwd)"`
+	Cwd         string `json:"cwd" jsonschema:"required absolute path"`
+	Name        string `json:"name,omitempty" jsonschema:"optional; default basename(cwd)"`
+	IdentityKey string `json:"identity_key,omitempty" jsonschema:"optional caller-declared stable project identity, e.g. a normalized git remote URL or an operator slug; lets the same project resolve across hosts and paths"`
 }
 
 type RegisterProjectOutput struct {
-	ProjectId int    `json:"project_id"`
-	Status    string `json:"status"`
-	Name      string `json:"name"`
-	Cwd       string `json:"cwd"`
+	ProjectId   int    `json:"project_id"`
+	Status      string `json:"status"`
+	Name        string `json:"name"`
+	Cwd         string `json:"cwd"`
+	IdentityKey string `json:"identity_key,omitempty"`
 }
 
 func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input RegisterProjectInput) (*mcp.CallToolResult, RegisterProjectOutput, error) {
@@ -87,15 +89,91 @@ func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input Regist
 	// agent host (macOS/Windows/Linux paths never exist on the DB host). Existence is
 	// validated by the launcher on the agent host; the server records the path.
 
-	if projectID, storedName, storedCWD, findErr := findProjectByCWD(normalizedCWD); findErr == nil {
+	// Backlog 176: an optional caller-declared identity lets the same project be
+	// recognised across hosts and paths. Absent identity keeps the legacy
+	// path-keyed behavior exactly as before.
+	normalizedIdentity := normalizeProjectIdentityKey(input.IdentityKey)
+
+	var identityProjectID int
+	if normalizedIdentity != "" {
+		id, _, _, idErr := findProjectByIdentityKey(normalizedIdentity)
+		switch {
+		case idErr == nil:
+			identityProjectID = id
+		case idErr == sql.ErrNoRows:
+		default:
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", idErr)
+		}
+	}
+
+	pathProjectID, storedName, storedCWD, pathErr := findProjectByKnownPath(normalizedCWD)
+	if pathErr != nil && pathErr != sql.ErrNoRows {
+		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", pathErr)
+	}
+
+	if pathErr == nil {
+		// The incoming path already resolves to a project. An explicit identity
+		// must agree with it, otherwise the requested identity and the registered
+		// path would silently disagree about which project this is.
+		if identityProjectID != 0 && identityProjectID != pathProjectID {
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf(
+				"identity/path conflict: identity_key %q is bound to project %d but cwd %q resolves to project %d; register the path under its own identity or resolve the duplicate project explicitly before retrying",
+				normalizedIdentity,
+				identityProjectID,
+				normalizedCWD,
+				pathProjectID,
+			)
+		}
+
+		targetProjectID := pathProjectID
+		if identityProjectID != 0 {
+			targetProjectID = identityProjectID
+		}
+		if normalizedIdentity != "" {
+			if assignErr := assignProjectIdentityKey(targetProjectID, normalizedIdentity); assignErr != nil {
+				return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, assignErr
+			}
+		}
+		if normalizedCWD != storedCWD {
+			if aliasErr := registerProjectPathAlias(normalizedCWD, targetProjectID); aliasErr != nil {
+				return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, aliasErr
+			}
+		}
+
+		storedIdentity, identityErr := projectIdentityKeyFromID(targetProjectID)
+		if identityErr != nil {
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", identityErr)
+		}
 		return nil, RegisterProjectOutput{
-			ProjectId: projectID,
-			Status:    "exists",
-			Name:      storedName,
-			Cwd:       storedCWD,
+			ProjectId:   targetProjectID,
+			Status:      "exists",
+			Name:        storedName,
+			Cwd:         storedCWD,
+			IdentityKey: storedIdentity,
 		}, nil
-	} else if findErr != sql.ErrNoRows {
-		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", findErr)
+	}
+
+	if identityProjectID != 0 {
+		// Same project on a new host/path: keep the existing row and register the
+		// incoming path as an alias instead of creating a duplicate world.
+		if aliasErr := registerProjectPathAlias(normalizedCWD, identityProjectID); aliasErr != nil {
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, aliasErr
+		}
+		projectName, nameErr := projectNameFromID(identityProjectID)
+		if nameErr != nil {
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", nameErr)
+		}
+		projectCWD, cwdErr := projectCWDFromID(identityProjectID)
+		if cwdErr != nil {
+			return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", cwdErr)
+		}
+		return nil, RegisterProjectOutput{
+			ProjectId:   identityProjectID,
+			Status:      "exists",
+			Name:        projectName,
+			Cwd:         projectCWD,
+			IdentityKey: normalizedIdentity,
+		}, nil
 	}
 
 	requestedName := strings.TrimSpace(input.Name)
@@ -103,12 +181,18 @@ func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input Regist
 		requestedName = defaultProjectName(normalizedCWD)
 	}
 
+	var identityValue any
+	if normalizedIdentity != "" {
+		identityValue = normalizedIdentity
+	}
+
 	res, err := db.Exec(
-		`INSERT INTO project (name, cwd)
-		 SELECT ?, ?
+		`INSERT INTO project (name, cwd, identity_key)
+		 SELECT ?, ?, ?
 		 WHERE NOT EXISTS (SELECT 1 FROM project WHERE cwd = ?)`,
 		requestedName,
 		normalizedCWD,
+		identityValue,
 		normalizedCWD,
 	)
 	if err != nil {
@@ -120,23 +204,47 @@ func RegisterProject(ctx context.Context, req *mcp.CallToolRequest, input Regist
 		status = "created"
 	}
 
-	var projectID int
-	var storedName string
-	var storedCWD string
-	err = db.QueryRow(
-		"SELECT id, name, cwd FROM project WHERE cwd = ?",
-		normalizedCWD,
-	).Scan(&projectID, &storedName, &storedCWD)
+	projectID, storedName, storedCWD, identityKey, err := fetchRegisteredProject(normalizedCWD)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, RegisterProjectOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
 
 	return nil, RegisterProjectOutput{
-		ProjectId: projectID,
-		Status:    status,
-		Name:      storedName,
-		Cwd:       storedCWD,
+		ProjectId:   projectID,
+		Status:      status,
+		Name:        storedName,
+		Cwd:         storedCWD,
+		IdentityKey: identityKey,
 	}, nil
+}
+
+func projectIdentityKeyFromID(projectID int) (string, error) {
+	var identityKey sql.NullString
+	if err := db.QueryRow(`SELECT identity_key FROM project WHERE id = ?`, projectID).Scan(&identityKey); err != nil {
+		return "", err
+	}
+	if !identityKey.Valid {
+		return "", nil
+	}
+	return strings.TrimSpace(identityKey.String), nil
+}
+
+func fetchRegisteredProject(normalizedCWD string) (int, string, string, string, error) {
+	var projectID int
+	var projectName string
+	var projectCWD string
+	var identityKey sql.NullString
+	err := db.QueryRow(
+		`SELECT id, name, cwd, identity_key FROM project WHERE cwd = ?`,
+		normalizedCWD,
+	).Scan(&projectID, &projectName, &projectCWD, &identityKey)
+	if err != nil {
+		return 0, "", "", "", err
+	}
+	if !identityKey.Valid {
+		return projectID, projectName, projectCWD, "", nil
+	}
+	return projectID, projectName, projectCWD, strings.TrimSpace(identityKey.String), nil
 }
 
 type AutonomousRunStatusRecord struct {
@@ -637,9 +745,10 @@ type WaitForOverseerFixerMessagesOutput struct {
 }
 
 type ProjectActivityRecord struct {
-	ProjectId int    `json:"project_id"`
-	Activity  string `json:"activity"`
-	Active    bool   `json:"active"`
+	ProjectId   int    `json:"project_id"`
+	Activity    string `json:"activity"`
+	Active      bool   `json:"active"`
+	IdentityKey string `json:"identity_key,omitempty"`
 }
 
 type SetProjectActivityInput struct {
@@ -695,6 +804,7 @@ type ActiveProjectOverview struct {
 	ProjectId      int                          `json:"project_id"`
 	Name           string                       `json:"name"`
 	Cwd            string                       `json:"cwd"`
+	IdentityKey    string                       `json:"identity_key,omitempty"`
 	Activity       string                       `json:"activity"`
 	Overview       ProjectOverviewRecord        `json:"overview"`
 	HasOverview    bool                         `json:"has_overview"`
@@ -722,11 +832,15 @@ func normalizeProjectActivity(raw string) (string, bool, error) {
 
 func fetchProjectActivityRecord(projectID int) (ProjectActivityRecord, error) {
 	var activeInt int
-	err := db.QueryRow("SELECT COALESCE(active, 0) FROM project WHERE id = ?", projectID).Scan(&activeInt)
+	var identityKey sql.NullString
+	err := db.QueryRow("SELECT COALESCE(active, 0), identity_key FROM project WHERE id = ?", projectID).Scan(&activeInt, &identityKey)
 	if err != nil {
 		return ProjectActivityRecord{}, err
 	}
 	record := ProjectActivityRecord{ProjectId: projectID, Active: activeInt != 0}
+	if identityKey.Valid {
+		record.IdentityKey = strings.TrimSpace(identityKey.String)
+	}
 	if record.Active {
 		record.Activity = "active"
 	} else {
@@ -907,21 +1021,22 @@ func GetActiveProjectOverviews(ctx context.Context, req *mcp.CallToolRequest, in
 		return &mcp.CallToolResult{IsError: true}, GetActiveProjectOverviewsOutput{}, fmt.Errorf("access denied: requires overseer role")
 	}
 
-	rows, err := db.Query("SELECT id, name, cwd FROM project WHERE COALESCE(active, 0) != 0 ORDER BY id")
+	rows, err := db.Query("SELECT id, name, cwd, COALESCE(identity_key, '') FROM project WHERE COALESCE(active, 0) != 0 ORDER BY id")
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, GetActiveProjectOverviewsOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
 
 	type activeProjectHeader struct {
-		projectID int
-		name      string
-		cwd       string
+		projectID   int
+		name        string
+		cwd         string
+		identityKey string
 	}
 
 	headers := []activeProjectHeader{}
 	for rows.Next() {
 		var header activeProjectHeader
-		if err := rows.Scan(&header.projectID, &header.name, &header.cwd); err != nil {
+		if err := rows.Scan(&header.projectID, &header.name, &header.cwd, &header.identityKey); err != nil {
 			_ = rows.Close()
 			return &mcp.CallToolResult{IsError: true}, GetActiveProjectOverviewsOutput{}, fmt.Errorf("DB scan error: %v", err)
 		}
@@ -937,10 +1052,11 @@ func GetActiveProjectOverviews(ctx context.Context, req *mcp.CallToolRequest, in
 	projects := []ActiveProjectOverview{}
 	for _, header := range headers {
 		item := ActiveProjectOverview{
-			ProjectId: header.projectID,
-			Name:      header.name,
-			Cwd:       header.cwd,
-			Activity:  "active",
+			ProjectId:   header.projectID,
+			Name:        header.name,
+			Cwd:         header.cwd,
+			IdentityKey: header.identityKey,
+			Activity:    "active",
 		}
 
 		overview, overviewErr := fetchProjectOverviewRecord(item.ProjectId)

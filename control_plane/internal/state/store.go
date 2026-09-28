@@ -126,69 +126,71 @@ func (s *Store) saveLocked() error {
 	return nil
 }
 
-func (s *Store) TouchProject(p domain.Project) error {
+// RememberProject stores only a recent local path bookmark. Canonical project
+// identity and activity are read through MCP, never written to console.json.
+func (s *Store) RememberProject(p domain.Project) error {
 	return s.Update(func(data *domain.State) error {
 		p.LastOpened = time.Now()
-		for i := range data.Projects {
-			if data.Projects[i].ID == p.ID {
-				data.Projects[i] = p
+		for i := range data.RecentProjects {
+			if data.RecentProjects[i].ID == p.ID {
+				data.RecentProjects[i] = p
 				data.LastProjectID = p.ID
 				return nil
 			}
 		}
-		data.Projects = append([]domain.Project{p}, data.Projects...)
+		data.RecentProjects = append([]domain.Project{p}, data.RecentProjects...)
 		data.LastProjectID = p.ID
 		return nil
 	})
 }
 
-func (s *Store) UpsertProfile(profile domain.LaunchProfile) error {
+func (s *Store) SaveLaunchDraft(draft domain.LaunchDraft) error {
 	return s.Update(func(data *domain.State) error {
-		for i := range data.Profiles {
-			if data.Profiles[i].ID == profile.ID {
-				data.Profiles[i] = profile
+		for i := range data.LaunchDrafts {
+			if data.LaunchDrafts[i].ID == draft.ID {
+				data.LaunchDrafts[i] = draft
 				return nil
 			}
 		}
-		data.Profiles = append([]domain.LaunchProfile{profile}, data.Profiles...)
+		data.LaunchDrafts = append([]domain.LaunchDraft{draft}, data.LaunchDrafts...)
 		return nil
 	})
 }
 
-func (s *Store) UpsertSession(session domain.Session) error {
+func (s *Store) UpsertLocalContext(context domain.LocalContext) error {
 	return s.Update(func(data *domain.State) error {
-		for i := range data.Sessions {
-			if data.Sessions[i].ID == session.ID {
-				data.Sessions[i] = session
+		for i := range data.LocalContexts {
+			if data.LocalContexts[i].ID == context.ID {
+				data.LocalContexts[i] = context
 				return nil
 			}
 		}
-		data.Sessions = append([]domain.Session{session}, data.Sessions...)
+		data.LocalContexts = append([]domain.LocalContext{context}, data.LocalContexts...)
 		return nil
 	})
 }
 
-func (s *Store) RemoveSession(id string) error {
+func (s *Store) RemoveLocalContext(id string) error {
 	return s.Update(func(data *domain.State) error {
-		out := data.Sessions[:0]
-		for _, item := range data.Sessions {
+		out := data.LocalContexts[:0]
+		for _, item := range data.LocalContexts {
 			if item.ID != id {
 				out = append(out, item)
 			}
 		}
-		data.Sessions = out
+		data.LocalContexts = out
 		return nil
 	})
 }
 
 func clone(src domain.State) domain.State {
 	dst := src
-	dst.Projects = append([]domain.Project(nil), src.Projects...)
-	dst.Profiles = append([]domain.LaunchProfile(nil), src.Profiles...)
-	dst.Sessions = make([]domain.Session, len(src.Sessions))
-	for i, session := range src.Sessions {
-		dst.Sessions[i] = session
-		dst.Sessions[i].Command = append([]string(nil), session.Command...)
+	dst.RecentProjects = append([]domain.Project(nil), src.RecentProjects...)
+	dst.LaunchDrafts = append([]domain.LaunchDraft(nil), src.LaunchDrafts...)
+	dst.LocalContexts = make([]domain.LocalContext, len(src.LocalContexts))
+	for i, context := range src.LocalContexts {
+		dst.LocalContexts[i] = context
+		dst.LocalContexts[i].Command = append([]string(nil), context.Command...)
 	}
 	return dst
 }

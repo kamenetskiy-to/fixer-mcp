@@ -327,3 +327,39 @@ func TestEconomyRoleGuards(t *testing.T) {
 		t.Fatalf("expected overseer spend to be rejected by fixer guard, result=%+v err=%v", callResult, err)
 	}
 }
+
+// The economy/balance surface is retired from every runtime tool list (the R1
+// track that owned it is frozen). FIXER_MCP_ENABLE_ECONOMY=1 restores it for
+// fixer/overseer/legacy modes; netrunner never had it and never gets it.
+func TestEconomyToolSurfaceIsRetiredUnlessEnabled(t *testing.T) {
+	t.Setenv("FIXER_MCP_ENABLE_ECONOMY", "")
+	for _, role := range []string{"", "fixer", "overseer", "netrunner"} {
+		for _, registered := range registeredToolNamesForMode(role) {
+			for _, name := range economyToolNames {
+				if registered == name {
+					t.Fatalf("economy tool %q must not appear in %q tool surface by default", name, role)
+				}
+			}
+		}
+	}
+
+	t.Setenv("FIXER_MCP_ENABLE_ECONOMY", "1")
+	for _, role := range []string{"", "fixer", "overseer"} {
+		toolSet := make(map[string]bool)
+		for _, registered := range registeredToolNamesForMode(role) {
+			toolSet[registered] = true
+		}
+		for _, name := range economyToolNames {
+			if !toolSet[name] {
+				t.Fatalf("economy tool %q must be restorable in %q tool surface", name, role)
+			}
+		}
+	}
+	for _, registered := range registeredToolNamesForMode("netrunner") {
+		for _, name := range economyToolNames {
+			if registered == name {
+				t.Fatalf("economy tool %q must stay out of the netrunner tool surface even when enabled", name)
+			}
+		}
+	}
+}

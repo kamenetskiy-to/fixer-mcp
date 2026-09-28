@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import os
+import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -215,29 +215,101 @@ def _ensure_wire_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _db_is_initialized(path: Path) -> bool:
-    """True when the file is a usable Fixer database (has the project table).
+MANAGED_STATE_SUBDIR = "fixer-client-wires"
 
-    An existing-but-empty file must not win over a populated checkout database:
-    the out-of-band managed install on a machine that also holds a source
-    checkout can leave an empty state database behind, and choosing it made the
-    launcher die with "no such table: project" while the real canonical
-    database sat one candidate later.
+
+def _host_canonical_state_db_candidates() -> list[Path]:
+    """Host canonical Fixer state database paths, highest priority first.
+
+    Mirrors the Go console (``control_plane/internal/mcpclient.dbPath``) and the
+    installer's state layout: an explicit ``FIXER_STATE_DIR`` wins over
+    ``$XDG_STATE_HOME``, which wins over the private directory under the user's
+    home. The managed runtime root is deliberately not part of this list: its
+    ``fixer_mcp/fixer.db`` shadowed the true canonical state on real machines.
     """
+    candidates: list[Path] = []
+    state_dir = os.environ.get("FIXER_STATE_DIR")
+    if state_dir and state_dir.strip():
+        candidates.append(Path(state_dir.strip()).expanduser() / PRIMARY_FIXER_DB_FILENAME)
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state and xdg_state.strip():
+        candidates.append(
+            Path(xdg_state.strip()).expanduser() / MANAGED_STATE_SUBDIR / PRIMARY_FIXER_DB_FILENAME
+        )
+    candidates.append(
+        Path(os.path.expanduser("~"))
+        / ".local"
+        / "state"
+        / MANAGED_STATE_SUBDIR
+        / PRIMARY_FIXER_DB_FILENAME
+    )
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped
+
+
+def _find_stray_bare_db(cwd: Path, *, repo_root: Path) -> Path | None:
+    """A bare ``fixer.db`` next to the checkout or cwd is a stray, never canonical.
+
+    These files used to be silent resolution candidates; a stray project-root
+    database then captured the launcher and showed a completely empty project
+    world while the real state lived elsewhere. Return the first stray so it can
+    be migrated once or reported, never selected directly.
+    """
+    candidates = [
+        (repo_root / PRIMARY_FIXER_DB_FILENAME).resolve(),
+        (cwd / PRIMARY_FIXER_DB_FILENAME).resolve(),
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _ensure_state_parent(path: Path) -> None:
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
     try:
-        uri = "file:%s?mode=ro" % path
-        conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error:
-        return False
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+
+
+def _migrate_stray_bare_db(target: Path, *, cwd: Path, repo_root: Path) -> None:
+    stray = _find_stray_bare_db(cwd, repo_root=repo_root)
+    if stray is None:
+        return
+    _ensure_state_parent(target)
     try:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project' LIMIT 1"
-        ).fetchone()
-        return row is not None
-    except sqlite3.Error:
-        return False
-    finally:
-        conn.close()
+        os.replace(stray, target)
+    except OSError:
+        # Cross-device (or otherwise non-atomic) move: copy then drop the stray
+        # so the operator's data survives exactly once.
+        shutil.copy2(stray, target)
+        stray.unlink()
+    print(f"[fixer-wire] migrated stray {stray} -> {target}", file=sys.stderr)
+
+
+def _warn_ignored_stray(target: Path, *, cwd: Path, repo_root: Path) -> None:
+    stray = _find_stray_bare_db(cwd, repo_root=repo_root)
+    if stray is None:
+        return
+    print(
+        f"[fixer-wire] stray {stray} ignored (canonical {target} already exists). "
+        f"Adopt it explicitly with {FIXER_DB_PATH_ENV}={stray}",
+        file=sys.stderr,
+    )
 
 
 def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
@@ -246,59 +318,36 @@ def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
         env_path = Path(from_env.strip()).expanduser()
         if not env_path.is_absolute():
             env_path = repo_root / env_path
-        # An explicit path is authoritative even before the database exists.
-        # The Go schema bootstrap creates the file; silently falling back to a
-        # different repo/cwd database would migrate and launch the wrong state.
+        # An explicit path is authoritative even before the database exists and
+        # is never migrated or overridden by a stray. The Go schema bootstrap
+        # creates the file.
         return env_path.resolve()
 
-    candidates = [
-        repo_root / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
-        repo_root / PRIMARY_FIXER_DB_FILENAME,
-        cwd / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME,
-        cwd / PRIMARY_FIXER_DB_FILENAME,
-    ]
+    # Rule 2: the source-checkout project database is canonical for that
+    # checkout and beats any host state copy.
+    project_db = (repo_root / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME).resolve()
+    if project_db.is_file():
+        return project_db
 
-    # A managed installation keeps its database in the user state directory
-    # (~/.local/state/fixer-client-wires/fixer.db), not in a repository tree:
-    # a release payload has no checkout, so the repo/cwd candidates above all
-    # miss and the launcher dies with "Could not locate fixer.db" on a machine
-    # that never held a source tree. Consult the installer's own resolution
-    # first so the launcher and `fixer doctor` agree on one path.
-    managed_db: Path | None = None
-    try:
-        installer_paths = importlib.import_module("installer.paths")
-        managed_db = Path(installer_paths.resolve_db_path()).expanduser()
-    except Exception:  # noqa: BLE001 - installer is optional outside a managed install
-        managed_db = None
-    if managed_db is not None:
-        candidates.insert(0, managed_db)
-
-    checked: list[Path] = []
-    seen: set[Path] = set()
-    existing: list[Path] = []
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        checked.append(resolved)
-        if resolved.is_file():
-            existing.append(resolved)
-
-    # Prefer a database that is actually initialized; fall back to any existing
-    # file so a fresh managed installation (where the Go server bootstraps the
-    # schema on first run) still resolves to its own empty state database.
-    for candidate in existing:
-        if _db_is_initialized(candidate):
+    # Rule 3: the host canonical state database. Bare fixer.db files at the
+    # repo root or cwd must never shadow it. One is migrated once when no
+    # canonical state exists yet, otherwise it is left untouched and reported
+    # for explicit adoption via FIXER_DB_PATH.
+    state_candidates = _host_canonical_state_db_candidates()
+    if not state_candidates:
+        raise RuntimeError(
+            f"Could not locate {PRIMARY_FIXER_DB_FILENAME}. Set {FIXER_DB_PATH_ENV} to override."
+        )
+    for candidate in state_candidates:
+        if candidate.is_file():
+            _warn_ignored_stray(candidate, cwd=cwd, repo_root=repo_root)
             return candidate
-    if existing:
-        return existing[0]
 
-    checked_text = ", ".join(str(path) for path in checked)
-    raise RuntimeError(
-        f"Could not locate {PRIMARY_FIXER_DB_FILENAME}. Checked: {checked_text}. "
-        f"Set {FIXER_DB_PATH_ENV} to override."
-    )
+    preferred = state_candidates[0]
+    _ensure_state_parent(preferred)
+    _migrate_stray_bare_db(preferred, cwd=cwd, repo_root=repo_root)
+    return preferred
+
 
 def _default_project_name(cwd: Path) -> str:
     return cwd.name or "project"

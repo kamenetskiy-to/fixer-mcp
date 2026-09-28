@@ -50,6 +50,16 @@ if release_root not in sys.path:
 os.environ["FIXER_RUNTIME_ROOT"] = release_root
 os.environ["FIXER_MANAGED_ROOT"] = USER_MANAGED_ROOT
 
+# A non-interactive SSH/tmux command does not read shell rc files. Put the
+# directory holding this managed command (and companion cml/check-my-limits
+# scripts) on PATH before starting the native console. This is runtime
+# discovery, not a shell alias requirement.
+user_bin_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
+os.environ["FIXER_USER_BIN"] = user_bin_dir
+path_entries = os.environ.get("PATH", "").split(os.pathsep)
+if user_bin_dir not in path_entries:
+    os.environ["PATH"] = user_bin_dir + (os.pathsep + os.environ["PATH"] if os.environ.get("PATH") else "")
+
 # The managed `fixer` executable is the unified Go console. Installer
 # maintenance commands remain in Python so an update can replace the active
 # release safely, but ordinary operator work never enters the legacy alias/wire
@@ -59,7 +69,7 @@ console_candidates = [
     os.path.join(release_root, "bin", "fixerctl"),
 ]
 console_path = next((path for path in console_candidates if os.path.isfile(path) and os.access(path, os.X_OK)), None)
-console_commands = {"console", "open", "workroom", "quota", "resources", "providers", "machines", "network", "myip", "vpn-status", "vpn-up", "vpn-down", "fleet", "agent", "-print", "--print", "-run", "--run", "-json", "--json"}
+console_commands = {"console", "open", "hands", "workroom", "quota", "resources", "providers", "machines", "network", "myip", "vpn-status", "vpn-up", "vpn-down", "fleet", "agent", "-print", "--print", "-run", "--run", "-json", "--json"}
 if console_path and (not sys.argv[1:] or sys.argv[1] in console_commands):
     os.execv(console_path, [console_path, *sys.argv[1:]])
 

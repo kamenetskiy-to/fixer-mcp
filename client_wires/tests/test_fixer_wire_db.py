@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,28 +33,26 @@ class FixerWireDbExtractionTests(unittest.TestCase):
 
 
 class ResolveFixerDbPathTests(unittest.TestCase):
-    def setUp(self) -> None:
-        # Isolate the managed-install lookup. On a machine that really holds a
-        # managed installation (every operator machine since 2026-09-19),
-        # installer.paths.resolve_db_path() returns a database outside the temp
-        # tree and shadows the fixtures below, so these tests failed with the
-        # fleet installed even though the resolver behaved correctly.
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        managed_db = Path(tmp.name) / "managed-state" / "fixer.db"
-        real_import = fixer_wire_db.importlib.import_module
-
-        def fake_import(name, *args, **kwargs):
-            if name == "installer.paths":
-                return types.SimpleNamespace(resolve_db_path=lambda: str(managed_db))
-            return real_import(name, *args, **kwargs)
-
-        patcher = patch.object(fixer_wire_db.importlib, "import_module", fake_import)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    def _isolated_env(self, home: Path):
+        # clear=True drops the real FIXER_DB_PATH/FIXER_STATE_DIR/XDG_STATE_HOME
+        # of the operator machine so the fixtures below are the whole world.
+        return patch.dict(
+            os.environ,
+            {
+                "HOME": str(home),
+                "FIXER_DB_PATH": "",
+                "FIXER_STATE_DIR": "",
+                "XDG_STATE_HOME": "",
+            },
+            clear=True,
+        )
 
     def test_prefers_repo_local_db_over_cwd_db(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
             repo_db = repo_root / "fixer_mcp" / "fixer.db"
@@ -65,16 +62,19 @@ class ResolveFixerDbPathTests(unittest.TestCase):
             repo_db.touch()
             cwd_db.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: ""}, clear=False),
+            with self._isolated_env(Path(home_tmp)), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
             ):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
         self.assertEqual(resolved, repo_db.resolve())
 
     def test_ignores_fixer_genui_db_when_legacy_fixer_db_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
             repo_db = repo_root / "fixer_mcp" / "fixer.db"
@@ -83,16 +83,19 @@ class ResolveFixerDbPathTests(unittest.TestCase):
             repo_db.touch()
             rogue_genui_db.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: ""}, clear=False),
+            with self._isolated_env(Path(home_tmp)), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
             ):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
         self.assertEqual(resolved, repo_db.resolve())
 
     def test_uses_env_override_first(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
             repo_db = repo_root / "fixer_mcp" / "fixer.db"
@@ -102,16 +105,19 @@ class ResolveFixerDbPathTests(unittest.TestCase):
             repo_db.touch()
             env_db.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: f"  {env_db}  "}, clear=False),
-            ):
+            with self._isolated_env(Path(home_tmp)), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
+            ), patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: f"  {env_db}  "}, clear=False):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
         self.assertEqual(resolved, env_db.resolve())
 
     def test_explicit_env_path_is_authoritative_before_database_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
             repo_db = repo_root / "fixer_mcp" / "fixer.db"
@@ -119,61 +125,73 @@ class ResolveFixerDbPathTests(unittest.TestCase):
             repo_db.parent.mkdir(parents=True, exist_ok=True)
             repo_db.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: str(env_db)}, clear=False),
-            ):
+            with self._isolated_env(Path(home_tmp)), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
+            ), patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: str(env_db)}, clear=False):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
         self.assertEqual(resolved, env_db.resolve())
 
     def test_relative_env_override_is_resolved_from_repo_root(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
             env_db = repo_root / "relative" / "fixer.db"
             env_db.parent.mkdir(parents=True, exist_ok=True)
             env_db.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: "relative/fixer.db"}, clear=False),
-            ):
+            with self._isolated_env(Path(home_tmp)), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
+            ), patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: "relative/fixer.db"}, clear=False):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
         self.assertEqual(resolved, env_db.resolve())
 
-    def test_falls_back_to_cwd_when_repo_db_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+    def test_stray_cwd_db_is_not_selected_over_host_state(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
-            cwd_db = cwd / "fixer.db"
-            cwd_db.touch()
+            home = Path(home_tmp)
+            stray_db = cwd / "fixer.db"
+            canonical = home / ".local" / "state" / "fixer-client-wires" / "fixer.db"
+            stray_db.touch()
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.touch()
 
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: ""}, clear=False),
+            with self._isolated_env(home), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
             ):
                 resolved = fixer_wire._resolve_fixer_db_path(cwd)
 
-        self.assertEqual(resolved, cwd_db.resolve())
+            self.assertEqual(resolved, canonical.resolve())
+            self.assertTrue(stray_db.is_file())
 
-    def test_error_lists_checked_candidates(self) -> None:
-        with tempfile.TemporaryDirectory() as repo_tmp, tempfile.TemporaryDirectory() as cwd_tmp:
+    def test_missing_everywhere_resolves_to_preferred_state_path(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as repo_tmp,
+            tempfile.TemporaryDirectory() as cwd_tmp,
+            tempfile.TemporaryDirectory() as home_tmp,
+        ):
             repo_root = Path(repo_tmp)
             cwd = Path(cwd_tmp)
-            with (
-                patch.object(fixer_wire, "_repo_root", return_value=repo_root),
-                patch.dict(os.environ, {fixer_wire.FIXER_DB_PATH_ENV: ""}, clear=False),
-            ):
-                with self.assertRaises(RuntimeError) as ctx:
-                    fixer_wire._resolve_fixer_db_path(cwd)
+            home = Path(home_tmp)
+            expected = home / ".local" / "state" / "fixer-client-wires" / "fixer.db"
 
-        message = str(ctx.exception)
-        self.assertIn(f"Could not locate {fixer_wire.PRIMARY_FIXER_DB_FILENAME}.", message)
-        self.assertIn(str((repo_root / "fixer_mcp" / "fixer.db").resolve()), message)
-        self.assertIn(str((cwd / "fixer.db").resolve()), message)
-        self.assertIn(fixer_wire.FIXER_DB_PATH_ENV, message)
+            with self._isolated_env(home), patch.object(
+                fixer_wire, "_repo_root", return_value=repo_root
+            ):
+                resolved = fixer_wire._resolve_fixer_db_path(cwd)
+
+            self.assertEqual(resolved, expected.resolve())
+            self.assertTrue(expected.parent.is_dir())
 
 
 class ResolveProjectIdTests(unittest.TestCase):

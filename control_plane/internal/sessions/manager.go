@@ -15,8 +15,8 @@ import (
 	"github.com/fixer-mcp/control-plane/internal/state"
 )
 
-// Manager owns detached terminal sessions. tmux is a carrier, not a second
-// operator UI: the console records the work and attaches/detaches it by ID.
+// Manager owns detached local terminal contexts. tmux is only a carrier; the
+// canonical project/session lifecycle stays in Fixer MCP.
 type Manager struct {
 	store    *state.Store
 	tmuxPath string
@@ -29,9 +29,9 @@ func NewManager(store *state.Store) *Manager {
 
 func (m *Manager) HasCarrier() bool { return m.tmuxPath != "" }
 
-func (m *Manager) Start(spec launch.Spec, command launch.Command) (domain.Session, error) {
+func (m *Manager) Start(spec launch.Spec, command launch.Command) (domain.LocalContext, error) {
 	if command.Binary == "" {
-		return domain.Session{}, errors.New("launch command is empty")
+		return domain.LocalContext{}, errors.New("launch command is empty")
 	}
 	now := time.Now()
 	id := fmt.Sprintf("%s-%d", shortID(spec.Title), now.UnixNano())
@@ -45,11 +45,11 @@ func (m *Manager) Start(spec launch.Spec, command launch.Command) (domain.Sessio
 		proc.Dir = command.Dir
 		proc.Env = command.Env
 		if output, err := proc.CombinedOutput(); err != nil {
-			return domain.Session{}, fmt.Errorf("start terminal session: %w: %s", err, strings.TrimSpace(string(output)))
+			return domain.LocalContext{}, fmt.Errorf("start local terminal context: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 		status = domain.SessionRunning
 	}
-	session := domain.Session{
+	context := domain.LocalContext{
 		ID:          id,
 		Title:       firstNonEmpty(spec.Title, "Новая работа"),
 		Kind:        spec.Kind,
@@ -66,70 +66,70 @@ func (m *Manager) Start(spec launch.Spec, command launch.Command) (domain.Sessio
 		StartedAt:   now,
 		UpdatedAt:   now,
 	}
-	if err := m.store.UpsertSession(session); err != nil {
+	if err := m.store.UpsertLocalContext(context); err != nil {
 		if target != "" {
 			_ = m.killTarget(target)
 		}
-		return domain.Session{}, err
+		return domain.LocalContext{}, err
 	}
-	return session, nil
+	return context, nil
 }
 
-func (m *Manager) Attach(session domain.Session) *runner.ExecCommand {
-	if session.TmuxTarget != "" && m.tmuxPath != "" {
+func (m *Manager) Attach(context domain.LocalContext) *runner.ExecCommand {
+	if context.TmuxTarget != "" && m.tmuxPath != "" {
 		entry := registry.Resolved{
-			Entry:  registry.Entry{ID: session.ID, Title: session.Title, Args: []string{"attach-session", "-t", session.TmuxTarget}},
+			Entry:  registry.Entry{ID: context.ID, Title: context.Title, Args: []string{"attach-session", "-t", context.TmuxTarget}},
 			Binary: m.tmuxPath,
 		}
-		return runner.NewExecCommand(entry, runner.Options{Env: os.Environ(), Dir: session.ProjectPath})
+		return runner.NewExecCommand(entry, runner.Options{Env: os.Environ(), Dir: context.ProjectPath})
 	}
-	if len(session.Command) == 0 {
+	if len(context.Command) == 0 {
 		return runner.NewExecCommand(registry.Resolved{}, runner.Options{})
 	}
 	entry := registry.Resolved{
-		Entry:  registry.Entry{ID: session.ID, Title: session.Title, Args: append([]string(nil), session.Command[1:]...)},
-		Binary: session.Command[0],
+		Entry:  registry.Entry{ID: context.ID, Title: context.Title, Args: append([]string(nil), context.Command[1:]...)},
+		Binary: context.Command[0],
 	}
-	return runner.NewExecCommand(entry, runner.Options{Env: os.Environ(), Dir: session.ProjectPath})
+	return runner.NewExecCommand(entry, runner.Options{Env: os.Environ(), Dir: context.ProjectPath})
 }
 
-func (m *Manager) Stop(session domain.Session) error {
-	if session.TmuxTarget == "" || m.tmuxPath == "" {
+func (m *Manager) Stop(context domain.LocalContext) error {
+	if context.TmuxTarget == "" || m.tmuxPath == "" {
 		return errors.New("session has no detachable terminal carrier")
 	}
-	if err := m.killTarget(session.TmuxTarget); err != nil {
+	if err := m.killTarget(context.TmuxTarget); err != nil {
 		return err
 	}
-	session.State = domain.SessionFinished
-	session.UpdatedAt = time.Now()
-	return m.store.UpsertSession(session)
+	context.State = domain.SessionFinished
+	context.UpdatedAt = time.Now()
+	return m.store.UpsertLocalContext(context)
 }
 
-func (m *Manager) Refresh() ([]domain.Session, error) {
+func (m *Manager) Refresh() ([]domain.LocalContext, error) {
 	snapshot := m.store.Snapshot()
 	changed := false
-	for i := range snapshot.Sessions {
-		session := &snapshot.Sessions[i]
-		if session.State != domain.SessionRunning && session.State != domain.SessionDetached {
+	for i := range snapshot.LocalContexts {
+		context := &snapshot.LocalContexts[i]
+		if context.State != domain.SessionRunning && context.State != domain.SessionDetached {
 			continue
 		}
-		if session.TmuxTarget != "" && m.tmuxPath != "" {
-			if !m.hasTarget(session.TmuxTarget) {
-				session.State = domain.SessionFinished
-				session.UpdatedAt = time.Now()
+		if context.TmuxTarget != "" && m.tmuxPath != "" {
+			if !m.hasTarget(context.TmuxTarget) {
+				context.State = domain.SessionFinished
+				context.UpdatedAt = time.Now()
 				changed = true
 			}
 		}
 	}
 	if changed {
 		if err := m.store.Update(func(data *domain.State) error {
-			data.Sessions = snapshot.Sessions
+			data.LocalContexts = snapshot.LocalContexts
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return snapshot.Sessions, nil
+	return snapshot.LocalContexts, nil
 }
 
 func (m *Manager) hasTarget(target string) bool {

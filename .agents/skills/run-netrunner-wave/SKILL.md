@@ -131,26 +131,42 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
     a later minority/tie after the repair is consumed becomes
     `manual_repair_required`.
 14. For the explicit phase contract, call
-    `transition_netrunner_wave_phase(target_phase="acceptance", ...)` only
-    after all implementation workers are terminal, failure policy is `passed`,
-    the implementation reviewer is completed and approved, and a distinct
-    project-scoped pending acceptance session is supplied. Review that
-    acceptance session separately, then transition to `completed` only after
-    it is completed and reviewed; recursive-capable waves also require an
-    exact committed `handoff_sha`.
+    `transition_netrunner_wave_phase(target_phase="acceptance", review_approved=true)`
+    only after all implementation workers are terminal and the failure policy
+    is `passed`. On `manual` waves the Fixer's attestation is the review: no
+    reviewer Netrunner and no acceptance session are required (an optional
+    `acceptance_session_id` is validated when supplied — pending and distinct
+    from workers/reviewer). On `automatic` waves the implementation reviewer
+    must be completed and a distinct pending acceptance session supplied;
+    review that acceptance session separately. Then transition to `completed`
+    with `review_approved=true` (a supplied acceptance session must be
+    completed first; recursive-capable waves also require an exact committed
+    `handoff_sha`).
 15. Clean up only after review/acceptance decisions are made. Start
     conservative, then call `cleanup_netrunner_wave(remove_worktrees=true)`
     when it is safe.
 
-### Acceptance Transition Runtime Blocker
+### Acceptance And Completion Contract (manual review)
 
-The current `transition_netrunner_wave_phase` handler requires a completed
-implementation reviewer session, while `manual` review intentionally creates
-no reviewer Netrunner. Consequently manual waves—including mandatory-manual
-monowaves—cannot use the acceptance transition as currently implemented. Keep
-the blocker visible and do not fabricate a reviewer or claim that a Fixer-only
-review satisfies the handler; this needs a runtime contract change before
-manual-wave acceptance can be enabled.
+Manual waves close on the Fixer's review attestation — there is no dead-end and
+nothing to fabricate. `transition_netrunner_wave_phase` accepts
+`target_phase="acceptance"` with `review_approved=true` and without a reviewer
+Netrunner or acceptance session. The canonical order for a reviewed manual
+wave:
+
+1. all implementation workers terminal, failure policy `passed`;
+2. `transition_netrunner_wave_phase(target_phase="acceptance",
+   review_approved=true)`;
+3. close reviewed worker sessions with `set_session_status(status="completed")`
+   — allowed from the acceptance phase on (the wave keeps session ownership
+   during implementation and refuses with an actionable message);
+4. `transition_netrunner_wave_phase(target_phase="completed",
+   review_approved=true)` (`handoff_sha` for recursive-capable waves; a
+   supplied acceptance session must be completed first).
+
+Automatic waves keep the stricter contract: a completed implementation
+reviewer and a pending acceptance session are required when entering
+acceptance.
 
 ## Droid Backend Launches
 

@@ -12,8 +12,15 @@ import sys
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(BIN_DIR, ".."))
 CONSOLE = os.path.join(BIN_DIR, "fixer-console")
+# Direct payload invocation must publish the managed user-bin directory exactly
+# like the generated `fixer` shim, so the native console finds companion
+# cml/check-my-limits scripts under non-interactive SSH/tmux. The PATH itself
+# is deliberately left untouched: doctor compares the resolved `fixer` in PATH
+# against the installed shim, and rewriting PATH here would fake that check.
+USER_BIN = os.environ.get("FIXER_USER_BIN", os.path.join(os.path.expanduser("~"), ".local", "bin"))
+os.environ["FIXER_USER_BIN"] = USER_BIN
 CONSOLE_COMMANDS = {
-    "console", "open", "workroom", "quota", "resources", "providers", "machines",
+    "console", "open", "hands", "workroom", "quota", "resources", "providers", "machines",
     "network", "myip", "vpn-status", "vpn-up", "vpn-down", "fleet", "agent",
     "-print", "--print", "-run", "--run",
     "-json", "--json",

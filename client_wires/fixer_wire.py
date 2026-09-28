@@ -145,6 +145,39 @@ def _parse_wire_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]
         default=[],
         help="Compatibility generation only: repeat or pass comma-separated MCP server names.",
     )
+    parser.add_argument(
+        "--hands-workspace",
+        choices=("safe", "hotfix"),
+        help="Project Hands workspace mode; when set, the legacy line selector is skipped.",
+    )
+    parser.add_argument(
+        "--hands-docs",
+        help=(
+            "Project Hands attached docs: 'keep' reuses the stored selection, 'none' attaches none, "
+            "'all' attaches every project doc, otherwise a comma-separated list of doc ids."
+        ),
+    )
+    parser.add_argument(
+        "--hands-mcp",
+        help=(
+            "Project Hands MCP servers: 'keep' reuses the stored selection, 'none' attaches none, "
+            "otherwise a comma-separated list of server names."
+        ),
+    )
+    parser.add_argument(
+        "--fixer-launch",
+        choices=("new", "resume", "unattached"),
+        help="Fixer launch action; when set, the legacy line selector is skipped.",
+    )
+    parser.add_argument(
+        "--list-fixer-sessions",
+        action="store_true",
+        help=(
+            "Print the recent Fixer sessions as JSON and exit. Read-only: the native "
+            "Super-TUI lists them without entering any interactive selector."
+        ),
+    )
+    parser.add_argument("--limit", type=int, default=5, help="Maximum rows for --list-fixer-sessions.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_known_args(list(argv))
 
@@ -686,7 +719,20 @@ def _launch_scaffold_interactive(Option: Any, single_select_items: Any) -> int:
     return run_scaffold_cli(project_name, target_dir=target_dir, dry_run=dry_run)
 
 
+# Set by `main()` from `--fixer-launch` so the native Super-TUI can choose the
+# Fixer launch action itself. While set, the legacy line selector is never
+# entered for this action.
+_FIXER_LAUNCH_PRESET: str | None = None
+_FIXER_LAUNCH_PRESET_VALUES = {
+    "new": FIXER_LAUNCH_NEW,
+    "resume": FIXER_LAUNCH_RESUME,
+    "unattached": UNATTACHED_FIXER_ACTION,
+}
+
+
 def _select_fixer_launch_action_interactive(Option: Any, single_select_items: Any) -> str:
+    if _FIXER_LAUNCH_PRESET:
+        return _FIXER_LAUNCH_PRESET_VALUES[_FIXER_LAUNCH_PRESET]
     return fixer_wire_selectors._select_fixer_launch_action_interactive(Option, single_select_items)
 
 
@@ -1564,6 +1610,42 @@ def _capture_hands_external_session_id(
     return raw
 
 
+def _resolve_preset_names(preset: str, allowed: Sequence[str], previous: Sequence[str]) -> list[str]:
+    """Resolve a native-console MCP/doc name preset without prompting.
+
+    ``keep`` reuses the stored selection, ``none`` selects nothing, ``all``
+    selects the whole pool and anything else is an explicit comma-separated
+    allow-list. Unknown names are dropped rather than raising, so a native
+    selection can never be turned back into an interactive legacy prompt.
+    """
+
+    text = str(preset).strip()
+    lowered = text.lower()
+    if lowered == "keep":
+        return list(previous)
+    if lowered == "none":
+        return []
+    if lowered == "all":
+        return list(allowed)
+    allowed_set = set(allowed)
+    return [name for name in _normalize_names(text.split(",")) if name in allowed_set]
+
+
+def _resolve_preset_doc_ids(preset: str, all_doc_ids: Sequence[str], previous: Sequence[str]) -> list[str]:
+    """Resolve a native-console Hands doc-id preset without prompting."""
+
+    text = str(preset).strip()
+    lowered = text.lower()
+    if lowered == "keep":
+        return list(previous)
+    if lowered == "none":
+        return []
+    if lowered == "all":
+        return list(all_doc_ids)
+    allowed_set = set(all_doc_ids)
+    return [doc_id for doc_id in _normalize_names(text.split(",")) if doc_id in allowed_set]
+
+
 def _launch_project_hands(
     passthrough_args: Sequence[str],
     *,
@@ -1573,6 +1655,9 @@ def _launch_project_hands(
     preset_mcp_names: Sequence[str],
     acceptance: bool,
     dry_run: bool,
+    preset_workspace: str | None = None,
+    preset_mcp: str | None = None,
+    preset_docs: str | None = None,
     Option: Any,
     single_select_items: Any,
     multi_select_items: Any,
@@ -1604,6 +1689,12 @@ def _launch_project_hands(
     nav = fixer_wire_navigation.FixerTuiNavigator()
 
     def _pick_workspace() -> str:
+        if preset_workspace:
+            return (
+                fixer_wire_selectors.HANDS_WORKSPACE_HOTFIX
+                if preset_workspace == "hotfix"
+                else fixer_wire_selectors.HANDS_WORKSPACE_SAFE
+            )
         return fixer_wire_selectors._select_hands_workspace_mode_interactive(Option, single_select_items)
 
     def _pick_lane() -> Any:
@@ -1630,7 +1721,10 @@ def _launch_project_hands(
         pool_names = callbacks.allowed_runtime_mcp_names(allowed_names, available_servers)
         pool_names = [n for n in pool_names if n != callbacks.computer_use_mcp_name]
         previous_mcp = [n for n in proposed_hands_mcp if n in pool_names]
-        picked = _select_mcp_interactive(pool_names, previous_mcp, registry_meta, available_servers, Option, multi_select_items)
+        if preset_mcp is not None:
+            picked = _resolve_preset_names(preset_mcp, pool_names, previous_mcp)
+        else:
+            picked = _select_mcp_interactive(pool_names, previous_mcp, registry_meta, available_servers, Option, multi_select_items)
         out = list(picked)
         if FORCED_MCP_SERVER in available_servers:
             out = _normalize_names([*out, FORCED_MCP_SERVER])
@@ -1641,7 +1735,11 @@ def _launch_project_hands(
             _ensure_wire_schema(conn)
             proposed_hands_docs = _load_hands_doc_ids(conn, project_id)
         previous_doc_ids = [doc_id for doc_id in proposed_hands_docs if any(entry.doc_id == doc_id for entry in doc_tree)]
-        selected_doc_ids = fixer_wire_selectors._select_hands_docs_interactive(doc_tree, previous_doc_ids, Option, multi_select_items)
+        all_doc_ids = [entry.doc_id for entry in doc_tree]
+        if preset_docs is not None:
+            selected_doc_ids = _resolve_preset_doc_ids(preset_docs, all_doc_ids, previous_doc_ids)
+        else:
+            selected_doc_ids = fixer_wire_selectors._select_hands_docs_interactive(doc_tree, previous_doc_ids, Option, multi_select_items)
         return [entry for entry in doc_tree if entry.doc_id in set(selected_doc_ids)]
 
     nav.add("workspace", _pick_workspace)
@@ -1752,9 +1850,57 @@ def _launch_overseer(
     )
 
 
+def _emit_fixer_sessions_json(limit: int) -> int:
+    """Read-only listing used by the native console's home screen.
+
+    Fixer sessions live in the provider transcript history rather than in the
+    Fixer MCP database, so the single source of truth stays here. This path
+    never prompts: it only serialises what the resume flow would offer.
+    """
+
+    if limit <= 0:
+        limit = 5
+    cwd = Path.cwd().resolve()
+    try:
+        summaries = _load_fixer_resume_summaries(cwd, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - a listing must never crash the launcher
+        print(json.dumps({"sessions": [], "error": str(exc)}, ensure_ascii=False))
+        return 0
+    sessions = []
+    for summary in summaries:
+        updated = getattr(summary, "updated", None)
+        recorded_cwd = getattr(summary, "cwd", None)
+        sessions.append(
+            {
+                "session_id": str(getattr(summary, "session_id", "") or ""),
+                "provider": str(getattr(summary, "provider", "") or ""),
+                "model": str(getattr(summary, "model", "") or ""),
+                "preview": str(getattr(summary, "preview", "") or ""),
+                # The directory the session was recorded in: resuming anywhere
+                # else makes Codex stop and ask which working directory to use.
+                "cwd": str(recorded_cwd or ""),
+                "updated": updated.isoformat(sep=" ", timespec="seconds") if hasattr(updated, "isoformat") else str(updated or ""),
+            }
+        )
+    print(json.dumps({"sessions": sessions}, ensure_ascii=False))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    global _FIXER_LAUNCH_PRESET
     raw_args = list(sys.argv[1:] if argv is None else argv)
     wire_args, passthrough_args = _parse_wire_args(raw_args)
+    _FIXER_LAUNCH_PRESET = wire_args.fixer_launch
+    if wire_args.fixer_launch == "resume" and not (
+        wire_args.fixer_session_id or wire_args.fixer_resume_latest
+    ):
+        # Never silently fall back into the legacy session picker: a native
+        # resume must name its target.
+        print(
+            "[fixer-wire] `--fixer-launch resume` requires `--fixer-session-id` or `--fixer-resume-latest`.",
+            file=sys.stderr,
+        )
+        return 2
 
     if wire_args.scaffold_mvp:
         if wire_args.role:
@@ -1774,6 +1920,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     mcp_root = bootstrap_codex_pro_import_path()
+
+    if wire_args.list_fixer_sessions:
+        return _emit_fixer_sessions_json(wire_args.limit)
 
     if wire_args.wire_info:
         for line in wire_info_lines(mcp_root):
@@ -1797,6 +1946,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 preset_reasoning=wire_args.netrunner_reasoning,
                 preset_mcp_names=wire_args.netrunner_mcp,
                 acceptance=wire_args.netrunner_acceptance,
+                preset_workspace=wire_args.hands_workspace,
+                preset_mcp=wire_args.hands_mcp,
+                preset_docs=wire_args.hands_docs,
                 dry_run=wire_args.dry_run,
                 Option=Option,
                 single_select_items=single_select_items,
@@ -1881,6 +2033,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 preset_reasoning=wire_args.netrunner_reasoning,
                 preset_mcp_names=wire_args.netrunner_mcp,
                 acceptance=wire_args.netrunner_acceptance,
+                preset_workspace=wire_args.hands_workspace,
+                preset_mcp=wire_args.hands_mcp,
+                preset_docs=wire_args.hands_docs,
                 dry_run=wire_args.dry_run,
                 Option=Option,
                 single_select_items=single_select_items,

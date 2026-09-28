@@ -46,8 +46,15 @@ func setupGetProjectsTestDB(t *testing.T) *sql.DB {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			cwd TEXT UNIQUE NOT NULL,
-			active INTEGER NOT NULL DEFAULT 0
+			active INTEGER NOT NULL DEFAULT 0,
+			identity_key TEXT
 		);
+		CREATE TABLE project_path_alias (
+			path TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX project_path_alias_project_idx ON project_path_alias(project_id);
 			CREATE TABLE session (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				project_id INTEGER,

@@ -1,92 +1,82 @@
-# `fixer` — unified operator console
+# `fixer` — work-first operator console
 
-`fixer` is the managed, work-first Super-TUI for the operator fleet. It owns one
-keyboard context for projects, persistent agent sessions, provider resources,
-machines, network state and Fleet checks. `fixerctl` and `fx` remain temporary
-compatibility names for the same executable; they are not separate products.
+`fixer` is the managed entry point for project work. `fixerctl` and `fx` are
+compatibility names for the same binary, not separate products.
 
-## Build and run
+## Three spaces
 
-From the repository root:
-
-```sh
-make fixer                 # builds control_plane/fixerctl and fixer-console
-./control_plane/fixerctl   # opens the console
-./control_plane/fixerctl quota --json
-```
-
-The managed installer places `fixer-console` in the release payload and
-installs `~/.local/bin/fixer` as the sole operator entry point. Maintenance
-commands still use the installer service:
-
-```sh
-fixer update
-fixer doctor
-```
-
-`fixerctl` is accepted while old scripts are being retired. The release shim
-selects the native console for ordinary work, so no shell alias, current cwd,
-or legacy Python TUI is required.
-
-## Workspaces
-
-| Workspace | Purpose |
+| Space | What it opens |
 | --- | --- |
-| **Работа** | current project, persistent sessions, continue/detach/stop, new launch card |
-| **Ресурсы** | installed clients, accounts, quota snapshots and explicit credential actions |
-| **Машины** | saved local/WSL/Air targets, availability probes and terminal attach |
-| **Сеть** | actual egress, VPN marker/proxy state and guarded up/down actions |
-| **Fleet** | managed environment check and its bounded output |
+| **Работа** | the current project, **Руки** (project execution) and **Фиксер** (governance/review), then detachable local terminal contexts and new work |
+| **Ресурсы** | the exact live `cml` report first, followed by available clients and explicit account actions |
+| **Машины** | one bounded canonical logical-machine inventory; choosing a host automatically resolves Tailscale, SOCKS, then a safe LAN fallback |
 
-The launch card keeps project, work type, client/provider, account, model,
-reasoning, prompt, machine and resume data together. Sessions run in tmux;
-`Enter` attaches without stopping the process and `Ctrl-b d` detaches without
-losing it. Provider switches are represented as a new launch context rather
-than a false universal resume. `fixer` without a path resumes the last project;
-`fixer open PATH` deliberately selects another one.
+Network state and VPN controls live inside **Машины** because they are transport
+controls, not a fourth workspace. Provisioning diagnostics are available via
+`fixer doctor`; they are not an interactive product space.
 
-Remote machine targets are read from `~/.config/fixer/machines.json` (or
-`$XDG_CONFIG_HOME/fixer/machines.json`). Each entry may provide `id`, `title`,
-`target`, `kind: "ssh"` and a remote `path`; SSH transport and reconnect flags
-are chosen by the console, not by a shell alias.
+## Direct work entry
+
+The default selected action in **Работа** is **Руки**. It opens the permanent
+project execution client on the Pi lane by default; a different registered lane
+must be chosen deliberately. **Фиксер** opens the governed project workroom.
+They can also be opened directly:
+
+```sh
+fixer hands
+fixer workroom
+```
+
+`fixer open PATH` selects a project deliberately. `fixer` otherwise reopens the
+last project context.
+
+## Resources and limits
+
+`cml` is the operator-facing quota source. The console runs `cml` first (with
+`check-my-limits` only as a compatibility fallback) and renders its report
+unchanged in **Ресурсы**. `r` refreshes that report.
+
+```sh
+fixer quota       # prints the same cml report
+fixer quota --json
+```
+
+Account bind/switch actions are explicitly marked **global for new local
+launches** and always require confirmation. They are shown separately from
+provider availability so an account mutation cannot look like a provider or
+model selection.
+
+## Logical machines
+
+The console never enumerates `~/.ssh/config`. Its inventory is the canonical
+physical machine list plus `Эта машина`; `*-tailscale`, `*-local`, personal aliases,
+and stale SSH entries remain internal transport details. For a chosen machine
+Fixer tries the route candidates automatically. The known unsafe old WSL LAN
+address is explicitly disabled rather than risking a connection to Ubuntu.
+
+`~/.config/fixer/machines.json` may override the title, remote project path, or
+transport values of an existing canonical ID. It cannot add arbitrary SSH
+aliases to the visible inventory.
 
 ## Keys
 
-* `1`–`5` — Работа / Ресурсы / Машины / Сеть / Fleet
-* `n` — new work from the saved project profile
-* `Enter` — continue a session or open the selected action
-* `s` — stop the selected work session; on Ресурсы, request account switch
+* `1`–`3` — Работа / Ресурсы / Машины
+* `h` / `f` — Руки / Фиксер for the current project
+* `n` — new local launch (it is explicitly not an MCP project session)
+* `Enter` — open the selected action, context, or logical machine
+* `r` — refresh `cml` or machine availability
+* `u` / `d` — VPN up/down in **Машины**
+* `s` — stop a selected detachable local context; in **Ресурсы**, request account switch
 * `b` — bind current credentials to the selected account profile
-* `r` — refresh the active workspace asynchronously
-* `/` — action/workspace search
-* `?` — help; `q` / `Ctrl-C` — quit
+* `/` — search; `?` — help; `q` / `Ctrl-C` — quit
 
-Credential switch and bind operations always show a confirmation screen and
-write only the selected client's auth file. Quota errors, missing clients,
-network failures and exhausted windows remain separate statuses.
-
-## Non-interactive surfaces
+## Build
 
 ```sh
-fixer -version
-fixer -print
-fixer -print -json
-fixer quota --json
-fixer -run cml
-```
-
-`-print` and `-run` are compatibility diagnostics. They do not define the
-interactive product and may be removed after fleet migration.
-
-## State and packaging
-
-UI drafts and session/tmux metadata are stored locally under the Fixer state
-directory. Project and orchestration truth remains in Fixer MCP; this console
-does not create a second project database. The release assembler cross-builds
-`bin/fixer-console`, copies the identical binary to `bin/fixerctl` and
-`control_plane/fixerctl`, and injects the release version at link time.
-
-```sh
+make fixer
+./control_plane/fixerctl
 make test-control-plane
-python3 -m pytest packaging/test_assembler_payload.py tests/installer/test_shim.py
 ```
+
+The release assembler packages one native console binary as `fixer-console`,
+with compatibility copies named `fixerctl`.

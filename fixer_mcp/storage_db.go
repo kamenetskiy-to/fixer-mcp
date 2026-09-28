@@ -25,6 +25,9 @@ func dbTableHasColumn(tableName string, columnName string) bool {
 func initDB() {
 	var err error
 	dsn := resolveFixerDBPath()
+	if err := os.MkdirAll(filepath.Dir(dsn), 0o700); err != nil {
+		log.Fatalf("Error creating db directory %s: %v", filepath.Dir(dsn), err)
+	}
 	separator := "?"
 	if strings.Contains(dsn, "?") {
 		separator = "&"
@@ -52,8 +55,16 @@ func initDB() {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
 			cwd TEXT UNIQUE NOT NULL,
-			active INTEGER NOT NULL DEFAULT 0
+			active INTEGER NOT NULL DEFAULT 0,
+			identity_key TEXT
 		);
+		CREATE TABLE IF NOT EXISTS project_path_alias (
+			path TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE INDEX IF NOT EXISTS project_path_alias_project_idx ON project_path_alias(project_id);
 		CREATE TABLE IF NOT EXISTS backlog_item (
 			id INTEGER PRIMARY KEY,
 			project_id INTEGER,
@@ -555,6 +566,17 @@ func initDB() {
 
 	// Ensure report column exists if the DB was already created
 	_, _ = db.Exec(`ALTER TABLE project ADD COLUMN active INTEGER NOT NULL DEFAULT 0;`)
+	// Project identity beyond the raw absolute path (backlog 176). The column and
+	// the alias table are additive: legacy path-keyed rows keep resolving by cwd.
+	_, _ = db.Exec(`ALTER TABLE project ADD COLUMN identity_key TEXT;`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS project_path_alias (
+		path TEXT PRIMARY KEY,
+		project_id INTEGER NOT NULL,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+	);`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS project_path_alias_project_idx ON project_path_alias(project_id);`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS project_identity_key_unique_idx ON project(identity_key) WHERE identity_key IS NOT NULL AND TRIM(identity_key) != '';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN report TEXT;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_backend TEXT NOT NULL DEFAULT 'codex';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna';`)
@@ -1563,5 +1585,21 @@ func resolveFixerDBPath() string {
 	if explicitPath := strings.TrimSpace(os.Getenv(fixerDBPathEnv)); explicitPath != "" {
 		return explicitPath
 	}
-	return defaultFixerDBFilename
+	// Never a cwd-relative "fixer.db". That file is how a project directory
+	// grew its own empty database and hid the real project (todorki, 2026-09-28).
+	return canonicalFixerDBPath()
+}
+
+func canonicalFixerDBPath() string {
+	if stateDir := strings.TrimSpace(os.Getenv("FIXER_STATE_DIR")); stateDir != "" {
+		return filepath.Join(stateDir, defaultFixerDBFilename)
+	}
+	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" {
+		return filepath.Join(stateHome, "fixer-client-wires", defaultFixerDBFilename)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(os.TempDir(), "fixer-client-wires", defaultFixerDBFilename)
+	}
+	return filepath.Join(home, ".local", "state", "fixer-client-wires", defaultFixerDBFilename)
 }

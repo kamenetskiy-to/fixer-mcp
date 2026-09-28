@@ -24,6 +24,9 @@ _HIGH_MAX_MODELS = {
 }
 _LOW_HIGH_MAX_MODELS = {"zai-org/glm-5.3-flash"}
 _LOW_MEDIUM_XHIGH_MODELS = {"qwen/qwen3.8-27b", "qwen/qwen3.8-max"}
+# MiMo 2.6 (Xiaomi) sends the full effort ladder (pi model-store declares
+# low..max on both CommandCode accounts).
+_LOW_MEDIUM_HIGH_XHIGH_MAX_MODELS = {"xiaomi/mimo-v2.6-flash", "xiaomi/mimo-v2.6-pro"}
 
 
 def _commandcode_model_id(model: str) -> str:
@@ -44,6 +47,8 @@ def commandcode_reasoning_options(model: str) -> tuple[str, ...]:
         return ("low", "high", "max")
     if model_id in _LOW_MEDIUM_XHIGH_MODELS:
         return ("low", "medium", "xhigh")
+    if model_id in _LOW_MEDIUM_HIGH_XHIGH_MAX_MODELS:
+        return ("low", "medium", "high", "xhigh", "max")
     return ("low", "medium", "high")
 
 

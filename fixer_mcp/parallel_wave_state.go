@@ -1473,33 +1473,45 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 		if wave.FailurePolicyState != parallelWaveFailurePolicyPassed {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d failure policy must pass before acceptance, got %q", wave.Id, wave.FailurePolicyState)
 		}
-		if wave.ReviewSessionId <= 0 || wave.ReviewSessionStatus != "completed" {
+		manualReview := wave.ReviewPolicy == parallelWaveReviewPolicyManual
+		// Manual waves have no reviewer Netrunner by design: the Fixer is the
+		// serialized reviewer and review_approved=true is the attestation
+		// (backlog 143/205, feedback #8/#12/#47/#93). Fabricating a reviewer
+		// session is never required to accept a reviewed manual wave.
+		if !manualReview && (wave.ReviewSessionId <= 0 || wave.ReviewSessionStatus != "completed") {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d implementation reviewer must be completed before acceptance", wave.Id)
 		}
+		var globalAcceptanceID int
 		if input.AcceptanceSessionId <= 0 {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance_session_id is required when entering acceptance")
-		}
-		globalAcceptanceID, err := globalSessionIDFromProjectScoped(input.AcceptanceSessionId, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", input.AcceptanceSessionId)
-		}
-		status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
-		}
-		if status != "pending" {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be pending, got %q", input.AcceptanceSessionId, status)
-		}
-		var conflicting int
-		if err := db.QueryRow(
-			"SELECT COUNT(*) FROM parallel_wave_worker WHERE project_id = ? AND session_id = ?",
-			authorizedProjectId,
-			globalAcceptanceID,
-		).Scan(&conflicting); err != nil {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
-		}
-		if conflicting > 0 || input.AcceptanceSessionId == wave.ReviewSessionId {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be distinct from implementation workers and reviewer", input.AcceptanceSessionId)
+			if !manualReview {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance_session_id is required when entering acceptance")
+			}
+			// Acceptance without a separate acceptance worker: the phase
+			// transition itself records the Fixer's review attestation.
+		} else {
+			var err error
+			globalAcceptanceID, err = globalSessionIDFromProjectScoped(input.AcceptanceSessionId, authorizedProjectId)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", input.AcceptanceSessionId)
+			}
+			status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
+			}
+			if status != "pending" {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be pending, got %q", input.AcceptanceSessionId, status)
+			}
+			var conflicting int
+			if err := db.QueryRow(
+				"SELECT COUNT(*) FROM parallel_wave_worker WHERE project_id = ? AND session_id = ?",
+				authorizedProjectId,
+				globalAcceptanceID,
+			).Scan(&conflicting); err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
+			}
+			if conflicting > 0 || input.AcceptanceSessionId == wave.ReviewSessionId {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be distinct from implementation workers and reviewer", input.AcceptanceSessionId)
+			}
 		}
 		_, err = db.Exec(
 			`UPDATE parallel_wave
@@ -1515,20 +1527,22 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 		if wave.Phase != parallelWavePhaseAcceptance {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d must be in acceptance phase before completion, got %q", wave.Id, wave.Phase)
 		}
-		if wave.AcceptanceSessionId <= 0 {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d has no acceptance session contract", wave.Id)
+		if wave.AcceptanceSessionId > 0 {
+			globalAcceptanceID, err := globalSessionIDFromProjectScoped(wave.AcceptanceSessionId, authorizedProjectId)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", wave.AcceptanceSessionId)
+			}
+			status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
+			}
+			if status != "completed" {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be completed, got %q", wave.AcceptanceSessionId, status)
+			}
 		}
-		globalAcceptanceID, err := globalSessionIDFromProjectScoped(wave.AcceptanceSessionId, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", wave.AcceptanceSessionId)
-		}
-		status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
-		}
-		if status != "completed" {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be completed, got %q", wave.AcceptanceSessionId, status)
-		}
+		// A wave without an acceptance session (manual review attestation)
+		// closes on the acceptance phase record itself; the Fixer never has to
+		// fabricate sessions to finish an already-reviewed wave.
 		handoffSHA := strings.TrimSpace(input.HandoffSha)
 		if wave.MaxChildWaveDepth > 0 && handoffSHA == "" {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("handoff_sha is required before completing recursive wave %d", wave.Id)

@@ -17,10 +17,19 @@ import (
 const testProjectCWD = "/tmp/self_orchestration_test_project"
 const structuredTestFinalReport = `{"files_changed":["main.go"],"commands_run":["go test ./..."],"checks_run":["go test ./..."],"blockers":[]}`
 
-func TestResolveFixerDBPathUsesEnvOrDefault(t *testing.T) {
+func TestResolveFixerDBPathUsesEnvOrCanonicalState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FIXER_STATE_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv(fixerDBPathEnv, "")
-	if got := resolveFixerDBPath(); got != defaultFixerDBFilename {
-		t.Fatalf("expected default db filename, got %q", got)
+	want := filepath.Join(home, ".local", "state", "fixer-client-wires", defaultFixerDBFilename)
+	got := resolveFixerDBPath()
+	if got != want {
+		t.Fatalf("cwd-relative fixer.db must never be the default, got %q want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("default db path must be absolute, got %q", got)
 	}
 
 	explicitPath := filepath.Join(t.TempDir(), "custom-fixer.db")

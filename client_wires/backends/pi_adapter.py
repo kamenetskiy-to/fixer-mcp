@@ -48,6 +48,17 @@ PI_MODEL_INTERNAL_IDS: dict[str, str] = {
     "openai-codex/gpt-5.3-codex-spark": "openai-codex/gpt-5.3-codex-spark",
     "openai-codex/gpt-5.6-luna": "openai-codex/gpt-5.6-luna",
     "kimi-coding/k3": "kimi-coding/k3",
+    # MiMo 2.6 (Xiaomi). Cross-provider ids stay fully qualified; these are the
+    # ids the pi model store documents (models.json override): the OpenCode
+    # Personal account declares the pair, and both CommandCode accounts declare
+    # the xiaomi/* pair with the full low..max ladder.
+    "opencode-personal/mimo-v2.6-flash": "opencode-personal/mimo-v2.6-flash",
+    "opencode-personal/mimo-v2.6-pro": "opencode-personal/mimo-v2.6-pro",
+    "commandcode/xiaomi/mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
+    "commandcode/xiaomi/mimo-v2.6-pro": "commandcode/xiaomi/mimo-v2.6-pro",
+    # Claude Opus 5.5 (OpenCode catalog id `claude-opus-5-5`, declared on the
+    # Stas account; also catalogued as anthropic/claude-opus-5.5).
+    "opencode-stas/claude-opus-5-5": "opencode-stas/claude-opus-5-5",
 }
 
 # Session rows and Fixer-side launch configs written before this adapter existed
@@ -77,6 +88,47 @@ PI_DEFAULT_REASONING = "high"
 #     `xhigh`/`max`, which must be declared explicitly to count as supported;
 #   * a model with no map at all passes every level through.
 PI_MODEL_THINKING_LEVELS: dict[str, dict[str, str | None]] = {
+    # MiMo 2.6 per the pi model-store declarations (models.json override).
+    # OpenCode Personal declares low/medium/high only (xhigh/max clamp); the
+    # CommandCode accounts send the full low..max ladder.
+    "opencode-personal/mimo-v2.6-flash": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": None,
+        "max": None,
+    },
+    "opencode-personal/mimo-v2.6-pro": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": None,
+        "max": None,
+    },
+    "commandcode/xiaomi/mimo-v2.6-flash": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    },
+    "commandcode/xiaomi/mimo-v2.6-pro": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    },
+    # Claude Opus 5.5 (opencode-stas): the store declares xhigh/max; absent
+    # keys pass through unchanged.
+    "opencode-stas/claude-opus-5-5": {
+        "xhigh": "xhigh",
+        "max": "max",
+    },
     "deepseek-v4.1-flash": {
         "minimal": None,
         "low": None,
@@ -136,6 +188,12 @@ PI_MODEL_THINKING_LEVELS: dict[str, dict[str, str | None]] = {
 # (`pi` also installs this extension itself on first launch; Fixer MCP provisions it
 # beforehand so a failure cannot surface as a Node stack dump mid-session).
 PI_MCP_ADAPTER_PACKAGE = "pi-mcp-adapter"
+# pi only loads npm extensions listed in settings.json `packages`; the npm
+# prefix alone is not enough (fresh d0lsi host, 2026-09-25: the package
+# installed fine yet pi still rejected `--mcp-config` with "Unknown option"
+# until this entry existed). Mac/WSL carried the entry from pi's own package
+# manager, which is why the gap stayed hidden.
+PI_MCP_ADAPTER_SETTINGS_SPEC = "npm:" + PI_MCP_ADAPTER_PACKAGE
 PI_ADAPTER_PREPARE_ENV = "FIXER_PI_ADAPTER_AUTOPREPARE"
 
 
@@ -150,6 +208,58 @@ def _pi_agent_dir() -> Path:
     return Path.home() / ".pi" / "agent"
 
 
+def _ensure_settings_registration(agent: Path) -> None:
+    """Register the installed adapter in pi's settings.json `packages` list.
+
+    Idempotent: writes only when the entry is missing, preserves every other
+    settings key, and keeps the file mode. A settings file pi cannot parse is a
+    governed error (pi itself would fail on it at startup), never a silent skip.
+    """
+
+    settings_path = agent / "settings.json"
+    data: dict[str, Any] = {}
+    if settings_path.is_file():
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise PiAdapterInstallError(
+                "pi settings.json cannot be read (%s): %s\n"
+                "Fix or remove the file, then relaunch." % (exc, settings_path)
+            )
+        if not isinstance(loaded, dict):
+            raise PiAdapterInstallError(
+                "pi settings.json is not a JSON object: %s\n"
+                "Fix or remove the file, then relaunch." % settings_path
+            )
+        data = loaded
+
+    packages = data.get("packages") or []
+    if not isinstance(packages, list):
+        raise PiAdapterInstallError(
+            "pi settings.json `packages` is not a list: %s\n"
+            "Fix or remove the entry, then relaunch." % settings_path
+        )
+    if PI_MCP_ADAPTER_SETTINGS_SPEC in packages:
+        return
+
+    data["packages"] = [PI_MCP_ADAPTER_SETTINGS_SPEC] + [item for item in packages]
+    agent.mkdir(parents=True, exist_ok=True)
+    mode = (settings_path.stat().st_mode & 0o777) if settings_path.is_file() else 0o644
+    fd, tmp_name = tempfile.mkstemp(dir=str(agent), prefix=".settings.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, settings_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def ensure_mcp_adapter_extension(
     *,
     agent_dir: Path | None = None,
@@ -162,6 +272,9 @@ def ensure_mcp_adapter_extension(
     host, 2026-09-19: the same install succeeded into /tmp and on the second
     launch). Provisioning here makes it either a no-op (already installed, no npm
     call) or one actionable line; a launch never proceeds silently without MCP.
+    Once the npm package is present the adapter is also registered in
+    settings.json `packages` - that registration is what makes pi actually
+    load the extension and its `--mcp-config` flag.
 
     Set `FIXER_PI_ADAPTER_AUTOPREPARE=0` to disable (tests, or hosts where the
     extension is managed outside Fixer MCP).
@@ -174,6 +287,7 @@ def ensure_mcp_adapter_extension(
     npm_prefix = agent / "npm"
     package_json = npm_prefix / "node_modules" / PI_MCP_ADAPTER_PACKAGE / "package.json"
     if package_json.is_file():
+        _ensure_settings_registration(agent)
         return
 
     run = runner or subprocess.run
@@ -198,6 +312,7 @@ def ensure_mcp_adapter_extension(
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write("$ %s\n%s\n" % (" ".join(command), output))
             if completed.returncode == 0 and package_json.is_file():
+                _ensure_settings_registration(agent)
                 return
             problems.append("attempt %d: exit %s" % (index, completed.returncode))
 

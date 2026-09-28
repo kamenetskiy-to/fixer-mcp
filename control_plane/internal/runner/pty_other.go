@@ -20,6 +20,11 @@ func watchResize(handle io.ReadWriteCloser, done <-chan struct{}) {}
 
 func isPTYClosedPlatformErr(err error) bool { return false }
 
-func pumpInput(dst io.Writer, src io.Reader, done <-chan struct{}) {
+func pumpInput(dst io.Writer, src io.Reader, done <-chan struct{}, filter func([]byte) []byte) {
 	_, _ = io.Copy(dst, src)
+}
+
+// makeRawInput is a no-op where there is no PTY implementation to pair it with.
+func makeRawInput() (func(), error) {
+	return func() {}, ErrPTYUnsupported
 }

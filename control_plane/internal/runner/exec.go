@@ -8,10 +8,12 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fixer-mcp/control-plane/internal/ansi"
 	"github.com/fixer-mcp/control-plane/internal/registry"
@@ -39,6 +41,72 @@ type Options struct {
 	CaptureBytes int
 }
 
+// focusState tracks whether the child asked the real terminal to report focus.
+// While it did not, tmux focus reports are pure noise for us: with the operator
+// tty in canonical mode they were echoed as `^[[O^[[I` right under the child's
+// prompt, and the child never asked for them.
+type focusState struct {
+	enabled atomic.Bool
+}
+
+func (f *focusState) observe(chunk []byte) {
+	if bytes.Contains(chunk, []byte("\x1b[?1004h")) {
+		f.enabled.Store(true)
+	}
+	if bytes.Contains(chunk, []byte("\x1b[?1004l")) {
+		f.enabled.Store(false)
+	}
+}
+
+func (f *focusState) filter(data []byte) []byte {
+	if f.enabled.Load() {
+		return data
+	}
+	return stripFocusEvents(data)
+}
+
+// stripFocusEvents removes CSI I / CSI O (focus in / focus out) sequences.
+func stripFocusEvents(data []byte) []byte {
+	if !bytes.Contains(data, []byte("\x1b[")) {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] == 0x1b && i+2 < len(data) && data[i+1] == '[' && (data[i+2] == 'I' || data[i+2] == 'O') {
+			i += 2
+			continue
+		}
+		out = append(out, data[i])
+	}
+	return out
+}
+
+// observedWriter mirrors the child's terminal requests while forwarding its
+// output to the operator terminal and the capture ring.
+func observedWriter(out io.Writer, ring *Ring, focus *focusState) io.Writer {
+	writers := make([]io.Writer, 0, 2)
+	if out != nil {
+		writers = append(writers, out)
+	}
+	if ring != nil {
+		writers = append(writers, ring)
+	}
+	if len(writers) == 0 {
+		return io.Discard
+	}
+	return &focusObserveWriter{inner: io.MultiWriter(writers...), state: focus}
+}
+
+type focusObserveWriter struct {
+	inner io.Writer
+	state *focusState
+}
+
+func (w *focusObserveWriter) Write(p []byte) (int, error) {
+	w.state.observe(p)
+	return w.inner.Write(p)
+}
+
 // ExecCommand is a tea.ExecCommand implementation that runs the entry under a
 // PTY, streams output to the terminal Bubble Tea hands over, and keeps a
 // bounded tail for the post-run menu summary.
@@ -53,6 +121,10 @@ type ExecCommand struct {
 
 	ring *Ring
 	err  error
+
+	// focus mirrors the child's focus-reporting request so we only forward the
+	// terminal's focus events when the child actually asked for them.
+	focus focusState
 }
 
 // NewExecCommand builds a PTY-backed command for the resolved entry.
@@ -114,6 +186,15 @@ func (c *ExecCommand) Run() error {
 	done := make(chan struct{})
 	watchResize(handle, done)
 
+	// The child owns a PTY of its own, so the operator's real tty is ours to
+	// manage while it runs. Leaving it canonical (what Bubble Tea's terminal
+	// release does) meant tmux focus reports were echoed under the child's
+	// prompt, and Ctrl+C was swallowed by our own signal handler instead of
+	// reaching the child. Raw mode hands the bytes through untouched.
+	if restoreInput, rawErr := makeRawInput(); rawErr == nil {
+		defer restoreInput()
+	}
+
 	// The input pump must stop before Run returns: Bubble Tea restarts its own
 	// input reader right after the child exits, and a pump still blocked in a
 	// read would swallow the next keystroke. pumpInput guarantees that by
@@ -123,7 +204,7 @@ func (c *ExecCommand) Run() error {
 		pump.Add(1)
 		go func() {
 			defer pump.Done()
-			pumpInput(handle, c.stdin, done)
+			pumpInput(handle, c.stdin, done, c.focus.filter)
 		}()
 	}
 
@@ -133,17 +214,8 @@ func (c *ExecCommand) Run() error {
 	if out == nil {
 		out = c.stderr
 	}
-	writers := make([]io.Writer, 0, 2)
-	if out != nil {
-		writers = append(writers, out)
-	}
-	writers = append(writers, c.ring)
-	var dst io.Writer = io.Discard
-	if len(writers) > 0 {
-		dst = io.MultiWriter(writers...)
-	}
 
-	_, copyErr := io.Copy(dst, handle)
+	_, copyErr := io.Copy(observedWriter(out, c.ring, &c.focus), handle)
 	waitErr := cmd.Wait()
 
 	// The child is gone. Close the PTY and stop forwarding input before Run

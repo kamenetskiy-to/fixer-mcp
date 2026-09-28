@@ -339,6 +339,43 @@ func isParallelWaveWorkerSession(globalSessionID, projectID int) (bool, error) {
 	return count > 0, nil
 }
 
+// waveGovernanceOwnsSessionTransition reports whether the owning wave's state
+// machine still governs this session transition. Wave ownership ends for
+// review -> completed bookkeeping once the wave reached the acceptance phase
+// (the Fixer's review attestation is recorded there), and always once the wave
+// is completed. This keeps the wave control plane authoritative in flight while
+// making sure a reviewed wave can never strand its sessions
+// (backlog 143/205, feedback #8/#12/#47/#93).
+func waveGovernanceOwnsSessionTransition(globalSessionID, projectID int, currentStatus, targetStatus string) (bool, error) {
+	if !dbTableHasColumn("parallel_wave_worker", "session_id") {
+		return false, nil
+	}
+	var phase string
+	err := db.QueryRow(
+		`SELECT w.phase
+		 FROM parallel_wave w
+		 JOIN parallel_wave_worker pw ON pw.wave_id = w.id AND pw.project_id = w.project_id
+		 WHERE pw.session_id = ? AND pw.project_id = ?
+		 ORDER BY w.id DESC
+		 LIMIT 1`,
+		globalSessionID,
+		projectID,
+	).Scan(&phase)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if phase == parallelWavePhaseCompleted {
+		return false, nil
+	}
+	if phase == parallelWavePhaseAcceptance && currentStatus == "review" && targetStatus == "completed" {
+		return false, nil
+	}
+	return true, nil
+}
+
 func CompleteTask(ctx context.Context, req *mcp.CallToolRequest, input CompleteTaskInput) (*mcp.CallToolResult, CompleteTaskOutput, error) {
 	if authorizedRole != "netrunner" {
 		return &mcp.CallToolResult{IsError: true}, CompleteTaskOutput{}, fmt.Errorf("access denied: requires netrunner role")
@@ -564,10 +601,18 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 	if waveWorker, err := isParallelWaveWorkerSession(targetSessionID, projectId); err != nil {
 		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", err)
 	} else if waveWorker {
-		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf(
-			"wave-linked session %d lifecycle is governed by Netrunner submission and wave review; use complete_task or wave phase actions",
-			visibleSessionID,
-		)
+		governed, err := waveGovernanceOwnsSessionTransition(targetSessionID, projectId, currentStatus, targetStatus)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
+		if governed {
+			return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf(
+				"wave-linked session %d lifecycle is governed by Netrunner submission and wave review; "+
+					"use complete_task or wave phase actions (transition_netrunner_wave_phase to acceptance first, "+
+					"then close sessions)",
+				visibleSessionID,
+			)
+		}
 	}
 
 	control, _, err := fetchOrchestrationControl(projectId)

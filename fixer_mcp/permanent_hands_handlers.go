@@ -245,10 +245,35 @@ const handsInstructionSelectColumns = `
 	COALESCE(compat_session_id, 0), revision, created_at, updated_at,
 	COALESCE(terminal_at, ''), COALESCE(instruction_envelope_json, '{}')`
 
+// handsLanePersistable reports whether a provider can be stored in
+// hands_instruction.requested_lane / project_hands.default_lane. The schema
+// CHECK list is the authority: advertising a lane SQLite would reject only
+// moves the failure to INSERT time, and a preset launch then dies with
+// "Provider 'pi' is not a registered Project Hands lane". `pi` stays a first
+// class *agent* backend; it is simply not a Project Hands lane.
+func handsLanePersistable(provider string) bool {
+	switch provider {
+	case "codex", "commandcode", "claude", "kimi-code", "antigravity", "grok":
+		return true
+	default:
+		return false
+	}
+}
+
+func handsLaneNames() []string {
+	return []string{"codex", "commandcode", "claude", "kimi-code", "antigravity", "grok"}
+}
+
 func readHandsLanes() []HandsProviderLane {
 	lanes := make([]HandsProviderLane, 0, 7)
 	for _, provider := range []string{"commandcode", "codex", "claude", "kimi-code", "antigravity", "grok", "pi"} {
-		model, reasoning, _ := handsProviderConfig(provider)
+		if !handsLanePersistable(provider) {
+			continue
+		}
+		model, reasoning, ok := handsProviderConfig(provider)
+		if !ok {
+			continue
+		}
 		lanes = append(lanes, HandsProviderLane{Provider: provider, Model: model, Reasoning: reasoning})
 	}
 	return lanes
@@ -702,6 +727,12 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 	model, reasoning, ok := handsProviderConfig(requestedLane)
 	if !ok {
 		return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, fmt.Errorf("unsupported Hands provider %q", requestedLane)
+	}
+	if !handsLanePersistable(requestedLane) {
+		return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, fmt.Errorf(
+			"%q is not a registered Project Hands lane; choose one of: %s",
+			requestedLane, strings.Join(handsLaneNames(), ", "),
+		)
 	}
 	riskClass := "read_only"
 	reviewPolicy := "auto_read_only"

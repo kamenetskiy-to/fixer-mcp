@@ -143,22 +143,173 @@ func normalizeProjectCWD(raw string) (string, error) {
 	return normalized, nil
 }
 
-func findProjectByCWD(normalizedCWD string) (int, string, string, error) {
+// normalizeProjectIdentityKey reduces a caller-declared identity to a stable
+// canonical form. Identity keys are normalized git remote URLs or operator
+// slugs: case, a trailing slash and a trailing .git suffix are not identity.
+func normalizeProjectIdentityKey(raw string) string {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	key = strings.TrimSuffix(key, "/")
+	key = strings.TrimSuffix(key, ".git")
+	key = strings.TrimSuffix(key, "/")
+	return strings.TrimSpace(key)
+}
+
+// findProjectByIdentityKey resolves a project by its caller-declared identity.
+// It returns sql.ErrNoRows when no project owns the key yet.
+func findProjectByIdentityKey(identityKey string) (int, string, string, error) {
+	var projectID int
+	var projectName string
+	var projectCWD string
+	err := db.QueryRow(
+		`SELECT id, name, cwd
+		 FROM project
+		 WHERE identity_key = ?
+		 ORDER BY id
+		 LIMIT 1`,
+		identityKey,
+	).Scan(&projectID, &projectName, &projectCWD)
+	return projectID, projectName, projectCWD, err
+}
+
+// findProjectByKnownPath resolves a cwd against every registered path: the
+// canonical project.cwd plus any project_path_alias rows. Nested paths under a
+// known root still resolve to that root, so longest known path wins.
+func findProjectByKnownPath(normalizedCWD string) (int, string, string, error) {
 	var projectID int
 	var projectName string
 	var projectCWD string
 	err := db.QueryRow(
 		`
 		SELECT id, name, cwd
-		FROM project
-		WHERE cwd = ? OR ? LIKE cwd || '/%'
-		ORDER BY LENGTH(cwd) DESC
+		FROM (
+			SELECT p.id AS id, p.name AS name, p.cwd AS cwd, p.cwd AS known_path
+			FROM project p
+			UNION ALL
+			SELECT p.id AS id, p.name AS name, p.cwd AS cwd, a.path AS known_path
+			FROM project_path_alias a
+			JOIN project p ON p.id = a.project_id
+		)
+		WHERE known_path = ? OR ? LIKE known_path || '/%'
+		ORDER BY LENGTH(known_path) DESC, id ASC
 		LIMIT 1
 		`,
 		normalizedCWD,
 		normalizedCWD,
 	).Scan(&projectID, &projectName, &projectCWD)
 	return projectID, projectName, projectCWD, err
+}
+
+func findProjectByCWD(normalizedCWD string) (int, string, string, error) {
+	return findProjectByKnownPath(normalizedCWD)
+}
+
+// findProjectByCWDOrIdentity prefers an existing identity binding over the
+// incoming path. With an empty identity key it is exactly the legacy
+// path-keyed lookup.
+func findProjectByCWDOrIdentity(normalizedCWD string, identityKey string) (int, string, string, error) {
+	normalizedIdentity := normalizeProjectIdentityKey(identityKey)
+	if normalizedIdentity != "" {
+		projectID, projectName, projectCWD, err := findProjectByIdentityKey(normalizedIdentity)
+		if err == nil {
+			return projectID, projectName, projectCWD, nil
+		}
+		if err != sql.ErrNoRows {
+			return 0, "", "", err
+		}
+	}
+	return findProjectByKnownPath(normalizedCWD)
+}
+
+// assignProjectIdentityKey binds an identity to a project only when the project
+// has no identity yet. Reassigning a project to a different key is refused so
+// two identities can never collapse into one project by accident.
+func assignProjectIdentityKey(projectID int, normalizedIdentity string) error {
+	if normalizedIdentity == "" {
+		return nil
+	}
+	var existing sql.NullString
+	if err := db.QueryRow(`SELECT identity_key FROM project WHERE id = ?`, projectID).Scan(&existing); err != nil {
+		return err
+	}
+	if existing.Valid {
+		current := normalizeProjectIdentityKey(existing.String)
+		if current != "" {
+			if current != normalizedIdentity {
+				return fmt.Errorf(
+					"identity_key conflict: project %d is already bound to identity_key %q and cannot be rebound to %q; use a distinct identity_key or resolve the projects explicitly",
+					projectID,
+					current,
+					normalizedIdentity,
+				)
+			}
+			return nil
+		}
+	}
+	_, err := db.Exec(
+		`UPDATE project SET identity_key = ? WHERE id = ? AND (identity_key IS NULL OR TRIM(identity_key) = '')`,
+		normalizedIdentity,
+		projectID,
+	)
+	return err
+}
+
+// registerProjectPathAlias records an incoming path as an alias of an existing
+// project. A path already owned by another project is never silently stolen.
+func registerProjectPathAlias(aliasPath string, projectID int) error {
+	if aliasPath == "" || projectID <= 0 {
+		return fmt.Errorf("path alias registration requires a path and a project id")
+	}
+
+	var ownerID int
+	err := db.QueryRow(`SELECT id FROM project WHERE cwd = ?`, aliasPath).Scan(&ownerID)
+	switch {
+	case err == nil:
+		if ownerID != projectID {
+			return projectPathAliasConflictError(aliasPath, ownerID, projectID)
+		}
+		return nil
+	case err != sql.ErrNoRows:
+		return err
+	}
+
+	err = db.QueryRow(`SELECT project_id FROM project_path_alias WHERE path = ?`, aliasPath).Scan(&ownerID)
+	switch {
+	case err == nil:
+		if ownerID != projectID {
+			return projectPathAliasConflictError(aliasPath, ownerID, projectID)
+		}
+		return nil
+	case err != sql.ErrNoRows:
+		return err
+	}
+
+	_, err = db.Exec(
+		`INSERT INTO project_path_alias (path, project_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)`,
+		aliasPath,
+		projectID,
+	)
+	if err != nil {
+		// A concurrent writer may have claimed the path between the checks and
+		// the insert; re-read the owner and fail closed instead of trusting the
+		// write error text.
+		if rereadErr := db.QueryRow(`SELECT project_id FROM project_path_alias WHERE path = ?`, aliasPath).Scan(&ownerID); rereadErr == nil {
+			if ownerID != projectID {
+				return projectPathAliasConflictError(aliasPath, ownerID, projectID)
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func projectPathAliasConflictError(aliasPath string, ownerID int, projectID int) error {
+	return fmt.Errorf(
+		"path conflict: %q is already registered to project %d; refusing to reassign it to project %d. Register a distinct cwd or resolve the duplicate project explicitly before retrying",
+		aliasPath,
+		ownerID,
+		projectID,
+	)
 }
 
 func defaultProjectName(cwd string) string {

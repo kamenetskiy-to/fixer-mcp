@@ -147,6 +147,11 @@ def run_doctor(
     launcher_db, launcher_db_error = "", ""
     if not is_dev and os.path.isdir(current_link):
         launcher_db, launcher_db_error = _launcher_resolved_db_path(current_link)
+    if launcher_db_error and "Could not locate" in launcher_db_error:
+        # Fresh install: no database exists yet. The report already records
+        # that as `uninitialized (will initialize on first launch)`, so it must
+        # not be reported as an installation issue and make `fixer doctor` fail.
+        launcher_db, launcher_db_error = "", ""
     if launcher_db_error:
         issues.append(f"Launcher database resolution failed: {launcher_db_error}")
     elif launcher_db and os.path.abspath(launcher_db) != os.path.abspath(d_path):

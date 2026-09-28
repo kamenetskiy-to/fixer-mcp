@@ -145,6 +145,21 @@ def is_bypass_command(args: List[str]) -> bool:
     return False
 
 
+def is_known_wire_flag(arg: str) -> bool:
+    """Explicit wire flags stay invocable; an unknown *word* must not.
+
+    The Super-TUI owns operator work. An unrecognised positional argument used
+    to be forwarded straight into `client_wires/fixer_wire.py`, which dropped
+    the operator into the legacy line palette (``Register project name``,
+    ``Project Hands workspace mode``). Flag-driven automation keeps working;
+    stray words now fail loudly instead.
+    """
+
+    if not arg.startswith("-"):
+        return False
+    return True
+
+
 def maybe_prompt_and_update(engine: InstallEngine) -> None:
     """
     Check for update before normal interactive entry and prompt user if appropriate.
@@ -283,6 +298,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         # Pass directly without update check
         launch_wire_entrypoint(engine.managed_root, argv)
         return
+
+    if not is_known_wire_flag(argv[0]):
+        sys.stderr.write(
+            f"Unknown command {argv[0]!r}. Open the operator console with `fixer`, "
+            "or run `fixer help`.\n"
+        )
+        sys.exit(2)
 
     # Normal command invocation: prompt if interactive then launch
     maybe_prompt_and_update(engine)

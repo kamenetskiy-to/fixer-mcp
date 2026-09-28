@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -48,10 +50,6 @@ var overseerToolNames = []string{
 	"set_project_doc_language",
 	"get_project_doc_localization_status",
 	"set_project_doc_title_localizations",
-	"get_project_balance",
-	"credit_project_balance",
-	"set_fixer_spend_authority",
-	"get_balance_ledger",
 	"get_session",
 	"get_netrunner_transcript_path",
 	"submit_fixer_mcp_feedback",
@@ -111,9 +109,6 @@ var fixerToolNames = []string{
 	"export_project_context_package",
 	"import_project_context_package",
 	"export_project_doc_bundle",
-	"get_project_balance",
-	"record_fixer_spend",
-	"get_balance_ledger",
 	"get_session",
 	"list_project_sessions",
 	"get_netrunner_transcript_path",
@@ -182,6 +177,25 @@ var adminBackcompatToolNames = []string{
 	"clear_project_handoff",
 }
 
+// economyToolNames is the retired R1 economy/balance surface. It belongs to no
+// runtime tool surface by default: the R1 track that owned wallets, balances
+// and Fixer spend authority is frozen (see the R1 architect checkpoint), and a
+// zero-allowance balance only confuses Fixers into thinking spend is blocked.
+// Restore explicitly with FIXER_MCP_ENABLE_ECONOMY=1; the handlers
+// (economy_handlers.go) and schema tables are permanent.
+var economyToolNames = []string{
+	"get_project_balance",
+	"credit_project_balance",
+	"set_fixer_spend_authority",
+	"get_balance_ledger",
+	"record_fixer_spend",
+}
+
+func economyToolsEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("FIXER_MCP_ENABLE_ECONOMY"))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "on")
+}
+
 func appendUniqueToolNames(names []string, additions ...[]string) []string {
 	seen := make(map[string]struct{}, len(names))
 	out := make([]string, 0, len(names))
@@ -208,16 +222,18 @@ func registeredToolNamesForMode(lockedRole string) []string {
 	names := appendUniqueToolNames(nil, bootstrapToolNames)
 	switch lockedRole {
 	case "":
-		return appendUniqueToolNames(names, netrunnerToolNames, fixerToolNames, overseerToolNames, adminBackcompatToolNames)
+		names = appendUniqueToolNames(names, netrunnerToolNames, fixerToolNames, overseerToolNames, adminBackcompatToolNames)
 	case "overseer":
-		return appendUniqueToolNames(names, overseerToolNames)
+		names = appendUniqueToolNames(names, overseerToolNames)
 	case "fixer":
-		return appendUniqueToolNames(names, fixerToolNames)
+		names = appendUniqueToolNames(names, fixerToolNames)
 	case "netrunner":
-		return appendUniqueToolNames(names, netrunnerToolNames)
-	default:
-		return names
+		names = appendUniqueToolNames(names, netrunnerToolNames)
 	}
+	if economyToolsEnabled() && lockedRole != "netrunner" {
+		names = appendUniqueToolNames(names, economyToolNames)
+	}
+	return names
 }
 
 func addMcpTool[In, Out any](server *mcp.Server, name string, description string, handler mcp.ToolHandlerFor[In, Out]) {
@@ -268,7 +284,7 @@ func registerNetrunnerGateTools(server *mcp.Server) {
 
 func registerOverseerTools(server *mcp.Server) {
 	addMcpTool(server, "get_projects", "List all projects. Requires overseer role.", GetProjects)
-	addMcpTool(server, "register_project", "Register a project cwd globally. Requires overseer role.", RegisterProject)
+	addMcpTool(server, "register_project", "Register a project cwd globally, optionally binding a stable identity_key (normalized git remote URL or operator slug) so the same project resolves across hosts and paths. Requires overseer role.", RegisterProject)
 	addMcpTool(server, "get_all_sessions", "List all active tasks/sessions across all projects. Requires overseer role.", GetAllSessions)
 	addMcpTool(server, "add_backlog_item", "Add a project-scoped backlog item. Fixer uses the bound project; overseer must provide project_id.", AddBacklogItem)
 	addMcpTool(server, "get_backlog_items", "List project-scoped backlog items. Fixer uses the bound project; overseer must provide project_id.", GetBacklogItems)
@@ -294,10 +310,6 @@ func registerOverseerTools(server *mcp.Server) {
 	addMcpTool(server, "set_project_doc_language", "Set the one active localized-title language for a project. English disables localized-title requirements. Overseer must provide project_id.", SetProjectDocLanguage)
 	addMcpTool(server, "get_project_doc_localization_status", "List canonical project-doc titles and localization gaps for the project's active documentation language. Overseer must provide project_id.", GetProjectDocLocalizationStatus)
 	addMcpTool(server, "set_project_doc_title_localizations", "Bulk upsert localized project-doc titles for the project's active documentation language. Overseer must provide project_id.", SetProjectDocTitleLocalizations)
-	addMcpTool(server, "get_project_balance", "Read a project's abstract balance and Fixer spend authority. Overseer must pass project_id.", GetProjectBalance)
-	addMcpTool(server, "credit_project_balance", "Credit a project's abstract balance and write an audit ledger entry. Requires overseer role.", CreditProjectBalance)
-	addMcpTool(server, "set_fixer_spend_authority", "Set a project's Fixer spend authority and write an audit ledger entry. Requires overseer role.", SetFixerSpendAuthority)
-	addMcpTool(server, "get_balance_ledger", "Read recent project balance ledger rows. Overseer must pass project_id.", GetBalanceLedger)
 	addMcpTool(server, "get_session", "Read one session by ID. Fixer/netrunner are project-scoped, overseer can read any session.", GetSession)
 	addMcpTool(server, "get_netrunner_transcript_path", "Resolve local transcript path metadata for a project-scoped Netrunner session without reading transcript content. Fixer uses bound project; overseer must pass project_id.", GetNetrunnerTranscriptPath)
 	addMcpTool(server, "submit_fixer_mcp_feedback", "Submit cross-project feedback to Fixer MCP. Fixer uses bound project; overseer must pass project_id.", SubmitFixerMcpFeedback)
@@ -357,9 +369,6 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "export_project_context_package", "Export the project context (overview, handoff, doc tree, backlog, lightweight session index) into a portable JSON package file. Fixer exports the bound project; overseer must pass project_id.", ExportProjectContextPackage)
 	addMcpTool(server, "import_project_context_package", "Import a portable project-context JSON package into the project: overview, handoff, doc tree (parent links via slug/path), backlog (deduped by title). Refuses non-empty projects unless force=true. Fixer imports into the bound project; overseer must pass project_id.", ImportProjectContextPackage)
 	addMcpTool(server, "export_project_doc_bundle", "Export selected canonical project docs as a portable ZIP bundle. Requires fixer role and compact project-scoped document IDs.", ExportProjectDocBundle)
-	addMcpTool(server, "get_project_balance", "Read the current project's abstract balance and Fixer spend authority. Requires fixer role.", GetProjectBalance)
-	addMcpTool(server, "record_fixer_spend", "Record a Fixer spend under granted authority, decrementing balance and allowance atomically. Requires fixer role.", RecordFixerSpend)
-	addMcpTool(server, "get_balance_ledger", "Read recent balance ledger rows for the current project. Requires fixer role.", GetBalanceLedger)
 	addMcpTool(server, "get_session", "Read one session by ID. Fixer/netrunner are project-scoped, overseer can read any session.", GetSession)
 	addMcpTool(server, "list_project_sessions", "List/search recent project-scoped Netrunner sessions with compact metadata (status, task summary, backend/model/reasoning, wave linkage, timestamps), bounded and paginated. Use this instead of direct SQLite/CLI archaeology to discover historical sessions. Requires fixer role.", ListProjectSessions)
 	addMcpTool(server, "get_netrunner_transcript_path", "Resolve local transcript path metadata for a project-scoped Netrunner session without reading transcript content. Fixer uses bound project; overseer must pass project_id.", GetNetrunnerTranscriptPath)
@@ -447,4 +456,17 @@ func registerMcpTools(server *mcp.Server, lockedRole string) {
 	default:
 		registerLegacyTools(server)
 	}
+	if economyToolsEnabled() && lockedRole != "netrunner" {
+		registerEconomyTools(server)
+	}
+}
+
+// registerEconomyTools restores the retired R1 economy/balance surface. Only
+// called when FIXER_MCP_ENABLE_ECONOMY opts in; see economyToolNames.
+func registerEconomyTools(server *mcp.Server) {
+	addMcpTool(server, "get_project_balance", "Read a project's abstract balance and Fixer spend authority. Overseer must pass project_id.", GetProjectBalance)
+	addMcpTool(server, "credit_project_balance", "Credit a project's abstract balance and write an audit ledger entry. Requires overseer role.", CreditProjectBalance)
+	addMcpTool(server, "set_fixer_spend_authority", "Set a project's Fixer spend authority and write an audit ledger entry. Requires overseer role.", SetFixerSpendAuthority)
+	addMcpTool(server, "get_balance_ledger", "Read recent project balance ledger rows. Overseer must pass project_id.", GetBalanceLedger)
+	addMcpTool(server, "record_fixer_spend", "Record a Fixer spend under granted authority, decrementing balance and allowance atomically. Requires fixer role.", RecordFixerSpend)
 }

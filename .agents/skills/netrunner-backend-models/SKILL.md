@@ -21,7 +21,7 @@ OpenAI subscription work goes through `pi`; the standalone `codex` backend is re
 |---|---|---|
 | Simple / mechanical / breadth | `pi + openai-codex/gpt-5.6-luna + high` **or** `antigravity + Gemini 3.8 Flash + high` | The two interchangable mass routes. Prefer whichever has live capacity; Flash models take `low`/`medium`/`high` as the effort flag; Claude-in-Antigravity encodes thinking in the model name. |
 | Medium implementation | `antigravity + Gemini 3.8 Flash + high` | Gemini may take medium tasks; `pi + gpt-5.6-luna + high` is also acceptable for medium work. |
-| Complex implementation or research | `pi + opencode-go/deepseek-v4.1-flash + high` (escalate to `max`) | Reserved for complex work: this is the strongest self-selected route. Sendable levels on this model are `high` and `max` only. |
+| Complex implementation or research | `pi + opencode-personal/mimo-v2.6-pro + high`, or `pi + commandcode/xiaomi/mimo-v2.6-pro + high\|max` for the full ladder (`pi + opencode-go/deepseek-v4.1-flash + high\|max` remains valid) | MiMo 2.6 Pro is the Architect-preferred complex route (cheaper/stronger per his benchmarks); DeepSeek stays fully supported. Sendable: MiMo OpenCode `low/medium/high` (max clamps), MiMo CommandCode `low..max`, DeepSeek `high`/`max` only. |
 | Base harness (Pi) | `pi` | One CLI over the OpenAI, OpenCode Go and CommandCode subscriptions. MCP arrives only through the installed `pi-mcp-adapter` extension. |
 | Browser/UI or Gemini-native | `antigravity + Gemini 3.8 Flash + high` | Same as the medium route. |
 | Kimi-native or very large context | `kimi-code + kimi-k3` | Optional; use `kimi-k3-256k` when the larger context is genuinely needed. |
@@ -44,8 +44,9 @@ Retired or off by default:
 ## Hard bans and cautions
 
 - Claude Fable remains banned.
+- MiMo 2.6 (Pro/Flash) is the preferred alternative to DeepSeek for new route selections: the Architect's benchmark-based preference (cheaper, stronger; Pro especially strong). Existing DeepSeek routes stay valid; this is routing preference, never proof of acceptance quality.
 - The ordinary-worker mass routes are `pi + openai-codex/gpt-5.6-luna + high` and `antigravity + Gemini 3.8 Flash + high`; complex work goes to `pi + deepseek-v4.1-flash + high|max` (Architect decision, 2026-09-19). The `codex` backend is retired for waves.
-- Fallback rule: when `check-my-limits` shows the OpenAI (Codex) subscription windows low, move simple workers to `antigravity + Gemini 3.8 Flash` and complex ones to `pi + deepseek-v4.1-flash`, and say so in the launch report. Never silently switch a worker off the named route mid-wave.
+- Fallback rule: when `check-my-limits` shows the OpenAI (Codex) subscription windows low, move simple workers to `antigravity + Gemini 3.8 Flash` and complex ones to `pi + opencode-personal/mimo-v2.6-pro` (or `pi + commandcode/xiaomi/mimo-v2.6-pro` when `max` is needed; `pi + deepseek-v4.1-flash` where MiMo is not configured), and say so in the launch report. Never silently switch a worker off the named route mid-wave.
 - Host policy is canon everywhere: the Ubuntu operator host and `macbook-air-lizok` install the canonical model policy from this skill. There is no host-local model override.
 - Muse Spark Contributor via OpenCode Go remains an explicit non-default option; do not silently treat allowance availability as execution proof.
 - MiniMax M3 remains optional speculative breadth until endpoint latency and load are measured.

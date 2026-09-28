@@ -1,20 +1,21 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
-// Screen is one of the three stable operator workspaces.
+// Screen is one of the three stable operator spaces.
 type Screen string
 
 const (
 	ScreenWork      Screen = "work"
 	ScreenResources Screen = "resources"
 	ScreenMachines  Screen = "machines"
-	ScreenNetwork   Screen = "network"
-	ScreenFleet     Screen = "fleet"
 )
 
-// SessionState describes the lifecycle independently from whether its terminal
-// is currently attached to the console.
+// SessionState describes a local terminal carrier independently from the
+// canonical MCP session lifecycle.
 type SessionState string
 
 const (
@@ -25,8 +26,8 @@ const (
 	SessionFailed   SessionState = "failed"
 )
 
-// Project is a user-facing project identity. Path is deliberately local to a
-// host; a remote host may use a different path for the same logical project.
+// Project is a local UI bookmark, not a canonical project record. The MCP
+// resolves project identity and work state from the selected path.
 type Project struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
@@ -36,9 +37,9 @@ type Project struct {
 	Pinned     bool      `json:"pinned,omitempty"`
 }
 
-// LaunchProfile is a saved, editable launch card. It stores choices, never
-// credentials or provider secrets.
-type LaunchProfile struct {
+// LaunchDraft is a local, editable launch-card draft. It stores choices, never
+// credentials, project records, or provider secrets.
+type LaunchDraft struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
 	Kind        string `json:"kind"`
@@ -52,10 +53,10 @@ type LaunchProfile struct {
 	MCPMode     string `json:"mcp_mode,omitempty"`
 }
 
-// Session is durable enough to rediscover a detached process after restarting
-// the console. Command is a resolved executable plus arguments; Env is not
-// persisted because it can contain secrets.
-type Session struct {
+// LocalContext contains only enough terminal-carrier metadata to reconnect to
+// a locally started tmux process. It is never presented as canonical project
+// work; that comes from Fixer MCP.
+type LocalContext struct {
 	ID          string       `json:"id"`
 	Title       string       `json:"title"`
 	Kind        string       `json:"kind"`
@@ -74,45 +75,89 @@ type Session struct {
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
-// State is local console state. Project/workroom records remain owned by Fixer
-// MCP; this file only remembers the operator's local view and detached shells.
+// State is only a private UI cache: recent paths, launch-card drafts, and
+// local terminal-carrier metadata. It is explicitly not a project/session DB.
 type State struct {
-	Version         int             `json:"version"`
-	LastProjectID   string          `json:"last_project_id,omitempty"`
-	Projects        []Project       `json:"projects,omitempty"`
-	Profiles        []LaunchProfile `json:"profiles,omitempty"`
-	Sessions        []Session       `json:"sessions,omitempty"`
-	SelectedProfile string          `json:"selected_profile,omitempty"`
+	Version        int            `json:"version"`
+	LastProjectID  string         `json:"last_project_id,omitempty"`
+	RecentProjects []Project      `json:"recent_projects,omitempty"`
+	LaunchDrafts   []LaunchDraft  `json:"launch_drafts,omitempty"`
+	LocalContexts  []LocalContext `json:"local_contexts,omitempty"`
+	SelectedDraft  string         `json:"selected_draft,omitempty"`
 }
 
 func (s *State) Normalize() {
-	if s.Version == 0 {
-		s.Version = 1
+	if s.Version < 2 {
+		s.Version = 2
 	}
-	if s.Projects == nil {
-		s.Projects = []Project{}
+	if s.RecentProjects == nil {
+		s.RecentProjects = []Project{}
 	}
-	if s.Profiles == nil {
-		s.Profiles = []LaunchProfile{}
+	if s.LaunchDrafts == nil {
+		s.LaunchDrafts = []LaunchDraft{}
 	}
-	if s.Sessions == nil {
-		s.Sessions = []Session{}
+	if s.LocalContexts == nil {
+		s.LocalContexts = []LocalContext{}
 	}
 }
 
-func (s *State) ProjectByID(id string) *Project {
-	for i := range s.Projects {
-		if s.Projects[i].ID == id {
-			return &s.Projects[i]
+// UnmarshalJSON migrates the old console.json shape in place. The old names
+// implied project/session ownership; retaining only this read migration keeps
+// existing tmux contexts reconnectable while all new writes use cache-only
+// names.
+func (s *State) UnmarshalJSON(data []byte) error {
+	type stateWire struct {
+		Version        int            `json:"version"`
+		LastProjectID  string         `json:"last_project_id"`
+		RecentProjects []Project      `json:"recent_projects"`
+		LaunchDrafts   []LaunchDraft  `json:"launch_drafts"`
+		LocalContexts  []LocalContext `json:"local_contexts"`
+		SelectedDraft  string         `json:"selected_draft"`
+		// Legacy keys written by console versions before the MCP work view.
+		Projects        []Project      `json:"projects"`
+		Profiles        []LaunchDraft  `json:"profiles"`
+		Sessions        []LocalContext `json:"sessions"`
+		SelectedProfile string         `json:"selected_profile"`
+	}
+	var raw stateWire
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.Version = raw.Version
+	s.LastProjectID = raw.LastProjectID
+	s.RecentProjects = raw.RecentProjects
+	if s.RecentProjects == nil {
+		s.RecentProjects = raw.Projects
+	}
+	s.LaunchDrafts = raw.LaunchDrafts
+	if s.LaunchDrafts == nil {
+		s.LaunchDrafts = raw.Profiles
+	}
+	s.LocalContexts = raw.LocalContexts
+	if s.LocalContexts == nil {
+		s.LocalContexts = raw.Sessions
+	}
+	s.SelectedDraft = raw.SelectedDraft
+	if s.SelectedDraft == "" {
+		s.SelectedDraft = raw.SelectedProfile
+	}
+	s.Normalize()
+	return nil
+}
+
+func (s *State) RecentProjectByID(id string) *Project {
+	for i := range s.RecentProjects {
+		if s.RecentProjects[i].ID == id {
+			return &s.RecentProjects[i]
 		}
 	}
 	return nil
 }
 
-func (s *State) SessionByID(id string) *Session {
-	for i := range s.Sessions {
-		if s.Sessions[i].ID == id {
-			return &s.Sessions[i]
+func (s *State) LocalContextByID(id string) *LocalContext {
+	for i := range s.LocalContexts {
+		if s.LocalContexts[i].ID == id {
+			return &s.LocalContexts[i]
 		}
 	}
 	return nil

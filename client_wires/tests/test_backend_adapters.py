@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from client_wires.backends.claude_adapter import ClaudeCodeBackendAdapter
@@ -55,6 +56,10 @@ def test_claude_headless_command_forwards_explicit_opus_5_and_xhigh() -> None:
         prompt="implement the task",
     )
 
+    # The adapter resolves the MCP config against the runtime cwd, so the
+    # expectation must not hardcode one checkout path (wave workers run in
+    # their own git worktrees).
+    expected_mcp_config = str((Path.cwd() / ".mcp.json").resolve())
     assert command == [
         "claude",
         "--print",
@@ -63,7 +68,7 @@ def test_claude_headless_command_forwards_explicit_opus_5_and_xhigh() -> None:
         "--effort",
         "xhigh",
         "--mcp-config",
-        "/home/operator/Desktop/projects/self_orchestration/.mcp.json",
+        expected_mcp_config,
         "--strict-mcp-config",
         "--permission-mode",
         "bypassPermissions",
