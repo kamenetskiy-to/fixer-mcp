@@ -24,6 +24,8 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install pytest
       - name: Run client_wires unit tests
+        env:
+          FIXER_STATE_DIR: ${{ runner.temp }}/test-state
         run: |
           set +e
           python3 -m unittest discover -s client_wires/tests > /tmp/unittest.log 2>&1
@@ -38,6 +40,8 @@ jobs:
           fi
           exit $rc
       - name: Run Go test suites
+        env:
+          FIXER_STATE_DIR: ${{ runner.temp }}/test-state-go
         run: |
           set +e
           make test-go > /tmp/gotest.log 2>&1
