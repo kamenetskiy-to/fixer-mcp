@@ -44,7 +44,7 @@ jobs:
           rc=$?
           tail -60 /tmp/gotest.log
           if [ "$rc" -ne 0 ]; then
-            grep -E '^(--- FAIL:|FAIL|panic:|    [a-z_/]+\.go:)' /tmp/gotest.log | head -40 | while IFS= read -r line; do
+            grep -E '(--- FAIL:|^FAIL|^panic:|^# |\.go:[0-9]+)' /tmp/gotest.log | head -40 | while IFS= read -r line; do
               echo "::error title=gotest::${line:0:400}"
             done
             echo "::error title=gotest summary::make test-go exited ${rc}; see step log"
