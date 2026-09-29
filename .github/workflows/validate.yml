@@ -31,8 +31,8 @@ jobs:
           tail -60 /tmp/unittest.log
           if [ "$rc" -ne 0 ]; then
             grep -E '^(FAIL|ERROR): ' /tmp/unittest.log | sort -u | head -6 | while IFS= read -r line; do
-              trace=$(grep -A14 -F "$line" /tmp/unittest.log | paste -sd' ' - | sed 's/%/%25/g')
-              echo "::error title=unittest::${trace:0:600} ... ${trace: -900}"
+              trace=$(grep -A30 -F "$line" /tmp/unittest.log | paste -sd' ' - | sed 's/%/%25/g')
+              echo "::error title=unittest::${trace:0:200} ... ${trace: -700}"
             done
             echo "::error title=unittest summary::python3 -m unittest discover -s client_wires/tests exited ${rc}; see step log"
           fi
