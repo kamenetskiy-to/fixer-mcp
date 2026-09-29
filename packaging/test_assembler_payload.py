@@ -16,6 +16,7 @@ from packaging.archive import safe_extract
 from packaging.assembler import (
     AssemblerError,
     ReleaseAssembler,
+    detect_host_platform,
     resolve_go_target,
     verify_binary_architecture,
 )
@@ -54,6 +55,26 @@ class TestFixerctlPackaging(unittest.TestCase):
         self.assertIn("bin", MANAGED_INSTALL_COMPONENTS)
         self.assertIn("scripts/release", MANAGED_INSTALL_COMPONENTS)
         self.assertIn("bin/fixer", MANAGED_INSTALL_ENTRYPOINTS)
+
+    def test_host_platform_detection_is_cross_platform(self):
+        from unittest.mock import patch
+
+        with patch("packaging.assembler.platform.machine", return_value="x86_64"), patch(
+            "packaging.assembler.sys.platform", "linux"
+        ):
+            self.assertEqual(detect_host_platform(), "linux_amd64")
+        with patch("packaging.assembler.platform.machine", return_value="aarch64"), patch(
+            "packaging.assembler.sys.platform", "linux"
+        ):
+            self.assertEqual(detect_host_platform(), "linux_arm64")
+        with patch("packaging.assembler.platform.machine", return_value="arm64"), patch(
+            "packaging.assembler.sys.platform", "darwin"
+        ):
+            self.assertEqual(detect_host_platform(), "darwin_arm64")
+        with patch("packaging.assembler.platform.machine", return_value="x86_64"), patch(
+            "packaging.assembler.sys.platform", "darwin"
+        ):
+            self.assertEqual(detect_host_platform(), "darwin_amd64")
 
     def test_honest_cross_compilation_target_resolution(self):
         """Verify GOOS/GOARCH resolution fails loudly on unmapped platforms."""

@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sys
 import tempfile
 from typing import Any, Dict, Optional, Tuple
 
@@ -59,14 +60,23 @@ def get_git_revision(repo_root: str) -> str:
     return "0000000000000000000000000000000000000000"
 
 
-def detect_macos_platform() -> str:
-    """Detect and normalize the macOS target platform (darwin_arm64 or darwin_amd64)."""
+def detect_host_platform() -> str:
+    """Detect and normalize the host target platform (darwin/linux, arm64/amd64)."""
     machine = platform.machine().lower()
     if machine in ("arm64", "aarch64"):
-        return "darwin_arm64"
+        arch = "arm64"
     elif machine in ("x86_64", "amd64"):
-        return "darwin_amd64"
-    return f"darwin_{machine}"
+        arch = "amd64"
+    else:
+        arch = machine
+    if sys.platform.startswith("linux"):
+        return f"linux_{arch}"
+    return f"darwin_{arch}"
+
+
+def detect_macos_platform() -> str:
+    """Backward-compatible alias; detection is cross-platform since 1.0.5."""
+    return detect_host_platform()
 
 
 def resolve_go_target(platform_id: str) -> Tuple[str, str]:
@@ -264,7 +274,7 @@ class ReleaseAssembler:
         self.control_plane_dir = resolve_control_plane_dir(self.repo_root, control_plane_dir)
         self.out_dir = os.path.abspath(out_dir)
         self.version = version
-        self.platform_id = platform_id or detect_macos_platform()
+        self.platform_id = platform_id or detect_host_platform()
         self.changelog = changelog or f"Fixer MCP release {self.version} for {self.platform_id}"
 
     def build_go_binary(self, target_binary_path: str) -> None:

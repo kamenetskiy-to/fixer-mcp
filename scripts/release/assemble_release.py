@@ -49,7 +49,7 @@ def main():
     parser.add_argument(
         "--platform",
         default=None,
-        help="Target platform (default: detected macOS platform darwin_arm64/darwin_amd64)",
+        help="Target platform (default: detected host platform, e.g. darwin_arm64/linux_amd64)",
     )
     parser.add_argument(
         "--changelog",
