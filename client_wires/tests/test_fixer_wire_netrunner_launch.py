@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+try:
+    from _provider_stubs import provider_stub_path
+except ImportError:  # package-style import
+    from ._provider_stubs import provider_stub_path
+
 import dataclasses
 import sqlite3
 import sys
@@ -32,6 +37,13 @@ class _DummyOption:
 
 
 class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
+
+    def tearDown(self) -> None:
+        self._provider_stubs.__exit__(None, None, None)
+
     def test_command_display_redacts_embedded_environment_payload(self) -> None:
         displayed = fixer_wire_netrunner_launch._redacted_command_for_display(
             ["codex", "--config", 'mcp_servers.secret.env={\"TOKEN\":\"private\"}']

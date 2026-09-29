@@ -12,6 +12,11 @@ as a raw traceback. The selector must instead:
 
 from __future__ import annotations
 
+try:
+    from _provider_stubs import provider_stub_path
+except ImportError:  # package-style import
+    from ._provider_stubs import provider_stub_path
+
 import unittest
 from unittest.mock import patch
 
@@ -137,6 +142,13 @@ class HandsLaneInventoryTests(unittest.TestCase):
 
 
 class ProjectHandsLaneSelectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
+
+    def tearDown(self) -> None:
+        self._provider_stubs.__exit__(None, None, None)
+
     def test_unknown_injected_lane_is_a_governed_error_with_inventory(self) -> None:
         # The old crash: the wire-injected backend picker offered `pi` although
         # no `pi` lane existed, then `_pick_model` raised a bare RuntimeError.
@@ -263,7 +275,7 @@ class ProjectHandsLaneSelectorTests(unittest.TestCase):
             patch.object(
                 fixer_wire_selectors,
                 "_select_model_interactive",
-                staticmethod(lambda *_args, **_kwargs: "picked-model"),
+                lambda *_args, **_kwargs: "picked-model",
             ),
         ):
             selected = fixer_wire._select_project_hands_lane_interactive(

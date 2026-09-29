@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+try:
+    from _provider_stubs import provider_stub_path
+except ImportError:  # package-style import
+    from ._provider_stubs import provider_stub_path
+
 import os
 import sqlite3
 import sys
@@ -49,6 +54,13 @@ def _fake_codex_history_module(
 
 
 class FixerWireResumeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
+
+    def tearDown(self) -> None:
+        self._provider_stubs.__exit__(None, None, None)
+
     def test_module_marker_helpers_detect_role_markers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixer_log = Path(tmp) / "fixer.jsonl"

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+try:
+    from _provider_stubs import provider_stub_path
+except ImportError:  # package-style import
+    from ._provider_stubs import provider_stub_path
+
 import json
 import os
 import sys
@@ -454,6 +459,13 @@ class WebMcpConfigTests(unittest.TestCase):
 
 
 class FixerMcpEnvBindingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
+
+    def tearDown(self) -> None:
+        self._provider_stubs.__exit__(None, None, None)
+
     def test_provider_config_sanitizer_removes_runtime_environment(self) -> None:
         spec = {
             "command": "/tmp/server",

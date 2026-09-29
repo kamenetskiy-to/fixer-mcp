@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -224,6 +225,7 @@ class CodexCompatImportSurfaceTests(unittest.TestCase):
         )
         sleep.assert_called_once_with(1)
 
+    @unittest.skipUnless(shutil.which("node") and shutil.which("npm"), "node/npm required")
     def test_playwright_chrome_wrapper_main_uses_existing_cdp_without_launching_chrome(self) -> None:
         mcp_process = Mock()
         mcp_process.wait.return_value = 0

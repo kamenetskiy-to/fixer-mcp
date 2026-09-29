@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+try:
+    from _provider_stubs import provider_stub_path
+except ImportError:  # package-style import
+    from ._provider_stubs import provider_stub_path
+
 import os
 import sqlite3
 import sys
@@ -167,6 +172,8 @@ class FixerWireRoleLaunchExtractionTests(unittest.TestCase):
 
 class LaunchFixerFlowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
         self._tmp_dir = tempfile.TemporaryDirectory()
         self._db_path = Path(self._tmp_dir.name) / "fixer.db"
         self._resolve_db_path = patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=self._db_path)
@@ -178,6 +185,7 @@ class LaunchFixerFlowTests(unittest.TestCase):
         self._assert_project_registered.stop()
         self._resolve_db_path.stop()
         self._tmp_dir.cleanup()
+        self._provider_stubs.__exit__(None, None, None)
 
     def _load_available_servers(self) -> tuple[dict[str, dict[str, object]], dict[str, str], _FakeAdapter, object]:
         available = {fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"}}
@@ -665,6 +673,8 @@ class LaunchFixerFlowTests(unittest.TestCase):
 
 class LaunchOverseerFlowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._provider_stubs = provider_stub_path()
+        self._provider_stubs.__enter__()
         self._tmp_dir = tempfile.TemporaryDirectory()
         self._db_path = Path(self._tmp_dir.name) / "fixer.db"
         self._resolve_db_path = patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=self._db_path)
@@ -676,6 +686,7 @@ class LaunchOverseerFlowTests(unittest.TestCase):
         self._assert_project_registered.stop()
         self._resolve_db_path.stop()
         self._tmp_dir.cleanup()
+        self._provider_stubs.__exit__(None, None, None)
 
     def test_main_overseer_role_does_not_inject_unlocked_forced_override(self) -> None:
         fake_package = types.ModuleType("client_wires.codex_compat")
