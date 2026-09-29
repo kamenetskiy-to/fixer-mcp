@@ -23,7 +23,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m pip install pytest
-      - run: python3 -m unittest discover -s client_wires/tests
+      - name: Run client_wires unit tests
+        run: |
+          set +e
+          python3 -m unittest discover -s client_wires/tests > /tmp/unittest.log 2>&1
+          rc=$?
+          tail -60 /tmp/unittest.log
+          if [ "$rc" -ne 0 ]; then
+            grep -E '^(FAIL|ERROR): ' /tmp/unittest.log | sort -u | head -20 | while IFS= read -r line; do
+              echo "::error title=unittest::${line}"
+            done
+            echo "::error title=unittest summary::python3 -m unittest discover -s client_wires/tests exited ${rc}; see step log for tracebacks"
+          fi
+          exit $rc
       - run: make test-go
       # Builds a release from this checkout, installs it into throwaway
       # locations under $RUNNER_TEMP, then checks version identity, doctor
