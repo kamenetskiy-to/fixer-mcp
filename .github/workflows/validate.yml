@@ -30,10 +30,12 @@ jobs:
           rc=$?
           tail -60 /tmp/unittest.log
           if [ "$rc" -ne 0 ]; then
-            grep -E '^(FAIL|ERROR): ' /tmp/unittest.log | sort -u | head -20 | while IFS= read -r line; do
-              echo "::error title=unittest::${line}"
+            grep -E '^(FAIL|ERROR): ' /tmp/unittest.log | sort -u | head -6 | while IFS= read -r line; do
+              trace=$(grep -A14 -F "$line" /tmp/unittest.log | tr '
+' ' ' | sed 's/%/%25/g' | cut -c1-1800)
+              echo "::error title=unittest::${trace}"
             done
-            echo "::error title=unittest summary::python3 -m unittest discover -s client_wires/tests exited ${rc}; see step log for tracebacks"
+            echo "::error title=unittest summary::python3 -m unittest discover -s client_wires/tests exited ${rc}; see step log"
           fi
           exit $rc
       - run: make test-go
