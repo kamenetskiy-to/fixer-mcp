@@ -61,10 +61,10 @@ jobs:
           rc=$?
           tail -60 /tmp/install.log
           if [ "$rc" -ne 0 ]; then
-            grep -E '(error|Error|ERROR|failed|Failed|FAILED|refused|denied|Traceback|exit)' /tmp/install.log | head -30 | while IFS= read -r line; do
-              echo "::error title=install-verify::${line:0:400}"
-            done
-            echo "::error title=install-verify summary::make install-verify exited ${rc}; see step log"
+            tail -40 /tmp/install.log | paste -sd' ' - | sed 's/%/%25/g' > /tmp/install_flat.txt
+            flat=$(cat /tmp/install_flat.txt)
+            echo "::error title=install-verify head::${flat:0:1200}"
+            echo "::error title=install-verify tail::${flat: -1200}"
           fi
           exit $rc
         env:
