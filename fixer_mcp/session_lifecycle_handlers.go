@@ -373,6 +373,78 @@ func waveGovernanceOwnsSessionTransition(globalSessionID, projectID int, current
 	if phase == parallelWavePhaseAcceptance && currentStatus == "review" && targetStatus == "completed" {
 		return false, nil
 	}
+	// Rework: the Fixer rejected delivered work and sends the worker back.
+	// review -> pending is the canonical rework transition (it increments
+	// rework_count) and must work while the wave runs; the engine requeues the
+	// worker so the wait loop relaunches it with the appended instructions
+	// (feedback 95, backlog 206-208).
+	if currentStatus == "review" && targetStatus == "pending" {
+		return false, nil
+	}
+	return true, nil
+}
+
+// requeueWaveWorkerForRework hands a rejected or failed worker back to the
+// wave engine: the row enters retry_wait with a fresh attempt budget, which
+// the wait loop's retry machinery relaunches in the same worktree with the
+// session's rework instructions appended to the task. It accepts review_ready
+// and completed workers (rejected review) as well as failed workers (an
+// attempt that died on infrastructure) — without the failed case a worker
+// stays failed forever, since the one governed repair is single-use.
+//
+// The requeue is a single atomic UPDATE and must clear every stale signal of
+// the previous attempt: the worker_process_id linkage (its dead historical
+// process row is what made the wait/reconcile path finalize requeued workers
+// as failed "process exited" before the retry scheduler could relaunch them —
+// feedback 96/97), terminal_outcome, the failure diagnostics (failure_reason,
+// terminal_at), and the retry diagnostics (a fresh budget with no backoff
+// owed: retry_attempt_count=0 and an empty retry_next_eligible_at, which the
+// retry scheduler treats as immediately eligible).
+func requeueWaveWorkerForRework(globalSessionID, projectID int) error {
+	_, err := db.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?,
+		     retry_attempt_count = 0,
+		     retry_cause = ?,
+		     retry_next_eligible_at = '',
+		     worker_process_id = NULL,
+		     terminal_outcome = '',
+		     failure_reason = '',
+		     terminal_at = NULL,
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE session_id = ? AND project_id = ? AND status IN (?, ?, ?)`,
+		parallelWaveWorkerStatusRetryWait,
+		"rework",
+		globalSessionID,
+		projectID,
+		parallelWaveWorkerStatusReviewReady,
+		parallelWaveWorkerStatusCompleted,
+		parallelWaveWorkerStatusFailed,
+	)
+	return err
+}
+
+// requeueFailedWaveWorkerForRetry is the guarded core of the governed requeue
+// trigger for failed wave workers: it requeues only when a worker row for the
+// session is actually failed, and reports whether it requeued anything. The
+// caller enforces the mandatory non-empty reason and the pending -> pending
+// shape; see SetSessionStatus for the full semantics.
+func requeueFailedWaveWorkerForRetry(globalSessionID, projectID int) (bool, error) {
+	var failedRows int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM parallel_wave_worker WHERE session_id = ? AND project_id = ? AND status = ?",
+		globalSessionID,
+		projectID,
+		parallelWaveWorkerStatusFailed,
+	).Scan(&failedRows); err != nil {
+		return false, err
+	}
+	if failedRows == 0 {
+		return false, nil
+	}
+	if err := requeueWaveWorkerForRework(globalSessionID, projectID); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -598,9 +670,48 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 	if authorizedRole != "overseer" {
 		visibleSessionID = input.SessionId
 	}
-	if waveWorker, err := isParallelWaveWorkerSession(targetSessionID, projectId); err != nil {
-		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", err)
-	} else if waveWorker {
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(input.Note)
+	}
+
+	waveWorker, waveWorkerErr := isParallelWaveWorkerSession(targetSessionID, projectId)
+	if waveWorkerErr != nil {
+		return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", waveWorkerErr)
+	}
+	if waveWorker {
+		// Governed requeue trigger for FAILED wave workers. A worker whose
+		// attempt died on infrastructure keeps its session already 'pending'
+		// and otherwise has no way out: wave governance refuses every session
+		// move and the one governed repair is single-use, so the worker stays
+		// failed forever. An explicit set_session_status(status="pending",
+		// reason=...) on such a worker is the governed escape hatch: with a
+		// NON-EMPTY reason the failed worker row is requeued to retry_wait
+		// with a fresh attempt budget (see requeueWaveWorkerForRework), and
+		// the wait loop's retry scheduler relaunches it in its recorded
+		// worktree. Semantics:
+		//   - session already 'pending', target 'pending', worker row
+		//     'failed', non-empty reason -> requeue to retry_wait (this call);
+		//   - the same call without a reason is NOT a trigger: nothing is
+		//     requeued and the call keeps its current behavior for that shape
+		//     (the bare no-op stays a no-op);
+		//   - worker rows that are not failed keep wave governance unchanged.
+		if currentStatus == "pending" && targetStatus == "pending" && reason != "" {
+			requeued, requeueErr := requeueFailedWaveWorkerForRetry(targetSessionID, projectId)
+			if requeueErr != nil {
+				return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB update error: %v", requeueErr)
+			}
+			if requeued {
+				log.Printf("set_session_status role=%s session_id=%d project_id=%d from=%s to=%s reason=%q (failed wave worker requeued for retry)",
+					authorizedRole, visibleSessionID, projectId, currentStatus, targetStatus, reason)
+				return nil, SetSessionStatusOutput{
+					Status:         "success",
+					SessionId:      visibleSessionID,
+					PreviousStatus: currentStatus,
+					NewStatus:      targetStatus,
+				}, nil
+			}
+		}
 		governed, err := waveGovernanceOwnsSessionTransition(targetSessionID, projectId, currentStatus, targetStatus)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB query error: %v", err)
@@ -635,12 +746,15 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 		if _, err := db.Exec("UPDATE session SET rework_count = COALESCE(rework_count, 0) + 1 WHERE id = ?", targetSessionID); err != nil {
 			return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB update error: %v", err)
 		}
+		if waveWorker {
+			// A rejected wave worker goes back to the engine, not just on paper:
+			// the row is requeued so the wait loop relaunches the same worktree.
+			if err := requeueWaveWorkerForRework(targetSessionID, projectId); err != nil {
+				return &mcp.CallToolResult{IsError: true}, SetSessionStatusOutput{}, fmt.Errorf("DB update error: %v", err)
+			}
+		}
 	}
 
-	reason := strings.TrimSpace(input.Reason)
-	if reason == "" {
-		reason = strings.TrimSpace(input.Note)
-	}
 	log.Printf("set_session_status role=%s session_id=%d project_id=%d from=%s to=%s reason=%q", authorizedRole, visibleSessionID, projectId, currentStatus, targetStatus, reason)
 
 	return nil, SetSessionStatusOutput{

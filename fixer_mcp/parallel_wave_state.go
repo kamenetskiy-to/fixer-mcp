@@ -1328,6 +1328,15 @@ func reconcileDeadParallelWaveWorkerProcesses(projectCWD string, wave NetrunnerW
 		if worker.Status == parallelWaveWorkerStatusCreated || worker.WorkerProcessId <= 0 {
 			continue
 		}
+		// The retry scheduler owns retry_wait workers: their recorded process
+		// can be a dead historical row from the previous attempt (a rework
+		// requeue or a provider rate-limit retry), and failing them on it here
+		// is the false failure the wait/reconcile path must never produce
+		// (feedback 96/97). They are relaunched or blocked by
+		// processParallelWaveWorkerRetries instead.
+		if worker.Status == parallelWaveWorkerStatusRetryWait {
+			continue
+		}
 		globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, wave.ProjectId)
 		if err == sql.ErrNoRows {
 			continue
@@ -1403,7 +1412,8 @@ type TransitionNetrunnerWavePhaseInput struct {
 	TargetPhase         string `json:"target_phase" jsonschema:"Target phase. Supported reviewed transitions: acceptance, completed."`
 	AcceptanceSessionId int    `json:"acceptance_session_id,omitempty" jsonschema:"Project-scoped pending acceptance session required when entering acceptance."`
 	HandoffSha          string `json:"handoff_sha,omitempty" jsonschema:"Immutable committed Git handoff required when completing a wave that can create children."`
-	ReviewApproved      bool   `json:"review_approved" jsonschema:"Must be true to attest that the preceding phase review passed."`
+	ReviewApproved      bool   `json:"review_approved" jsonschema:"Must be true to attest that the phase review happened: 'accepted' attests the work passed, 'rejected' closes the wave without attesting it (review_outcome)."`
+	ReviewOutcome       string `json:"review_outcome,omitempty" jsonschema:"Review verdict: accepted (default) or rejected. Rejected closes the wave and releases scope leases without claiming any result passed."`
 }
 
 type TransitionNetrunnerWavePhaseOutput struct {
@@ -1513,36 +1523,70 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be distinct from implementation workers and reviewer", input.AcceptanceSessionId)
 			}
 		}
+		var acceptanceRef any
+		if globalAcceptanceID > 0 {
+			acceptanceRef = globalAcceptanceID
+		}
 		_, err = db.Exec(
 			`UPDATE parallel_wave
 			 SET phase = ?, gate_state = ?, acceptance_session_id = ?, updated_at = CURRENT_TIMESTAMP
 			 WHERE id = ? AND project_id = ?`,
 			parallelWavePhaseAcceptance,
 			parallelWaveGateAcceptanceReview,
-			globalAcceptanceID,
+			acceptanceRef,
 			wave.Id,
 			authorizedProjectId,
 		)
 	case parallelWavePhaseCompleted:
-		if wave.Phase != parallelWavePhaseAcceptance {
-			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d must be in acceptance phase before completion, got %q", wave.Id, wave.Phase)
+		outcome := strings.ToLower(strings.TrimSpace(input.ReviewOutcome))
+		if outcome == "" {
+			outcome = "accepted"
 		}
-		if wave.AcceptanceSessionId > 0 {
-			globalAcceptanceID, err := globalSessionIDFromProjectScoped(wave.AcceptanceSessionId, authorizedProjectId)
-			if err != nil {
-				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", wave.AcceptanceSessionId)
-			}
-			status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
-			if err != nil {
-				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
-			}
-			if status != "completed" {
-				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be completed, got %q", wave.AcceptanceSessionId, status)
-			}
+		if outcome != "accepted" && outcome != "rejected" {
+			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf(
+				"unsupported review_outcome %q; supported values are %q and %q", input.ReviewOutcome, "accepted", "rejected")
 		}
-		// A wave without an acceptance session (manual review attestation)
-		// closes on the acceptance phase record itself; the Fixer never has to
-		// fabricate sessions to finish an already-reviewed wave.
+		if outcome == "rejected" {
+			// A rejected review closes the wave WITHOUT attesting the work:
+			// scope leases are released and nothing claims any result passed
+			// (feedback 95, backlog 206-208). Non-terminal workers must first be
+			// reworked or stopped so nothing is abandoned mid-flight.
+			projectCWD, cwdErr := projectCWDFromID(authorizedProjectId)
+			if cwdErr != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", cwdErr)
+			}
+			normalizedProjectCWD, normErr := normalizeProjectCWD(projectCWD)
+			if normErr != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, normErr
+			}
+			wave, err = reconcileStaleParallelWaveWorkers(normalizedProjectCWD, wave)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("failed to reconcile stale implementation workers: %v", err)
+			}
+			if !parallelWaveAllWorkersTerminal(wave) {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d has non-terminal workers; rework or stop them before closing a rejected wave", wave.Id)
+			}
+		} else {
+			if wave.Phase != parallelWavePhaseAcceptance {
+				return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("wave %d must be in acceptance phase before completion, got %q", wave.Id, wave.Phase)
+			}
+			if wave.AcceptanceSessionId > 0 {
+				globalAcceptanceID, err := globalSessionIDFromProjectScoped(wave.AcceptanceSessionId, authorizedProjectId)
+				if err != nil {
+					return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d not found in current project", wave.AcceptanceSessionId)
+				}
+				status, _, err := acceptanceSessionSnapshot(globalAcceptanceID, authorizedProjectId)
+				if err != nil {
+					return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("DB query error: %v", err)
+				}
+				if status != "completed" {
+					return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("acceptance session %d must be completed, got %q", wave.AcceptanceSessionId, status)
+				}
+			}
+			// A wave without an acceptance session (manual review attestation)
+			// closes on the acceptance phase record itself; the Fixer never has to
+			// fabricate sessions to finish an already-reviewed wave.
+		}
 		handoffSHA := strings.TrimSpace(input.HandoffSha)
 		if wave.MaxChildWaveDepth > 0 && handoffSHA == "" {
 			return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("handoff_sha is required before completing recursive wave %d", wave.Id)
@@ -1571,6 +1615,16 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 			wave.Id,
 			authorizedProjectId,
 		)
+		if err == nil && outcome == "rejected" {
+			// Record the verdict in the wave itself: a closed wave must never
+			// read as "all results accepted".
+			_, err = db.Exec(
+				`UPDATE parallel_wave SET failure_reason = ? WHERE id = ? AND project_id = ?`,
+				"closed after rejected review; no result is attested as passed",
+				wave.Id,
+				authorizedProjectId,
+			)
+		}
 		if err == nil {
 			err = releaseParallelWaveScopeLeases(wave.Id, authorizedProjectId)
 		}

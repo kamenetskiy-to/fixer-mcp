@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
+import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -55,6 +57,298 @@ FIXER_RETIRED_SKILL_NAMES = (
 CANONICAL_SKILLS_RELATIVE_ROOT = ".agents/skills"
 
 
+# =============================================================================
+# Persistent Model Catalog Overlay (~/.config/fixer/model-catalog-overlay.json)
+# =============================================================================
+# Schema Documentation:
+# ---------------------
+# The persistent user overlay survives release updates and symlink switches.
+# Location: ~/.config/fixer/model-catalog-overlay.json (overridable via $FIXER_MODEL_CATALOG_OVERLAY).
+#
+# Root: JSON object. Supported top-level layouts:
+# 1. Direct backend map:
+#    {
+#      "pi": { ... },
+#      "commandcode": { ... }
+#    }
+# 2. Wrapped under "backends" (matching backend-catalog.json layout):
+#    {
+#      "backends": {
+#        "pi": { ... }
+#      }
+#    }
+#
+# Inside each backend entry:
+# - "models": dict mapping model_id -> dict/bool, or list of model IDs/dicts:
+#     "models": {
+#       "custom/new-model": { "retired": false },
+#       "packaged/old-model": { "retired": true }
+#     }
+#     OR
+#     "models": [
+#       "custom/new-model",
+#       { "id": "packaged/old-model", "retired": true }
+#     ]
+# - "model_options": list of model IDs (strings or objects with id/retired):
+#     "model_options": [
+#       "custom/new-model",
+#       { "id": "packaged/old-model", "retired": true }
+#     ]
+# - "retired": list of model ID strings to suppress:
+#     "retired": ["packaged/old-model"]
+#
+# Semantics:
+# - Overlay entries win on conflict.
+# - Explicit "retired": true suppresses packaged entries; updates will NOT resurrect them.
+# - Malformed overlay raises ModelCatalogOverlayError with an actionable message (never silently ignored).
+# - Missing overlay file returns packaged catalog unchanged.
+# =============================================================================
+
+
+class ModelCatalogOverlayError(RuntimeError):
+    """Raised when the model catalog overlay is malformed, has invalid JSON, or invalid schema."""
+
+
+OVERLAY_ENV_VAR = "FIXER_MODEL_CATALOG_OVERLAY"
+DEFAULT_OVERLAY_PATH = Path.home() / ".config" / "fixer" / "model-catalog-overlay.json"
+
+
+def get_model_catalog_overlay_path() -> Path:
+    override = os.environ.get(OVERLAY_ENV_VAR, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_OVERLAY_PATH.expanduser()
+
+
+def _validate_model_list(path: Path, backend_name: str, field_name: str, items: list[Any]) -> None:
+    for idx, item in enumerate(items):
+        if isinstance(item, str):
+            if not item.strip():
+                raise ModelCatalogOverlayError(
+                    f"Malformed model catalog overlay at {path}: {field_name} item at index {idx} in backend {backend_name!r} must be a non-empty string"
+                )
+        elif isinstance(item, dict):
+            model_id = item.get("id") or item.get("name")
+            if not model_id or not isinstance(model_id, str):
+                raise ModelCatalogOverlayError(
+                    f"Malformed model catalog overlay at {path}: {field_name} object item at index {idx} in backend {backend_name!r} missing string 'id' or 'name'"
+                )
+            if "retired" in item and not isinstance(item["retired"], bool):
+                raise ModelCatalogOverlayError(
+                    f"Malformed model catalog overlay at {path}: 'retired' marker for {model_id!r} in backend {backend_name!r} must be a boolean"
+                )
+        else:
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {path}: {field_name} item at index {idx} in backend {backend_name!r} must be a string or object, got {type(item).__name__}"
+            )
+
+
+def _validate_backend_overlay_entry(path: Path, backend_name: str, entry: dict[str, Any]) -> None:
+    if "models" in entry:
+        models = entry["models"]
+        if isinstance(models, dict):
+            for model_id, model_spec in models.items():
+                if not isinstance(model_id, str) or not model_id.strip():
+                    raise ModelCatalogOverlayError(
+                        f"Malformed model catalog overlay at {path}: model ID in backend {backend_name!r} must be a non-empty string"
+                    )
+                if isinstance(model_spec, dict):
+                    if "retired" in model_spec and not isinstance(model_spec["retired"], bool):
+                        raise ModelCatalogOverlayError(
+                            f"Malformed model catalog overlay at {path}: 'retired' marker for model {model_id!r} in backend {backend_name!r} must be a boolean"
+                        )
+                elif isinstance(model_spec, bool):
+                    pass
+                else:
+                    raise ModelCatalogOverlayError(
+                        f"Malformed model catalog overlay at {path}: model spec for {model_id!r} in backend {backend_name!r} must be an object or boolean"
+                    )
+        elif isinstance(models, list):
+            _validate_model_list(path, backend_name, "models", models)
+        else:
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {path}: 'models' in backend {backend_name!r} must be an object or list, got {type(models).__name__}"
+            )
+
+    if "model_options" in entry:
+        model_options = entry["model_options"]
+        if not isinstance(model_options, list):
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {path}: 'model_options' in backend {backend_name!r} must be a list, got {type(model_options).__name__}"
+            )
+        _validate_model_list(path, backend_name, "model_options", model_options)
+
+    if "retired" in entry:
+        retired = entry["retired"]
+        if not isinstance(retired, list):
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {path}: 'retired' in backend {backend_name!r} must be a list, got {type(retired).__name__}"
+            )
+        for item in retired:
+            if not isinstance(item, str) or not item.strip():
+                raise ModelCatalogOverlayError(
+                    f"Malformed model catalog overlay at {path}: 'retired' list items in backend {backend_name!r} must be non-empty strings"
+                )
+
+
+def load_model_catalog_overlay(path: Path | str | None = None) -> dict[str, Any]:
+    """Load and validate the model catalog overlay.
+
+    Returns an empty dict if the file does not exist.
+    Raises ModelCatalogOverlayError with an actionable message if the file exists but is malformed.
+    """
+    target_path = Path(path).expanduser() if path is not None else get_model_catalog_overlay_path()
+    if not target_path.is_file():
+        return {}
+
+    try:
+        content = target_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise ModelCatalogOverlayError(
+            f"Failed to read model catalog overlay at {target_path}: {exc}"
+        ) from exc
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ModelCatalogOverlayError(
+            f"Malformed model catalog overlay at {target_path}: invalid JSON: {exc}"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ModelCatalogOverlayError(
+            f"Malformed model catalog overlay at {target_path}: root must be a JSON object, got {type(data).__name__}"
+        )
+
+    backends_map: dict[str, Any]
+    if "backends" in data:
+        if not isinstance(data["backends"], dict):
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {target_path}: 'backends' must be an object, got {type(data['backends']).__name__}"
+            )
+        backends_map = data["backends"]
+    else:
+        backends_map = data
+
+    for backend_key, backend_val in backends_map.items():
+        if backend_key == "backends":
+            continue
+        if not isinstance(backend_val, dict):
+            raise ModelCatalogOverlayError(
+                f"Malformed model catalog overlay at {target_path}: entry for backend {backend_key!r} must be an object, got {type(backend_val).__name__}"
+            )
+        _validate_backend_overlay_entry(target_path, str(backend_key), backend_val)
+
+    return data
+
+
+def apply_model_catalog_overlay(
+    backend_name: str,
+    model_options: Sequence[str],
+    overlay_path: Path | str | None = None,
+) -> tuple[str, ...]:
+    """Merge overlay additions and retired suppressions over packaged model_options for a backend.
+
+    - Overlay entries win on conflict.
+    - Explicit "retired": true suppresses packaged entries and updates will not resurrect them.
+    - Malformed overlay raises ModelCatalogOverlayError with actionable error details.
+    - If no overlay exists, returns tuple(model_options).
+    """
+    overlay = load_model_catalog_overlay(overlay_path)
+    if not overlay:
+        return tuple(model_options)
+
+    normalized = normalize_backend_name(backend_name)
+    backends_map = overlay.get("backends") if isinstance(overlay.get("backends"), dict) else overlay
+    backend_entry = backends_map.get(normalized) or backends_map.get(backend_name)
+    if not isinstance(backend_entry, dict):
+        return tuple(model_options)
+
+    retired_set: set[str] = set()
+    added_models: list[str] = []
+
+    # 1. Process "retired" list
+    if "retired" in backend_entry and isinstance(backend_entry["retired"], list):
+        for item in backend_entry["retired"]:
+            if isinstance(item, str) and item.strip():
+                retired_set.add(item.strip())
+
+    # 2. Process "models"
+    if "models" in backend_entry:
+        models = backend_entry["models"]
+        if isinstance(models, dict):
+            for model_id, spec in models.items():
+                model_id_clean = str(model_id).strip()
+                if isinstance(spec, dict):
+                    if spec.get("retired") is True:
+                        retired_set.add(model_id_clean)
+                    else:
+                        if model_id_clean not in added_models:
+                            added_models.append(model_id_clean)
+                elif spec is False:
+                    retired_set.add(model_id_clean)
+                elif spec is True:
+                    if model_id_clean not in added_models:
+                        added_models.append(model_id_clean)
+        elif isinstance(models, list):
+            for item in models:
+                if isinstance(item, str):
+                    clean = item.strip()
+                    if clean not in added_models:
+                        added_models.append(clean)
+                elif isinstance(item, dict):
+                    m_id = str(item.get("id") or item.get("name") or "").strip()
+                    if item.get("retired") is True:
+                        retired_set.add(m_id)
+                    elif m_id and m_id not in added_models:
+                        added_models.append(m_id)
+
+    # 3. Process "model_options"
+    if "model_options" in backend_entry and isinstance(backend_entry["model_options"], list):
+        for item in backend_entry["model_options"]:
+            if isinstance(item, str):
+                clean = item.strip()
+                if clean not in added_models:
+                    added_models.append(clean)
+            elif isinstance(item, dict):
+                m_id = str(item.get("id") or item.get("name") or "").strip()
+                if item.get("retired") is True:
+                    retired_set.add(m_id)
+                elif m_id and m_id not in added_models:
+                    added_models.append(m_id)
+
+    # Merge: retain packaged options that are not retired
+    result: list[str] = [m for m in model_options if m not in retired_set]
+
+    # Add overlay models not in retired_set and not already present
+    for m in added_models:
+        if m not in retired_set and m not in result:
+            result.append(m)
+
+    return tuple(result)
+
+
+def overlay_manifest(manifest: Any, overlay_path: Path | str | None = None) -> Any:
+    """Merge overlay additions and retirements into a ProviderManifest instance or dict."""
+    if hasattr(manifest, "provider") and hasattr(manifest, "models"):
+        provider_name = getattr(manifest, "provider")
+        models_obj = getattr(manifest, "models")
+        if hasattr(models_obj, "options"):
+            merged = apply_model_catalog_overlay(provider_name, models_obj.options, overlay_path)
+            if hasattr(models_obj, "__dict__"):
+                try:
+                    object.__setattr__(models_obj, "options", list(merged))
+                except Exception:
+                    pass
+    elif isinstance(manifest, dict):
+        provider_name = str(manifest.get("provider", ""))
+        models_dict = manifest.get("models")
+        if isinstance(models_dict, dict) and "options" in models_dict:
+            merged = apply_model_catalog_overlay(provider_name, models_dict["options"], overlay_path)
+            models_dict["options"] = list(merged)
+    return manifest
+
+
 @dataclass(frozen=True)
 class BackendDescriptor:
     name: str
@@ -67,6 +361,11 @@ class BackendDescriptor:
     fresh_launch_supported: bool = True
     resume_supported: bool = True
     available: bool = True
+
+    def __post_init__(self) -> None:
+        if self.name:
+            merged = apply_model_catalog_overlay(self.name, self.model_options)
+            object.__setattr__(self, "model_options", merged)
 
 
 def normalize_backend_name(raw: str | None) -> str:
@@ -261,7 +560,7 @@ class BackendAdapter(ABC):
 
     @property
     def model_options(self) -> tuple[str, ...]:
-        return self.descriptor.model_options
+        return apply_model_catalog_overlay(self.name, self.descriptor.model_options)
 
     @property
     def reasoning_options(self) -> tuple[str, ...]:

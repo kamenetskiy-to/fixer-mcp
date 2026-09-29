@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1821,6 +1822,17 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 	if worker.Status == parallelWaveWorkerStatusCreated {
 		return candidate, false, nil
 	}
+	// The retry scheduler owns retry_wait workers: they are between relaunch
+	// attempts (a rejected-review rework or a provider rate-limit retry) and
+	// can still carry a dead historical worker_process_id from their previous
+	// attempt. Finalizing them on that stale process row is exactly the false
+	// "process exited" failure that tripped failed_worker_majority before the
+	// scheduler could relaunch them (feedback 96/97). Never inspect a stale
+	// process row for a retry_wait worker — leave it non-terminal for
+	// processParallelWaveWorkerRetries, which relaunches or blocks it.
+	if worker.Status == parallelWaveWorkerStatusRetryWait {
+		return candidate, false, nil
+	}
 	globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, authorizedProjectId)
 	if err == sql.ErrNoRows {
 		updatedWorker, updateErr := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusFailed, fmt.Sprintf("session %d not found in current project", worker.SessionId))
@@ -2304,7 +2316,7 @@ func launchParallelWaveWorkerProcess(
 	input LaunchNetrunnerWaveInput,
 	launchEpoch int,
 	startupTimeout time.Duration,
-) error {
+) (retErr error) {
 	globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, authorizedProjectId)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("session %d not found in current project", worker.SessionId)
@@ -2378,8 +2390,31 @@ func launchParallelWaveWorkerProcess(
 	}
 
 	waitErrCh := make(chan error, 1)
+	launcherExited := make(chan struct{})
 	go func() {
 		waitErrCh <- command.Wait()
+		close(launcherExited)
+	}()
+
+	workerPID := 0
+	workerProcessID := 0
+	launchCompleted := false
+	// An aborted launch must never leak a live worker process (laungh project
+	// feedback, repro on release 0.3.20: create_netrunner_wave +
+	// launch_netrunner_wave cancelled while waiting for backend session
+	// metadata left the wave failed "context canceled" while its already
+	// spawned worker stayed alive under a still-running worker_process row).
+	// Every error path after the spawn terminates and reaps what was spawned
+	// and marks its worker_process row terminal before the failure surfaces.
+	defer func() {
+		if launchCompleted {
+			return
+		}
+		reason := fmt.Sprintf("wave worker %d launch aborted", worker.SessionId)
+		if retErr != nil {
+			reason = reason + ": " + retErr.Error()
+		}
+		abortLaunchedWaveWorkerProcess(command, launcherExited, metadataPath, workerPID, workerProcessID, authorizedProjectId, reason)
 	}()
 
 	launcherPID := 0
@@ -2403,7 +2438,7 @@ func launchParallelWaveWorkerProcess(
 		return ctx.Err()
 	}
 
-	workerPID := launcherPID
+	workerPID = launcherPID
 	if metadata, metadataErr := readExplicitLaunchWorkerMetadata(metadataPath); metadataErr == nil {
 		workerPID = metadata.WorkerPID
 		if strings.TrimSpace(metadata.HeadlessLogPath) != "" {
@@ -2413,7 +2448,7 @@ func launchParallelWaveWorkerProcess(
 	if workerPID <= 0 {
 		return fmt.Errorf("wave worker %d did not report a worker pid", worker.SessionId)
 	}
-	workerProcessID, err := recordWaveWorkerProcessLaunch(authorizedProjectId, globalSessionID, workerPID, launchEpoch, wave.Id, worker.Id)
+	workerProcessID, err = recordWaveWorkerProcessLaunch(authorizedProjectId, globalSessionID, workerPID, launchEpoch, wave.Id, worker.Id)
 	if err != nil {
 		return fmt.Errorf("failed to persist wave worker process metadata: %v", err)
 	}
@@ -2435,7 +2470,63 @@ func launchParallelWaveWorkerProcess(
 	); err != nil {
 		return fmt.Errorf("DB update error: %v", err)
 	}
+	launchCompleted = true
 	return nil
+}
+
+// abortLaunchedWaveWorkerProcess cleans up a wave worker launch that failed
+// after its process was already spawned: it kills and reaps the launcher
+// child, terminates the spawned worker's process group (the launcher starts
+// every worker with its own session, so the recorded pid is also the
+// process-group id), and marks the worker_process row terminal so
+// list_active_worker_processes can never keep showing a live row for a launch
+// that already failed.
+func abortLaunchedWaveWorkerProcess(
+	launcher *exec.Cmd,
+	launcherExited <-chan struct{},
+	metadataPath string,
+	workerPID int,
+	workerProcessID int,
+	projectID int,
+	reason string,
+) {
+	if workerPID <= 0 {
+		if metadata, metadataErr := readExplicitLaunchWorkerMetadata(metadataPath); metadataErr == nil {
+			workerPID = metadata.WorkerPID
+		}
+	}
+	if launcher != nil && launcher.Process != nil {
+		if killErr := launcher.Process.Kill(); killErr != nil && !isProcessGoneError(killErr) {
+			log.Printf("warning: failed to terminate aborted wave launcher %d: %v", launcher.Process.Pid, killErr)
+		}
+	}
+	if launcherExited != nil {
+		select {
+		case <-launcherExited:
+		case <-time.After(explicitLauncherExitGracePeriod):
+			log.Printf("warning: aborted wave launcher did not exit within %s", explicitLauncherExitGracePeriod)
+		}
+	}
+	if workerPID > 0 {
+		liveness := parallelWaveWorkerLiveness{PID: workerPID, ProcessFound: true, ProcessRunning: true, PIDAlive: true}
+		if termErr := terminateParallelWaveWorkerProcessGroup(liveness); termErr != nil {
+			log.Printf("warning: failed to terminate aborted wave worker process group %d: %v", workerPID, termErr)
+		}
+	}
+	if workerProcessID > 0 {
+		if _, markErr := db.Exec(
+			`UPDATE worker_process
+			 SET status = ?, stop_reason = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ? AND status = ?`,
+			workerStatusStopped,
+			reason,
+			workerProcessID,
+			projectID,
+			workerStatusRunning,
+		); markErr != nil {
+			log.Printf("warning: failed to mark aborted wave worker process %d terminal: %v", workerProcessID, markErr)
+		}
+	}
 }
 
 // abandonNeverLaunchedParallelWaveWorkers deterministically closes out workers
@@ -3351,7 +3442,13 @@ func processParallelWaveWorkerRetries(ctx context.Context, projectCWD string, wa
 		delay := calculateBackoff(attempts)
 		nextEligible := parseParallelWaveRetryEligibility(worker.RetryNextEligibleAt)
 		if nextEligible.IsZero() {
-			nextEligible = time.Now().UTC().Add(delay)
+			// An empty retry_next_eligible_at is the requeue signal: the worker
+			// was explicitly requeued (rejected-review rework or the governed
+			// failed-worker retry) with a fresh attempt budget and no backoff
+			// owed, so it is eligible on this very scheduler pass. Provider
+			// rate-limit retries always carry an explicit future timestamp and
+			// keep their backoff.
+			nextEligible = time.Now().UTC()
 		}
 
 		quotaDelay := delay

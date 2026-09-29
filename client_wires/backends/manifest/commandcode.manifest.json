@@ -1,0 +1,90 @@
+{
+  "provider": "commandcode",
+  "label": "Command Code",
+  "description": "Native Command Code CLI backend using cmd/cmdc.",
+  "models": {
+    "options": [
+      "commandcode/meta/muse-spark-1.2-contributor",
+      "commandcode/deepseek/deepseek-v4-flash",
+      "commandcode/deepseek/deepseek-v4-flash-vision-exp",
+      "commandcode/deepseek/deepseek-v4-pro",
+      "commandcode/zai-org/glm-5.3-flash",
+      "commandcode/gpt-5.6-sol",
+      "commandcode/gpt-5.6-luna",
+      "commandcode/google/gemini-3.7-flash",
+      "commandcode/minimaxai/minimax-m3",
+      "commandcode/moonshotai/kimi-k3",
+      "commandcode/xiaomi/mimo-v2.5-pro",
+      "commandcode/qwen/qwen3.8-27b",
+      "commandcode/qwen/qwen3.8-max",
+      "commandcode/poolside/laguna-s-2.1-free",
+      "commandcode/xiaomi/mimo-v2.6-flash",
+      "commandcode/xiaomi/mimo-v2.6-pro"
+    ],
+    "default": "commandcode/zai-org/glm-5.3-flash",
+    "internal_id_map": {
+      "commandcode/meta/muse-spark-1.2-contributor": "meta/muse-spark-1.2-contributor",
+      "commandcode/deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+      "commandcode/deepseek/deepseek-v4-flash-vision-exp": "deepseek/deepseek-v4-flash-vision-exp",
+      "commandcode/deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+      "commandcode/zai-org/glm-5.3-flash": "zai-org/glm-5.3-flash",
+      "commandcode/gpt-5.6-sol": "gpt-5.6-sol",
+      "commandcode/gpt-5.6-luna": "gpt-5.6-luna",
+      "commandcode/google/gemini-3.7-flash": "google/gemini-3.7-flash",
+      "commandcode/minimaxai/minimax-m3": "minimaxai/minimax-m3",
+      "commandcode/moonshotai/kimi-k3": "moonshotai/kimi-k3",
+      "commandcode/xiaomi/mimo-v2.5-pro": "xiaomi/mimo-v2.5-pro",
+      "commandcode/qwen/qwen3.8-27b": "qwen/qwen3.8-27b",
+      "commandcode/qwen/qwen3.8-max": "qwen/qwen3.8-max",
+      "commandcode/poolside/laguna-s-2.1-free": "poolside/laguna-s-2.1-free",
+      "commandcode/xiaomi/mimo-v2.6-flash": "xiaomi/mimo-v2.6-flash",
+      "commandcode/xiaomi/mimo-v2.6-pro": "xiaomi/mimo-v2.6-pro"
+    },
+    "byok": false,
+    "auth": "api_key",
+    "api_key_env": "COMMANDCODE_API_KEY"
+  },
+  "reasoning": {
+    "options": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "default": "medium",
+    "pass_mechanism": "flag",
+    "flag_or_key": "--effort"
+  },
+  "skills": {
+    "inject_dir": ".agents/skills",
+    "scope_strategy": "none",
+    "scope_flags": []
+  },
+  "mcp": {
+    "config_format": "mcp-config-file",
+    "scope_strategy": "project-config-file",
+    "scope_flags": [
+      "--mcp-config",
+      ".run/commandcode/mcp.json"
+    ]
+  },
+  "tool_registration": "native",
+  "permissions": {
+    "interactive_auto_approve_flags": [
+      "--auto-approve"
+    ],
+    "headless_auto_approve_flags": [
+      "--auto-approve"
+    ]
+  },
+  "operator_questions": {
+    "supported": false
+  },
+  "launch": {
+    "interactive_cmd_template": "cmd [prompt]",
+    "headless_cmd_template": "cmd -p \"[prompt]\"",
+    "resume_interactive": "cmd --resume [external_session_id] [prompt]",
+    "resume_headless": "cmd --resume [external_session_id] -p \"[prompt]\""
+  }
+}

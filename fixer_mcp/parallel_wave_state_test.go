@@ -1683,3 +1683,114 @@ func TestTransitionNetrunnerWavePhaseReconcilesStaleCompletedWorker(t *testing.T
 		t.Fatalf("expected stale running worker reconciled to completed, got %q", worker.Status)
 	}
 }
+
+// Regression for the laungh project leak (repro on release 0.3.20): a wave
+// launch aborted while waiting for backend session metadata must terminate
+// and reap its already-spawned worker process and leave the worker_process row
+// terminal — never a live process under a still-running row.
+func TestAbortedWaveLaunchTerminatesSpawnedWorkerAndMarksProcessTerminal(t *testing.T) {
+	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
+	defer func() {
+		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
+	}()
+	DefaultQuotaGate = nil
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+	created := createLaunchableTestWave(t, testDB)
+
+	// A real long-lived worker process in its own process group, exactly like
+	// the launcher spawns workers (start_new_session=True), so terminating the
+	// worker's process group can never touch the test process group.
+	workerProcess := exec.Command("sleep", "300")
+	workerProcess.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := workerProcess.Start(); err != nil {
+		t.Fatalf("spawn fake worker process: %v", err)
+	}
+	defer func() {
+		_ = workerProcess.Process.Kill()
+		_, _ = workerProcess.Process.Wait()
+	}()
+	workerPID := workerProcess.Process.Pid
+
+	installFakeWaveWorkerLauncher(t, "", nil)
+	t.Setenv("FAKE_WAVE_WORKER_PID", strconv.Itoa(workerPID))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	launchErrCh := make(chan error, 1)
+	go func() {
+		_, _, err := LaunchNetrunnerWave(ctx, nil, LaunchNetrunnerWaveInput{
+			WaveId:         created.WaveId,
+			TimeoutSeconds: 60,
+		})
+		launchErrCh <- err
+	}()
+
+	// Cancel exactly the way the incident happened: the client goes away once
+	// the spawned worker's process row is recorded, while the launch is still
+	// waiting for backend session metadata.
+	deadline := time.Now().Add(10 * time.Second)
+	var processRowID int
+	for {
+		err := testDB.QueryRow(
+			"SELECT id FROM worker_process WHERE parallel_wave_worker_id = ? AND status = ?",
+			created.Workers[0].Id,
+			workerStatusRunning,
+		).Scan(&processRowID)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawned worker process row never appeared: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+
+	launchErr := <-launchErrCh
+	if launchErr == nil || !strings.Contains(launchErr.Error(), "failed while waiting for backend session metadata") {
+		t.Fatalf("expected aborted launch failure, got %v", launchErr)
+	}
+
+	// The spawned worker is terminated and reaped.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if !isProcessAlive(workerPID) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("aborted launch leaked live worker pid %d", workerPID)
+		}
+	}
+
+	// Its worker_process row is terminal, and nothing reads as an active
+	// worker process any more.
+	var processStatus, stoppedAt string
+	if err := testDB.QueryRow(
+		"SELECT status, COALESCE(stopped_at, '') FROM worker_process WHERE id = ?", processRowID,
+	).Scan(&processStatus, &stoppedAt); err != nil {
+		t.Fatalf("read aborted worker process row: %v", err)
+	}
+	if processStatus == workerStatusRunning || stoppedAt == "" {
+		t.Fatalf("aborted launch must mark its worker_process row terminal, got status=%q stopped_at=%q", processStatus, stoppedAt)
+	}
+	if running, err := listRunningWorkerProcesses(1, nil); err != nil {
+		t.Fatalf("list running worker processes: %v", err)
+	} else if len(running) != 0 {
+		t.Fatalf("aborted launch must leave no active worker processes, got %+v", running)
+	}
+
+	// The wave surfaces the failure instead of pretending the launch worked.
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatalf("fetch aborted wave: %v", err)
+	}
+	abortedWorker := testWaveWorkerBySession(t, wave, created.Workers[0].SessionId)
+	if abortedWorker.Status != parallelWaveWorkerStatusFailed {
+		t.Fatalf("aborted worker must be failed, got %+v", abortedWorker)
+	}
+}

@@ -52,6 +52,7 @@ func run(args []string) (int, error) {
 		jsonMode   = flags.Bool("json", false, "emit JSON for -print or quota")
 		runID      = flags.String("run", "", "run one compatibility entry by id")
 		showVer    = flags.Bool("version", false, "print Fixer version")
+		viaKind    = flags.String("via", "", "pin a transport kind for resolve (tailscale, socks, lan)")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "usage: fixer [command] [flags]")
@@ -132,12 +133,46 @@ func run(args []string) (int, error) {
 		return runConsole(1)
 	case "machines":
 		if *jsonMode {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 			defer cancel()
 			snapshot := machines.Probe(ctx, machines.Discover())
 			return printJSON(snapshot)
 		}
 		return runConsole(2)
+	case "resolve":
+		if len(remaining) < 2 {
+			return 2, errors.New("usage: fixerctl resolve MACHINE_ID [--via tailscale|socks|lan]")
+		}
+		preferKind := *viaKind
+		// Go's flag package stops at the first positional argument, so accept
+		// --via after the machine id as well; that is the natural spelling.
+		for i := 2; i < len(remaining); i++ {
+			switch {
+			case remaining[i] == "--via" && i+1 < len(remaining):
+				preferKind = remaining[i+1]
+				i++
+			case strings.HasPrefix(remaining[i], "--via="):
+				preferKind = strings.TrimPrefix(remaining[i], "--via=")
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+		defer cancel()
+		for _, machine := range machines.Discover() {
+			if machine.ID != remaining[1] {
+				continue
+			}
+			connection, err := machines.ResolveVia(ctx, machine, preferKind)
+			if err != nil {
+				return 1, err
+			}
+			target := strings.TrimSpace(connection.Route.Target)
+			if target == "" {
+				return 1, fmt.Errorf("machine %q resolved without a network target", machine.ID)
+			}
+			fmt.Println(target)
+			return 0, nil
+		}
+		return 1, fmt.Errorf("unknown machine %q", remaining[1])
 	case "network", "myip", "vpn-status":
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()

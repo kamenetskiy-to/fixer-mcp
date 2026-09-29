@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -30,9 +31,18 @@ const defaultSSHPort = 22
 const (
 	routeProbeTimeout = 6 * time.Second
 	// A LAN probe may first have to rediscover the address after a Wi-Fi
-	// reconnect, so it gets a wider budget than a fixed-IP transport.
-	lanProbeTimeout = 20 * time.Second
+	// reconnect, so it gets a wider budget than a fixed-IP transport. The sweep
+	// fallback is the slow path and must fit comfortably.
+	lanProbeTimeout = 45 * time.Second
 	lanCacheTTL     = 3 * time.Minute
+	// Tailnet probes run through a proxy command (the SOCKS lane or the
+	// tailscale CLI). A cold proxy start inside a 16-wide probe pool has been
+	// seen blowing a tight connect budget on older hosts: every machine
+	// reported unreachable while plain ssh to the same host worked
+	// (macbook-air-lizok, 2026-09-29).
+	tailnetProbeTimeout          = 10 * time.Second
+	tailnetConnectTimeoutSeconds = 5
+	tailnetProbeRetries          = 1
 )
 
 // Route is an internal transport candidate for one logical machine. Target is
@@ -217,9 +227,12 @@ func probeRouteWithSlot(ctx context.Context, machine Machine, route Route, sem c
 	}
 	defer func() { <-sem }()
 	budget := routeProbeTimeout
-	if route.Kind == "lan" {
+	switch {
+	case route.Kind == "lan":
 		// Wi-Fi addresses move after reconnects; rediscovery needs room.
 		budget = lanProbeTimeout
+	case isTailnetRoute(route):
+		budget = tailnetProbeTimeout
 	}
 	routeCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -234,9 +247,25 @@ func probeRoute(ctx context.Context, machine Machine, route Route) (bool, string
 	if !available {
 		return false, "транспорт недоступен", ""
 	}
-	probeArgs := append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=3"}, args...)
+	connectTimeout := "3"
+	if isTailnetRoute(route) {
+		connectTimeout = strconv.Itoa(tailnetConnectTimeoutSeconds)
+	}
+	probeArgs := append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=" + connectTimeout}, args...)
 	probeArgs = append(probeArgs, "true")
 	output, err := exec.CommandContext(ctx, "ssh", probeArgs...).CombinedOutput()
+	if err != nil && isTailnetRoute(route) {
+		// One cold proxy start must not decide the verdict: the recurring
+		// failure is a first-attempt timeout that succeeds on retry while the
+		// operator's own ssh to the same host works (Air, 2026-09-29).
+		for attempt := 0; attempt < tailnetProbeRetries && err != nil && timeoutClassFailure(ctx, output); attempt++ {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+			}
+			output, err = exec.CommandContext(ctx, "ssh", probeArgs...).CombinedOutput()
+		}
+	}
 	if err == nil {
 		return true, "", ""
 	}
@@ -780,7 +809,7 @@ func sshArgs(hostKeyAlias string, route Route, interactive bool) ([]string, bool
 	}
 	switch route.Kind {
 	case "tailscale":
-		proxy, ok := tailscaleProxyCommand()
+		proxy, ok := tailnetProxyCommand()
 		if !ok {
 			return nil, false
 		}
@@ -857,6 +886,15 @@ func tailscaleProxyCommand() (string, bool) {
 }
 
 func socksProxyCommand() (string, bool) {
+	if _, err := exec.LookPath("nc"); err != nil {
+		return "", false
+	}
+	return "nc -x " + shellQuote(socksProxyAddr()) + " -X 5 %h %p", true
+}
+
+// socksProxyAddr is the SOCKS lane endpoint: explicit operator overrides win,
+// otherwise the fleet default where the userspace tailscaled listens.
+func socksProxyAddr() string {
 	proxy := strings.TrimSpace(firstNonEmpty(os.Getenv("FIXER_SOCKS_PROXY"), os.Getenv("SSH_TUI_SOCKS_PROXY")))
 	if proxy == "" {
 		proxy = proxyFromEnv(firstNonEmpty(os.Getenv("ALL_PROXY"), os.Getenv("all_proxy")))
@@ -864,10 +902,56 @@ func socksProxyCommand() (string, bool) {
 	if proxy == "" {
 		proxy = "127.0.0.1:1055"
 	}
-	if _, err := exec.LookPath("nc"); err != nil {
+	return proxy
+}
+
+// socksLaneDial is injectable so the lane decision is testable without a live
+// proxy on the machine.
+var socksLaneDial = func(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// socksProxyIfUp reports the SOCKS lane proxy only when the lane is actually
+// up. An explicit operator override is trusted as-is; the default endpoint is
+// dial-checked so hosts without the lane fall back to the tailscale CLI proxy.
+func socksProxyIfUp() (string, bool) {
+	explicit := strings.TrimSpace(firstNonEmpty(os.Getenv("FIXER_SOCKS_PROXY"), os.Getenv("SSH_TUI_SOCKS_PROXY"))) != ""
+	if !explicit && !socksLaneDial(socksProxyAddr()) {
 		return "", false
 	}
-	return "nc -x " + shellQuote(proxy) + " -X 5 %h %p", true
+	return socksProxyCommand()
+}
+
+// tailnetProxyCommand picks the proxy for tailnet routes. The SOCKS lane —
+// the transport ssh-tui uses — is preferred whenever it is up: a userspace
+// tailscaled exposes no kernel route to 100.x, and the tailscale CLI proxy has
+// been seen hanging past any connect budget on such daemons while the SOCKS
+// hop answers immediately (Air, 2026-09-29). Fallback stays the CLI proxy.
+func tailnetProxyCommand() (string, bool) {
+	if proxy, ok := socksProxyIfUp(); ok {
+		return proxy, true
+	}
+	return tailscaleProxyCommand()
+}
+
+// timeoutClassFailure reports whether a failed probe attempt is a pure
+// reachability timeout — the only failure class worth retrying.
+func timeoutClassFailure(ctx context.Context, output []byte) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	lower := strings.ToLower(string(output))
+	for _, marker := range []string{"operation timed out", "connection timed out", "timed out", "timeout"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyFromEnv(raw string) string {
@@ -1074,71 +1158,135 @@ func discoverLAN(ctx context.Context, machine Machine) (lanDiscovery, error) {
 		return lanDiscovery{}, errLANNoRoute
 	}
 
-	candidates := make([]string, 0, 256)
+	host, _ := splitTarget(route.Target)
 	mdnsIP := ""
+	// Fast path first: identity-bearing candidates (Bonjour, ARP neighbours,
+	// the configured address) are auth-checked before any subnet sweep. A /24
+	// sweep is pathological on some Wi-Fi networks — nc to absent hosts can
+	// hang far past its timeout, and one sweep did not finish in five minutes
+	// on a 2020 Air — so it must never be the reason a healthy machine reads as
+	// not found (macbook-air-lizok -> macbook-pro, 2026-09-29).
+	priority := make([]string, 0, 8)
 	if mdns := strings.TrimSpace(machine.MDNS); mdns != "" {
 		if ip, err := resolveMDNS(mdns); err == nil && ip != "" {
 			mdnsIP = ip
-			candidates = append(candidates, ip)
+			priority = append(priority, ip)
 		}
 	}
-	candidates = appendUniqueIPs(candidates, subnetCandidates(route.Target))
-	candidates = withoutOwnAddresses(candidates)
+	priority = appendUniqueIPs(priority, parseARPCandidates(arpTableText(), host))
+	if host != "" {
+		priority = appendUniqueIPs(priority, []string{host})
+	}
+	priority = withoutOwnAddresses(priority)
+	if discovery, found := firstAuthedLAN(ctx, route, priority, mdnsIP); found {
+		cacheLAN(machine.ID, discovery)
+		return discovery, nil
+	}
+
+	candidates := withoutOwnAddresses(subnetCandidates(route.Target))
 	if len(candidates) == 0 {
 		return lanDiscovery{}, errLANNotFound
 	}
-
-	port := route.Port
-	if port == 0 {
-		port = defaultSSHPort
+	open := openLANAddresses(ctx, candidates, lanRoutePort(route))
+	if discovery, found := firstAuthedLAN(ctx, route, open, mdnsIP); found {
+		cacheLAN(machine.ID, discovery)
+		return discovery, nil
 	}
-	open := openLANAddresses(ctx, candidates, port)
-	// Logins are attempted together: a wrong candidate only costs one timeout.
+	return lanDiscovery{}, errLANNotFound
+}
+
+func lanRoutePort(route Route) int {
+	if route.Port == 0 {
+		return defaultSSHPort
+	}
+	return route.Port
+}
+
+// firstAuthedLAN auth-checks candidates concurrently and returns as soon as one
+// of them accepts this machine's key. Only the Bonjour candidate may be
+// reported found without a key: a permission-denied answer from an ARP or
+// sweep candidate means somebody else lives there and must never be attributed
+// to this machine.
+func firstAuthedLAN(ctx context.Context, route Route, candidates []string, mdnsIP string) (lanDiscovery, bool) {
+	if len(candidates) == 0 {
+		return lanDiscovery{}, false
+	}
 	type probeResult struct {
 		ip  string
 		err error
 	}
-	results := make([]probeResult, len(open))
+	results := make(chan probeResult, len(candidates))
 	var (
 		authWait sync.WaitGroup
 		authSem  = make(chan struct{}, 6)
 	)
-	for i, ip := range open {
+	for _, ip := range candidates {
 		authWait.Add(1)
-		go func(i int, ip string) {
+		go func(ip string) {
 			defer authWait.Done()
 			select {
 			case authSem <- struct{}{}:
 			case <-ctx.Done():
-				results[i] = probeResult{ip: ip, err: ctx.Err()}
+				results <- probeResult{ip: ip, err: ctx.Err()}
 				return
 			}
 			defer func() { <-authSem }()
-			results[i] = probeResult{ip: ip, err: authProbeLAN(ctx, route, ip)}
-		}(i, ip)
+			results <- probeResult{ip: ip, err: authProbeLAN(ctx, route, ip)}
+		}(ip)
 	}
 	authWait.Wait()
-
-	best := lanDiscovery{}
-	for _, result := range results {
+	close(results)
+	fallback := lanDiscovery{}
+	for result := range results {
 		if result.err == nil {
-			best = lanDiscovery{ip: result.ip, authed: true}
-			cacheLAN(machine.ID, best)
-			return best, nil
+			return lanDiscovery{ip: result.ip, authed: true}, true
 		}
-		// Only the Bonjour candidate carries identity for this machine. A
-		// permission-denied answer from the generic sweep just means *somebody*
-		// lives there with another key, so it must never be attributed to this
-		// machine (otherwise antiX would report MacBook Air's address as its own).
-		if result.ip == mdnsIP && strings.Contains(strings.ToLower(result.err.Error()), "permission denied") {
-			best = lanDiscovery{ip: result.ip, authed: false}
+		if mdnsIP != "" && result.ip == mdnsIP && strings.Contains(strings.ToLower(result.err.Error()), "permission denied") {
+			fallback = lanDiscovery{ip: result.ip, authed: false}
 		}
 	}
-	if best.ip != "" {
-		cacheLAN(machine.ID, best)
-		return best, nil
+	if fallback.ip != "" {
+		return fallback, true
 	}
-	return lanDiscovery{}, errLANNotFound
+	return lanDiscovery{}, false
+}
+
+var arpIPPattern = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
+// arpTableText reads the host's ARP/neighbour table; failure is not an error,
+// it just leaves the fast path smaller.
+func arpTableText() string {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "darwin" {
+		cmd = exec.Command("arp", "-a")
+	} else {
+		cmd = exec.Command("ip", "neigh", "show")
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// parseARPCandidates extracts neighbour addresses on the same /24 as the
+// configured host — instant candidates that skip the sweep entirely.
+func parseARPCandidates(table, host string) []string {
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
+		return nil
+	}
+	prefix := strings.Join(strings.Split(ip.To4().String(), ".")[:3], ".") + "."
+	result := make([]string, 0, 8)
+	seen := make(map[string]bool)
+	for _, match := range arpIPPattern.FindAllString(table, -1) {
+		if !strings.HasPrefix(match, prefix) || seen[match] || strings.HasSuffix(match, ".255") {
+			continue
+		}
+		seen[match] = true
+		result = append(result, match)
+	}
+	return result
 }
 
 // withoutOwnAddresses drops this machine's own addresses so a sweep never
@@ -1297,6 +1445,11 @@ func cachedSweep(key string) ([]string, bool) {
 
 func cacheSweep(key string, ips []string) {
 	if key == "" {
+		return
+	}
+	// An empty sweep must never be cached: it is usually a budget casualty, and
+	// caching it would pin every retry to a known-wrong answer.
+	if len(ips) == 0 {
 		return
 	}
 	sweepCacheMu.Lock()

@@ -158,7 +158,27 @@ func validateProjectDocBundleCanonicalPath(path string, slug string) error {
 			return err
 		}
 	}
-	if len(parts) == 0 || parts[len(parts)-1] != slug {
+	if len(parts) == 0 {
+		return fmt.Errorf("selected document canonical path %q does not end with slug %q", path, slug)
+	}
+	finalSegment := parts[len(parts)-1]
+	// Reconcile path/slug validation with stored legacy metadata (feedback 91).
+	// Under current canon, a document's path must end with its canonical slug.
+	// In legacy projects, canonical contract documents were stored with a "-contract"
+	// slug suffix while their materialized path retained the bare topic name (e.g.
+	// doc 19 path ".../track-recording" vs slug "track-recording-contract", or
+	// doc 22 path ".../release-checklist" vs slug "release-checklist-contract").
+	// We accept when the path's final segment equals the slug OR equals the slug minus
+	// a trailing "-contract" suffix (legacy naming era).
+	// Export must stay strictly READ-ONLY: no silent rewrites of stored paths or slugs.
+	legacySlug := ""
+	if strings.HasSuffix(slug, "-contract") && len(slug) > len("-contract") {
+		legacySlug = strings.TrimSuffix(slug, "-contract")
+	}
+	if finalSegment != slug && (legacySlug == "" || finalSegment != legacySlug) {
+		if legacySlug != "" {
+			return fmt.Errorf("selected document canonical path %q does not end with slug %q or legacy form %q", path, slug, legacySlug)
+		}
 		return fmt.Errorf("selected document canonical path %q does not end with slug %q", path, slug)
 	}
 	return nil

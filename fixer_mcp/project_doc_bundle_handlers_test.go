@@ -203,3 +203,218 @@ func TestWriteProjectDocBundleArchiveCleansTemporaryFileOnFailure(t *testing.T) 
 		}
 	}
 }
+
+func TestExportProjectDocBundleLegacyPathValidation(t *testing.T) {
+	testDB := setupContextPackageTestDB(t)
+	defer testDB.Close()
+	seedContextPackageSourceProject(t, testDB)
+	withContextPackageTestAuth(t, testDB, "fixer", 1)
+
+	var projectRoot string
+	if err := testDB.QueryRow("SELECT cwd FROM project WHERE id = 1").Scan(&projectRoot); err != nil {
+		t.Fatalf("read project root: %v", err)
+	}
+
+	// Fixtures mirroring docs 19 and 22:
+	// Doc 19: path "tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording" vs slug "track-recording-contract"
+	// Doc 22: path "operations/release-checklist" vs slug "release-checklist-contract"
+	// Genuinely inconsistent doc 30: path "operations/completely-unrelated-path" vs slug "mismatched-contract"
+	fixtures := []struct {
+		id      int
+		title   string
+		content string
+		slug    string
+		path    string
+	}{
+		{
+			id:      19,
+			title:   "Track Recording Contract",
+			content: "Track recording contract body",
+			slug:    "track-recording-contract",
+			path:    "tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording",
+		},
+		{
+			id:      22,
+			title:   "Release Checklist Contract",
+			content: "Release checklist contract body",
+			slug:    "release-checklist-contract",
+			path:    "operations/release-checklist",
+		},
+		{
+			id:      30,
+			title:   "Genuinely Inconsistent Doc",
+			content: "Mismatched path body",
+			slug:    "mismatched-contract",
+			path:    "operations/completely-unrelated-path",
+		},
+	}
+	for _, f := range fixtures {
+		if _, err := testDB.Exec(
+			"INSERT INTO project_doc (id, project_id, title, content, doc_type, level, slug, path, status) VALUES (?, 1, ?, ?, 'contract', 1, ?, ?, 'current')",
+			f.id, f.title, f.content, f.slug, f.path,
+		); err != nil {
+			t.Fatalf("seed fixture doc %d: %v", f.id, err)
+		}
+	}
+
+	localID19, err := projectScopedDocIDFromGlobal(19, 1)
+	if err != nil {
+		t.Fatalf("resolve local id for doc 19: %v", err)
+	}
+	localID22, err := projectScopedDocIDFromGlobal(22, 1)
+	if err != nil {
+		t.Fatalf("resolve local id for doc 22: %v", err)
+	}
+	localID30, err := projectScopedDocIDFromGlobal(30, 1)
+	if err != nil {
+		t.Fatalf("resolve local id for doc 30: %v", err)
+	}
+
+	// 1. Proving export succeeds for legacy fixtures mirroring docs 19 and 22.
+	outputPath := filepath.Join(projectRoot, "artifacts", "legacy-bundle.zip")
+	_, out, err := ExportProjectDocBundle(context.Background(), nil, ExportProjectDocBundleInput{
+		ProjectDocIds: []int{localID19, localID22},
+		Path:          outputPath,
+	})
+	if err != nil {
+		t.Fatalf("export_project_doc_bundle failed for legacy docs: %v", err)
+	}
+	if out.Status != "success" || out.ProjectId != 1 || out.DocsCount != 2 || out.ArchiveBytes <= 0 {
+		t.Fatalf("unexpected export output: %+v", out)
+	}
+
+	entries := readProjectDocBundle(t, out.Path)
+	doc19ArchivePath := "docs/tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording.md"
+	doc22ArchivePath := "docs/operations/release-checklist.md"
+	for _, name := range []string{"manifest.json", doc19ArchivePath, doc22ArchivePath} {
+		if _, ok := entries[name]; !ok {
+			t.Fatalf("bundle missing %q; entries=%v", name, entries)
+		}
+	}
+	if string(entries[doc19ArchivePath]) != "Track recording contract body" {
+		t.Fatalf("doc 19 content mismatch: %q", string(entries[doc19ArchivePath]))
+	}
+	if string(entries[doc22ArchivePath]) != "Release checklist contract body" {
+		t.Fatalf("doc 22 content mismatch: %q", string(entries[doc22ArchivePath]))
+	}
+
+	var manifest ProjectDocBundleManifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if len(manifest.Docs) != 2 {
+		t.Fatalf("expected 2 docs in manifest, got %d", len(manifest.Docs))
+	}
+	docBySlug := make(map[string]ProjectDocBundleManifestDoc, len(manifest.Docs))
+	for _, d := range manifest.Docs {
+		docBySlug[d.Slug] = d
+	}
+	m19, ok := docBySlug["track-recording-contract"]
+	if !ok || m19.Path != "tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording" || m19.ArchivePath != doc19ArchivePath {
+		t.Fatalf("unexpected doc 19 manifest: %+v", m19)
+	}
+	m22, ok := docBySlug["release-checklist-contract"]
+	if !ok || m22.Path != "operations/release-checklist" || m22.ArchivePath != doc22ArchivePath {
+		t.Fatalf("unexpected doc 22 manifest: %+v", m22)
+	}
+
+	// Export must stay strictly READ-ONLY: verify DB rows were not modified.
+	var storedSlug19, storedPath19 string
+	if err := testDB.QueryRow("SELECT slug, path FROM project_doc WHERE id = 19").Scan(&storedSlug19, &storedPath19); err != nil {
+		t.Fatalf("query doc 19 from db: %v", err)
+	}
+	if storedSlug19 != "track-recording-contract" || storedPath19 != "tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording" {
+		t.Fatalf("doc 19 mutated in db: slug=%q path=%q", storedSlug19, storedPath19)
+	}
+	var storedSlug22, storedPath22 string
+	if err := testDB.QueryRow("SELECT slug, path FROM project_doc WHERE id = 22").Scan(&storedSlug22, &storedPath22); err != nil {
+		t.Fatalf("query doc 22 from db: %v", err)
+	}
+	if storedSlug22 != "release-checklist-contract" || storedPath22 != "operations/release-checklist" {
+		t.Fatalf("doc 22 mutated in db: slug=%q path=%q", storedSlug22, storedPath22)
+	}
+
+	// 2. Genuinely inconsistent fixture must still fail with a clear actionable error.
+	inconsistentPath := filepath.Join(projectRoot, "artifacts", "inconsistent.zip")
+	_, _, err = ExportProjectDocBundle(context.Background(), nil, ExportProjectDocBundleInput{
+		ProjectDocIds: []int{localID30},
+		Path:          inconsistentPath,
+	})
+	if err == nil {
+		t.Fatal("expected export of genuinely inconsistent doc to fail, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "does not end with slug") || !strings.Contains(err.Error(), "legacy form") {
+		t.Fatalf("expected clear actionable error mentioning slug and legacy form, got: %v", err)
+	}
+	if _, statErr := os.Stat(inconsistentPath); !os.IsNotExist(statErr) {
+		t.Fatalf("inconsistent export created archive on disk: %v", statErr)
+	}
+}
+
+func TestValidateProjectDocBundleCanonicalPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		slug    string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "exact match single segment",
+			path:    "root-doc",
+			slug:    "root-doc",
+			wantErr: false,
+		},
+		{
+			name:    "exact match nested path",
+			path:    "a/b/c",
+			slug:    "c",
+			wantErr: false,
+		},
+		{
+			name:    "legacy contract doc 19 mirror",
+			path:    "tordoki/backend-data-integrations/serverpod-domain-protocol/track-recording",
+			slug:    "track-recording-contract",
+			wantErr: false,
+		},
+		{
+			name:    "legacy contract doc 22 mirror",
+			path:    "operations/release-checklist",
+			slug:    "release-checklist-contract",
+			wantErr: false,
+		},
+		{
+			name:    "genuinely inconsistent with contract slug",
+			path:    "operations/other-topic",
+			slug:    "release-checklist-contract",
+			wantErr: true,
+			errMsg:  "does not end with slug \"release-checklist-contract\" or legacy form \"release-checklist\"",
+		},
+		{
+			name:    "genuinely inconsistent with normal slug",
+			path:    "operations/other-topic",
+			slug:    "release-checklist",
+			wantErr: true,
+			errMsg:  "does not end with slug \"release-checklist\"",
+		},
+		{
+			name:    "unsafe path traversal",
+			path:    "../outside",
+			slug:    "outside",
+			wantErr: true,
+			errMsg:  "unsafe canonical path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProjectDocBundleCanonicalPath(tc.path, tc.slug)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateProjectDocBundleCanonicalPath(%q, %q) err=%v, wantErr=%v", tc.path, tc.slug, err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.errMsg) {
+				t.Fatalf("expected error containing %q, got %v", tc.errMsg, err)
+			}
+		})
+	}
+}
+

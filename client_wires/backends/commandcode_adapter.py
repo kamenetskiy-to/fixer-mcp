@@ -14,6 +14,12 @@ _NO_EFFORT_MODELS = {
     "minimaxai/minimax-m3",
     "moonshotai/kimi-k3",
     "xiaomi/mimo-v2.5-pro",
+    # MiMo 2.6 family ships fixed reasoning: command-code CLI 1.69.0 refuses
+    # any --effort flag for it ("MiMo V2.6 Pro has no adjustable reasoning
+    # effort"), so the flag must never be sent.
+    "xiaomi/mimo-v2.6-flash",
+    "xiaomi/mimo-v2.6-pro",
+    "xiaomi/mimo-v2.6-pro-ultraspeed",
     "poolside/laguna-s-2.1-free",
     "laguna-s-2.1-free",
 }
@@ -24,9 +30,8 @@ _HIGH_MAX_MODELS = {
 }
 _LOW_HIGH_MAX_MODELS = {"zai-org/glm-5.3-flash"}
 _LOW_MEDIUM_XHIGH_MODELS = {"qwen/qwen3.8-27b", "qwen/qwen3.8-max"}
-# MiMo 2.6 (Xiaomi) sends the full effort ladder (pi model-store declares
-# low..max on both CommandCode accounts).
-_LOW_MEDIUM_HIGH_XHIGH_MAX_MODELS = {"xiaomi/mimo-v2.6-flash", "xiaomi/mimo-v2.6-pro"}
+# Reserved for future models with the full effort ladder.
+_LOW_MEDIUM_HIGH_XHIGH_MAX_MODELS: set[str] = set()
 
 
 def _commandcode_model_id(model: str) -> str:

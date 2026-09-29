@@ -285,3 +285,91 @@ func TestProbeFailureExplainsHostKeyConflict(t *testing.T) {
 		t.Fatalf("unreachable LAN address classified as %q", msg)
 	}
 }
+
+// The tailnet route must ride the SOCKS lane when it is up — that is the
+// transport ssh-tui uses and the one proven to answer on userspace daemons,
+// while the tailscale CLI proxy hung past any connect budget (Air, 2026-09-29).
+func TestTailnetProxyPrefersTheSocksLane(t *testing.T) {
+	t.Setenv("FIXER_SOCKS_PROXY", "127.0.0.1:1055")
+	t.Setenv("SSH_TUI_SOCKS_PROXY", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("all_proxy", "")
+	proxy, ok := tailnetProxyCommand()
+	if !ok {
+		t.Fatal("explicit socks lane must be usable")
+	}
+	if !strings.Contains(proxy, "nc -x '127.0.0.1:1055' -X 5 %h %p") {
+		t.Fatalf("tailnet proxy must ride the socks lane, got %q", proxy)
+	}
+	args, ok := sshArgs("macbook-pro", Route{Kind: "tailscale", Target: "operator@100.64.0.1"}, false)
+	if !ok {
+		t.Fatal("tailscale route must stay available")
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "ProxyCommand=nc -x '127.0.0.1:1055'") {
+		t.Fatalf("ssh args must carry the socks proxy, got %q", joined)
+	}
+}
+
+// Without an explicit lane the default endpoint is dial-checked; a host without
+// the lane must fall back to the tailscale CLI proxy instead of failing closed.
+func TestTailnetProxyFallsBackWithoutTheSocksLane(t *testing.T) {
+	t.Setenv("FIXER_SOCKS_PROXY", "")
+	t.Setenv("SSH_TUI_SOCKS_PROXY", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("all_proxy", "")
+	original := socksLaneDial
+	socksLaneDial = func(string) bool { return false }
+	defer func() { socksLaneDial = original }()
+	proxy, ok := tailnetProxyCommand()
+	if ok && strings.Contains(proxy, "-x '127.0.0.1:1055'") {
+		t.Fatalf("without a socks lane the proxy must not be a socks hop, got %q", proxy)
+	}
+	originalDial := socksLaneDial
+	socksLaneDial = func(string) bool { return true }
+	defer func() { socksLaneDial = originalDial }()
+	proxy, ok = tailnetProxyCommand()
+	if !ok || !strings.Contains(proxy, "-x '127.0.0.1:1055'") {
+		t.Fatalf("a live socks lane must be preferred, got ok=%v %q", ok, proxy)
+	}
+}
+
+// Only reachability timeouts earn a retry; auth and key failures must keep
+// their precise verdict on the first attempt.
+func TestTimeoutClassFailureRecognisesReachabilityTimeouts(t *testing.T) {
+	if !timeoutClassFailure(context.Background(), []byte("ssh: connect to host 100.64.0.1 port 22: Operation timed out")) {
+		t.Fatal("connect timeout must be retried")
+	}
+	if !timeoutClassFailure(context.Background(), []byte("kex_exchange_identification: Connection timed out during banner exchange")) {
+		t.Fatal("banner timeout must be retried")
+	}
+	if timeoutClassFailure(context.Background(), []byte("Permission denied (publickey)")) {
+		t.Fatal("auth failures must not be retried")
+	}
+	if timeoutClassFailure(context.Background(), []byte("Host key verification failed.")) {
+		t.Fatal("host key failures must not be retried")
+	}
+}
+
+// The LAN fast path takes neighbours straight from the ARP table; the parser
+// must keep only the configured host's /24 and never hand out broadcasts.
+func TestParseARPCandidatesPicksTheHostSubnet(t *testing.T) {
+	table := strings.Join([]string{
+		"? (192.168.1.64) at fe:9a:8d:74:35:ea on en0 ifscope [ethernet]",
+		"beelinerouter.net (192.168.1.1) at 58:76:ac:be:ee:62 on en0 ifscope [ethernet]",
+		"? (10.0.0.5) at aa:bb:cc:dd:ee:ff on en1 [ethernet]",
+		"? (192.168.1.255) at ff:ff:ff:ff:ff:ff on en0 [ethernet]",
+	}, "\n")
+	got := parseARPCandidates(table, "192.168.1.68")
+	want := map[string]bool{"192.168.1.64": true, "192.168.1.1": true}
+	if len(got) != len(want) {
+		t.Fatalf("arp candidates = %v, want exactly %v", got, want)
+	}
+	for _, ip := range got {
+		if !want[ip] {
+			t.Fatalf("unexpected arp candidate %q in %v", ip, got)
+		}
+	}
+	if parseARPCandidates(table, "not-an-ip") != nil {
+		t.Fatal("a non-IP host must yield no candidates")
+	}
+}

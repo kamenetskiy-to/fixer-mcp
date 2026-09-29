@@ -168,6 +168,23 @@ Automatic waves keep the stricter contract: a completed implementation
 reviewer and a pending acceptance session are required when entering
 acceptance.
 
+## Rejected Review: Rework Or Closed-Rejected
+
+A rejected review never needs a fake PASS (feedback 95). Two governed roads:
+
+1. **Rework**: `set_session_status(status="pending", reason="rejected: …")` on
+   the worker session (from `review`). It increments `rework_count` and
+   requeues the worker as `retry_wait`, so the next `wait_for_netrunner_wave`
+   relaunches the same worktree with the appended instructions. Append the
+   precise rework notes with `update_task` first.
+2. **Closed-rejected**: `transition_netrunner_wave_phase(target_phase=
+   "completed", review_approved=true, review_outcome="rejected")` closes the
+   wave from any phase once all workers are terminal: nothing is attested as
+   passed, the verdict is labelled on the wave, and scope leases are released
+   so later waves can take the paths.
+
+Everything else on a wave-linked session stays wave-owned while the wave runs.
+
 ## Droid Backend Launches
 
 Use Droid waves only when the Architect explicitly asks for Droid workers, when
