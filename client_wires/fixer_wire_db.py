@@ -951,7 +951,10 @@ def _load_fixer_resume_alias_session_ids(
     except RuntimeError:
         return set()
 
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return set()
     try:
         ensure_wire_schema(conn)
         project_id = resolve_project_id(conn, cwd)
@@ -963,7 +966,10 @@ def _load_fixer_resume_alias_session_ids(
             """,
             (project_id,),
         ).fetchall()
-    except RuntimeError:
+    except (RuntimeError, sqlite3.Error):
+        # Resume listing is best-effort: a missing or partially provisioned
+        # database (fresh host, no `project` table yet) must read as "no
+        # aliases", never abort the whole resume flow.
         return set()
     finally:
         conn.close()

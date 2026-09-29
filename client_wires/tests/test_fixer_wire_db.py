@@ -610,5 +610,48 @@ class SessionCodexLinkPersistenceTests(unittest.TestCase):
         self.assertTrue(any(index[2] for index in indexes))
 
 
+class ResumeAliasLookupDegradesGracefullyTests(unittest.TestCase):
+    def test_unprovisioned_db_reads_as_no_aliases(self) -> None:
+        # Fresh host: the state DB exists as an empty file but has no `project`
+        # table yet. Resume listing must degrade to "no aliases", not raise
+        # sqlite3.OperationalError through the whole flow (public CI bug).
+        from client_wires import fixer_wire_db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+            db_path = state_dir / "fixer.db"
+
+            def resolve_db(_cwd: Path) -> Path:
+                return db_path
+
+            def ensure_schema(_conn: sqlite3.Connection) -> None:
+                return None
+
+            def resolve_project(_conn: sqlite3.Connection, _cwd: Path) -> int:
+                raise sqlite3.OperationalError("no such table: project")
+
+            aliases = fixer_wire_db._load_fixer_resume_alias_session_ids(
+                Path(tmp),
+                resolve_fixer_db_path=resolve_db,
+                ensure_wire_schema=ensure_schema,
+                resolve_project_id=resolve_project,
+            )
+        self.assertEqual(aliases, set())
+
+    def test_unopenable_db_reads_as_no_aliases(self) -> None:
+        from client_wires import fixer_wire_db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_parent = Path(tmp) / "nope" / "fixer.db"
+            aliases = fixer_wire_db._load_fixer_resume_alias_session_ids(
+                Path(tmp),
+                resolve_fixer_db_path=lambda _cwd: missing_parent,
+                ensure_wire_schema=lambda _conn: None,
+                resolve_project_id=lambda _conn, _cwd: 1,
+            )
+        self.assertEqual(aliases, set())
+
+
 if __name__ == "__main__":
     unittest.main()
