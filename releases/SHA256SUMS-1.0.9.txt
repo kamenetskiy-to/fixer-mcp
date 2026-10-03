@@ -1,0 +1,8 @@
+cd62a34253df1163b5802d8fcf1eb0b9168c694c846cde6146a52f089e9184e9  fixer-mcp-1.0.9-darwin_amd64.json
+37c4f531525f36d0b1ec704ea601371220d588d118d38179f104d819df099510  fixer-mcp-1.0.9-darwin_amd64.tar.gz
+ea663d4a290b912e221a5822da0a7239e6dee9c04bcc966ed4572caae0433652  fixer-mcp-1.0.9-darwin_arm64.json
+04e8fb02b7acbfb0a2c8010136ba483aac874ce657b11196727925a7cd5f6cfa  fixer-mcp-1.0.9-darwin_arm64.tar.gz
+9095daf251c6af761a804dba2a904d98870d5025434d04687c599bd8302dcbf6  fixer-mcp-1.0.9-linux_amd64.json
+06a2ebaade0d243d9e44432eb517bc381b93e320a02b364d43a98ed5c6beabef  fixer-mcp-1.0.9-linux_amd64.tar.gz
+7fc27e5270b4bf803351099f1a04cde80f4130271f9a2d691f48bd5a653c0c2c  fixer-mcp-1.0.9-linux_arm64.json
+b76c82077405ecb92443ed9250ff9155ed4ee16e7e6f94bcd993b1d4c54f071b  fixer-mcp-1.0.9-linux_arm64.tar.gz

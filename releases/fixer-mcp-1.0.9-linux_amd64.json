@@ -1,16 +1,16 @@
 {
   "changelog": "System1: Flash finalText -> typesafe/jev; bounded stdin payloads; distinct infra errors; exact CommandCode/Pi transcript identity. Live wave843 PASS0.798.",
   "changelog_url": "",
-  "created_at": "2026-10-03T16:48:59Z",
+  "created_at": "2026-10-03T16:48:28Z",
   "format": 1,
   "min_os": "Linux (glibc 2.31+)",
   "min_python": "3.9",
-  "payload_path": "fixer-mcp-1.0.9-linux_arm64.tar.gz",
-  "payload_sha256": "b76c82077405ecb92443ed9250ff9155ed4ee16e7e6f94bcd993b1d4c54f071b",
-  "payload_url": "fixer-mcp-1.0.9-linux_arm64.tar.gz",
-  "platform": "linux_arm64",
+  "payload_path": "fixer-mcp-1.0.9-linux_amd64.tar.gz",
+  "payload_sha256": "06a2ebaade0d243d9e44432eb517bc381b93e320a02b364d43a98ed5c6beabef",
+  "payload_url": "fixer-mcp-1.0.9-linux_amd64.tar.gz",
+  "platform": "linux_amd64",
   "schema_compatibility_class": "project-workroom-v1",
-  "sha256": "b76c82077405ecb92443ed9250ff9155ed4ee16e7e6f94bcd993b1d4c54f071b",
+  "sha256": "06a2ebaade0d243d9e44432eb517bc381b93e320a02b364d43a98ed5c6beabef",
   "source_revision": "899cf001187c4e31c879aebaf7e5fed02b9a7f23",
   "version": "1.0.9"
 }
