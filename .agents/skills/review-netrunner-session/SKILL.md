@@ -14,8 +14,9 @@ It applies to manual, autonomous, and Fixer MCP-native worker launches.
 
 1. Authenticate as `fixer`.
 2. Load current internal Fixer MCP docs.
-3. Read the target session with `get_session` and confirm its structured report,
-   declared scope, and current task text.
+3. Read the target session with `get_session` and confirm its structured report
+   and current task text. A `declared_write_scope`, when present, is
+   informational only: never reject a delivery for changed paths outside it.
 4. Read append-only worker history with `view_netrunner_logs` when available.
 5. Read pending doc proposals with `review_doc_proposals`.
 6. Validate the actual work, not only the worker report or logs.
@@ -47,22 +48,32 @@ end of the lifecycle:
    A strict failure majority pauses the wave. After the one repair is consumed,
    another minority or tie requires manual repair; do not invent an untracked
    serial repair worker.
-3. Once all implementation workers are terminal, the failure policy is
-   `passed`, and the implementation reviewer is completed and approved, call
-   `transition_netrunner_wave_phase(target_phase="acceptance", ...)` with a
-   distinct project-scoped pending acceptance session.
-4. Review the acceptance session as its own governed step. Only after it is
-   completed and reviewed may the Fixer transition the wave to `completed`.
-   Recursive-capable waves also require an exact committed `handoff_sha`.
-   Completion closes the wave gate and releases its scope leases.
+3. Once all implementation workers are terminal and failure policy is `passed`,
+   review the System1 results and actual implementation. On `manual` waves the
+   Fixer's attestation enters acceptance:
+   `transition_netrunner_wave_phase(target_phase="acceptance", review_approved=true)`.
+   No dummy reviewer or acceptance session is needed. On `automatic` waves a
+   completed implementation reviewer and a distinct pending acceptance session
+   remain required.
+4. Close reviewed worker sessions with `set_session_status(status="completed")`
+   after entering acceptance, then transition to `completed` with
+   `review_approved=true`. Complete any supplied acceptance session first;
+   recursive-capable waves also require the committed `handoff_sha`.
 
-Current runtime blocker: `transition_netrunner_wave_phase` requires a completed
-implementation reviewer session even when the wave uses `manual` review, but
-manual policy intentionally creates no reviewer Netrunner. Therefore manual
-waves (including monowaves, which must remain manual) cannot currently enter
-this acceptance transition through the runtime contract. Record that blocker;
-do not invent a reviewer session or claim that Fixer-only review satisfies the
-handler until the runtime contract is changed.
+System1 uses a Flash factual reader followed by `typesafe/jev` typed probability
+questions. A System1 PASS does not accept the implementation: Fixer review is
+still mandatory. Genuine content failures requeue the same worker (at most three
+checks). A stronger divergent alternative escalates immediately to the Fixer.
+Reader/API/invalid-response failures are recorded as `infra_failed`, not content
+FAILs: they never consume content-check budget or send implementation back for
+rework. After three infrastructure attempts the Fixer reviews the blocker.
+Use `get_system1_reviews` and artifacts to distinguish these states.
+
+A rejected delivery can be requeued through `update_task` plus
+`set_session_status(status="pending", reason="rejected: …")`, or closed honestly
+via `transition_netrunner_wave_phase(target_phase="completed", review_approved=true,
+review_outcome="rejected")`. Record durable backlog follow-up; never fabricate
+PASS to close a wave.
 
 ## Acceptance Cleanup
 

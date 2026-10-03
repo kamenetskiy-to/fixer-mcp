@@ -118,6 +118,7 @@ var fixerToolNames = []string{
 	"create_netrunner_wave",
 	"get_netrunner_wave",
 	"list_netrunner_waves",
+	system1ReviewToolName,
 	launchNetrunnerWaveToolName,
 	waitForNetrunnerWaveToolName,
 	launchNetrunnerWavesToolName,
@@ -248,7 +249,7 @@ func registerBootstrapTools(server *mcp.Server) {
 }
 
 func registerLaunchNetrunnerWaveTool(server *mcp.Server) {
-	addMcpTool(server, launchNetrunnerWaveToolName, "Launch all workers for one created parallel Netrunner wave using isolated Git worktrees. Requires fixer role.", LaunchNetrunnerWave)
+	addMcpTool(server, launchNetrunnerWaveToolName, "Launch all workers for one created parallel Netrunner wave using isolated Git worktrees. Requires fixer role. Waves without a persisted system1_check packet must pass system1_check here.", LaunchNetrunnerWaveTool)
 }
 
 func registerWaitForNetrunnerWaveTool(server *mcp.Server) {
@@ -377,9 +378,10 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "create_planned_netrunner_wave", "Persist future project-scoped wave work, including per-task backend/model/reasoning and project-allowed MCP assignments, without creating sessions, resolving Git, or reserving write scopes. Requires fixer role.", CreatePlannedNetrunnerWave)
 	addMcpTool(server, "get_planned_netrunner_wave", "Read one project-scoped planned-wave definition and its future tasks. Requires fixer role.", GetPlannedNetrunnerWave)
 	addMcpTool(server, "initialize_planned_netrunner_wave", "Materialize one planned wave into configured pending sessions with their MCP assignments and delegate to governed create_netrunner_wave admission. Requires fixer role.", InitializePlannedNetrunnerWave)
-	addMcpTool(server, "create_netrunner_wave", "Create a durable parallel Netrunner wave from pending sessions after strict Git and write-scope admission. Does not launch workers. Requires fixer role.", CreateNetrunnerWave)
+	addMcpTool(server, "create_netrunner_wave", "Create a durable parallel Netrunner wave from pending sessions after strict Git admission. declared_write_scope is informational only and never gates admission. system1_check is required for new waves. Does not launch workers. Requires fixer role.", CreateNetrunnerWaveTool)
 	addMcpTool(server, "get_netrunner_wave", "Read one durable parallel Netrunner wave and its worker rows for the current project. Requires fixer role.", GetNetrunnerWave)
 	addMcpTool(server, "list_netrunner_waves", "List/search recent project-scoped parallel Netrunner waves with compact metadata (status, phase, worker counts, session IDs, control/failure state, timestamps), bounded and paginated. Use this instead of direct SQLite/CLI archaeology to discover historical waves. Requires fixer role.", ListNetrunnerWaves)
+	addMcpTool(server, system1ReviewToolName, "Read a wave's System1 first-stage review packet and its per-worker check rows (verdict, probabilities, escalation, artifact paths). Requires fixer role.", GetSystem1Reviews)
 	registerLaunchNetrunnerWaveTool(server)
 	registerWaitForNetrunnerWaveTool(server)
 	registerLaunchNetrunnerWavesTool(server)

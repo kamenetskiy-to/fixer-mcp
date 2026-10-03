@@ -126,7 +126,7 @@ func CheckoutTask(ctx context.Context, req *mcp.CallToolRequest, input CheckoutT
 
 type CreateTaskInput struct {
 	TaskDescription    string   `json:"task_description" jsonschema:"Description of the task to be created"`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional declared project-relative write scope for the session. Defaults to the whole project to preserve serial execution."`
+	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional declared project-relative write scope for the session. Recorded as informational context only and never enforced."`
 	EpicDocId          int      `json:"epic_doc_id,omitempty" jsonschema:"Optional project-scoped epic documentation ID to link to the session."`
 }
 

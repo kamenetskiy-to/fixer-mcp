@@ -5,7 +5,7 @@ description: "Use this skill when a project Fixer should dispatch multiple bound
 
 # Run Netrunner Wave
 
-Use this skill for every Fixer-managed Netrunner launch. A wave may contain one worker, multiple independent workers, or dependency-gated workers whose scopes overlap only through an explicit DAG.
+Use this skill for every Fixer-managed Netrunner launch. A wave may contain one worker, multiple independent workers, or dependency-gated workers sequenced through an explicit DAG. Declared write scopes never gate admission; use a dependency DAG when worker outputs must be merged in order.
 
 ## Preconditions
 
@@ -14,8 +14,7 @@ Use this skill for every Fixer-managed Netrunner launch. A wave may contain one 
 - The registered project root must be a Git repository. If it is not a Git repository, initialize it first (`git init && git add . && git commit -m "Initial commit"`). Absence of a Git repository is NEVER a reason to refuse a wave.
 - There is no active orchestration freeze or stale epoch blocker.
 - The wave has at least one pending session.
-- Each session has a narrow, disjoint `declared_write_scope`.
-- No session owns broad scope such as `.`, whole repo, shared app root, shared migrations, or the same test/dev-server state unless the Fixer has an explicit dependency DAG and a concrete isolation reason.
+- `declared_write_scope` is optional informational context only. Sessions with a missing scope, a broad scope such as `.`, or overlapping scopes are all admissible and are never rejected for their scope.
 
 ## Review Policy
 
@@ -93,7 +92,7 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
 ## Flow
 
 1. Slice the work into independent tasks with explicit ownership, acceptance criteria, tests, and forbidden areas.
-2. Create each worker session with `create_task`, using disjoint `declared_write_scope`.
+2. Create each worker session with `create_task`. A `declared_write_scope` may be attached as informational context; it is never required, never precomputed, and never enforced.
 3. Attach only relevant docs with `set_session_attached_docs`.
 4. Assign only required MCP servers with `set_session_mcp_servers`.
 5. If old candidate sessions are stale, zombie `in_progress`, secret-dependent,
@@ -116,9 +115,9 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
    - read the session report and proposals
    - inspect changed paths and the captured patch artifact
    - inspect the worker worktree when needed
-   - verify the worker reported a commit SHA, a clean worktree, scope compliance, and required tests
+   - verify the worker reported a commit SHA, a clean worktree, and required tests
    - verify the automatic reviewer is terminal and its report is available before using it as review evidence
-   - reject for rework if task changes are uncommitted, the worktree is dirty, or changed paths exceed `declared_write_scope`
+   - reject for rework if task changes are uncommitted or the worktree is dirty; never reject a delivery for changed paths outside a declared scope
    - approve or reject doc proposals by Fixer judgment
    - complete the session or append precise rework
 12. Continue waiting until all implementation workers are terminal; use
@@ -180,10 +179,71 @@ A rejected review never needs a fake PASS (feedback 95). Two governed roads:
 2. **Closed-rejected**: `transition_netrunner_wave_phase(target_phase=
    "completed", review_approved=true, review_outcome="rejected")` closes the
    wave from any phase once all workers are terminal: nothing is attested as
-   passed, the verdict is labelled on the wave, and scope leases are released
-   so later waves can take the paths.
+   passed, the verdict is labelled on the wave, and its scope leases are
+   released as bookkeeping (leases never fence later waves).
 
 Everything else on a wave-linked session stays wave-owned while the wave runs.
+
+## System1 First-Stage Review (system1-trial-0.1)
+
+`system1_check` is REQUIRED on new waves: `create_netrunner_wave` and
+`launch_netrunner_wave` fail closed with an actionable error when a new wave
+would run without it. Waves created before this layer (no persisted packet)
+stay on the manual review path. Full contract and default prompts:
+`docs/plans/system1-review-contract.md`.
+
+Packet (attached per wave):
+
+```json
+{
+  "criteria_prompt": "c1 (weight 0.6, hard): ...\nc2 (weight 0.4, soft): ...",
+  "hard_ids": ["c1"],
+  "threshold": 0.75,
+  "max_checks": 3,
+  "contract_version": "system1-trial-0.1"
+}
+```
+
+Write one criterion per line (the JSON `\n` above denotes a newline).
+The reader is a one-shot `cmd` call to `xiaomi/mimo-v2.6-flash`; only its final
+factual overview is passed to `typesafe/jev` as typed `noul` questions. Both
+inputs travel on stdin, not argv. Jev is not a chat judge; weights, threshold
+and hard gates are computed locally by the wave engine.
+
+Decision rule (0.75/0.5): a content check passes iff `overall_probability >= 0.75`
+AND every hard criterion in `hard_ids` has `probability >= 0.5`. A valid hard
+criterion below 0.5 forces a content fail. Missing/invalid answers, malformed
+JSON, reader/CLI/API errors and oversized requests are infrastructure failures,
+never a content verdict or a pass.
+
+Per worker, at most `max_checks` System1 checks run (default 3, clamped 1..3):
+
+- **Pass**: record `system1_passed`; the worker stays `review_ready` for the
+  normal manual acceptance close. System1 never auto-completes the wave.
+- **Fail with budget remaining (checks 1–2)**: the SAME worker continues — no
+  forked session. The check results and remaining gaps are appended to the
+  task (`update_task`), `set_session_status(review -> pending)` requeues the
+  worker to `retry_wait` with a cleared `worker_process_id`, and the wait loop
+  relaunches it in its recorded worktree.
+- **Third failed content check**: no requeue. The worker is marked
+  `system1_escalated`; `next_action="fixer_second_stage_review"` asks the Fixer
+  to accept or reject through the existing manual wave close.
+- **Stronger but different**: if strict criteria fail but the independent
+  `stronger_but_different` probability reaches the threshold, immediately
+  escalate to the Fixer instead of requeuing the worker onto the specification.
+  This is not a PASS; the Fixer decides whether the alternative is better.
+- **Infrastructure failure**: append an `infra_failed` diagnostic row/artifact;
+  do not consume the content-check budget, move the session or requeue the
+  implementation. The worker stays `review_ready`. At most three such attempts
+  run before escalation to Fixer; never invent synthetic content probabilities.
+
+Each check stores its packet and verdict as a wave artifact and a short row
+readable via `get_system1_reviews`.
+
+The `declared_write_scope` fence has been deliberately removed: scope entries
+are informational only and never gate admission, launch, or completion.
+System1 is deliberately independent of scope handling — do not remove or
+weaken the System1 layer together with the scope machinery.
 
 ## Droid Backend Launches
 
@@ -215,7 +275,7 @@ malformed-completion handling, and hang recovery follow the provider adapter can
 - Do not let one unsafe slice block safe independent slices.
 - Netrunners must not remove worktrees, rebase, merge, change wave state, or edit another worker's branch.
 - Netrunners must commit all task changes on their own worker branch before `complete_task`; they must not merge or push.
-- Treat timeout, stale epoch, frozen orchestration, missing process, or scope drift as review blockers.
+- Treat timeout, stale epoch, frozen orchestration, or missing process as review blockers.
 - If the wave produces conflicting results, use the durable failure-policy and
   governed repair path above, or stop and report the conflict; do not launch an
   untracked serial autonomous worker.

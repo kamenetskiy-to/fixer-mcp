@@ -50,20 +50,21 @@ func recordWaveWorkerProcessLaunch(projectID int, sessionID int, pid int, launch
 }
 
 type CreateNetrunnerWaveInput struct {
-	SessionIds              []int            `json:"session_ids" jsonschema:"Project-scoped pending session IDs to include in the wave. Must contain at least one session."`
-	Dependencies            []WaveDependency `json:"dependencies,omitempty" jsonschema:"Optional DAG dependencies. Each child is held until all listed parent sessions have completed."`
-	WorktreeRoot            string           `json:"worktree_root,omitempty" jsonschema:"Optional project-relative or absolute root for future worker worktrees. Defaults to .codex/netrunner_worktrees."`
-	BaseRef                 string           `json:"base_ref,omitempty" jsonschema:"Optional Git base ref to resolve for the wave. Defaults to HEAD."`
-	Reason                  string           `json:"reason,omitempty" jsonschema:"Optional audit reason for creating the wave."`
-	EpicDocId               int              `json:"epic_doc_id,omitempty" jsonschema:"Optional project-scoped epic documentation ID to link to the wave."`
-	ParentWaveId            int              `json:"parent_wave_id,omitempty" jsonschema:"Optional parent wave ID. Child waves inherit and decrement the root recursion budgets."`
-	MaxChildWaveDepth       int              `json:"max_child_wave_depth,omitempty" jsonschema:"Root-only recursion depth. Zero disables child-wave creation; maximum 16."`
-	MaxTotalDescendantWaves int              `json:"max_total_descendant_waves,omitempty" jsonschema:"Root-only total descendant-wave safety budget. Defaults to 32 when recursion is enabled; maximum 256."`
-	MaxTotalSessions        int              `json:"max_total_sessions,omitempty" jsonschema:"Root-only total session safety budget across the wave tree. Defaults to 128; maximum 2048."`
-	ReviewPolicy            string           `json:"review_policy,omitempty" jsonschema:"Review policy for the wave: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner after all workers are terminal; use only when explicitly requested by the Architect or for a very large parallel wave)."`
-	ReviewBackend           string           `json:"review_backend,omitempty" jsonschema:"Backend for an automatic reviewer. Defaults to codex."`
-	ReviewModel             string           `json:"review_model,omitempty" jsonschema:"Model for an automatic reviewer. Defaults to gpt-5.6-luna."`
-	ReviewReasoning         string           `json:"review_reasoning,omitempty" jsonschema:"Reasoning level for an automatic reviewer. Defaults to high."`
+	SessionIds              []int              `json:"session_ids" jsonschema:"Project-scoped pending session IDs to include in the wave. Must contain at least one session."`
+	Dependencies            []WaveDependency   `json:"dependencies,omitempty" jsonschema:"Optional DAG dependencies. Each child is held until all listed parent sessions have completed."`
+	WorktreeRoot            string             `json:"worktree_root,omitempty" jsonschema:"Optional project-relative or absolute root for future worker worktrees. Defaults to .codex/netrunner_worktrees."`
+	BaseRef                 string             `json:"base_ref,omitempty" jsonschema:"Optional Git base ref to resolve for the wave. Defaults to HEAD."`
+	Reason                  string             `json:"reason,omitempty" jsonschema:"Optional audit reason for creating the wave."`
+	EpicDocId               int                `json:"epic_doc_id,omitempty" jsonschema:"Optional project-scoped epic documentation ID to link to the wave."`
+	ParentWaveId            int                `json:"parent_wave_id,omitempty" jsonschema:"Optional parent wave ID. Child waves inherit and decrement the root recursion budgets."`
+	MaxChildWaveDepth       int                `json:"max_child_wave_depth,omitempty" jsonschema:"Root-only recursion depth. Zero disables child-wave creation; maximum 16."`
+	MaxTotalDescendantWaves int                `json:"max_total_descendant_waves,omitempty" jsonschema:"Root-only total descendant-wave safety budget. Defaults to 32 when recursion is enabled; maximum 256."`
+	MaxTotalSessions        int                `json:"max_total_sessions,omitempty" jsonschema:"Root-only total session safety budget across the wave tree. Defaults to 128; maximum 2048."`
+	ReviewPolicy            string             `json:"review_policy,omitempty" jsonschema:"Review policy for the wave: manual (default; Fixer reviews directly) or automatic (starts a reviewer Netrunner after all workers are terminal; use only when explicitly requested by the Architect or for a very large parallel wave)."`
+	ReviewBackend           string             `json:"review_backend,omitempty" jsonschema:"Backend for an automatic reviewer. Defaults to codex."`
+	ReviewModel             string             `json:"review_model,omitempty" jsonschema:"Model for an automatic reviewer. Defaults to gpt-5.6-luna."`
+	ReviewReasoning         string             `json:"review_reasoning,omitempty" jsonschema:"Reasoning level for an automatic reviewer. Defaults to high."`
+	System1Check            *System1CheckInput `json:"system1_check,omitempty" jsonschema:"Required for new waves: System1 first-stage review packet {criteria_prompt, hard_ids, threshold (default 0.75), max_checks (default 3, clamped 1..3), contract_version: system1-trial-0.1}."`
 }
 
 type WaveDependency struct {
@@ -87,6 +88,7 @@ type LaunchNetrunnerWaveInput struct {
 	ReviewBackend   string                   `json:"review_backend,omitempty" jsonschema:"Optional automatic reviewer backend. Defaults to codex."`
 	ReviewModel     string                   `json:"review_model,omitempty" jsonschema:"Optional automatic reviewer model. Defaults to gpt-5.6-luna."`
 	ReviewReasoning string                   `json:"review_reasoning,omitempty" jsonschema:"Optional automatic reviewer reasoning. Defaults to high."`
+	System1Check    *System1CheckInput       `json:"system1_check,omitempty" jsonschema:"System1 first-stage review packet for waves that do not carry one yet {criteria_prompt, hard_ids, threshold (default 0.75), max_checks (default 3, clamped 1..3), contract_version: system1-trial-0.1}. Required when the wave has no persisted packet."`
 }
 
 type WaveWorkerLaunchConfig struct {
@@ -136,6 +138,8 @@ type NetrunnerWaveWorkerSnapshot struct {
 	RetryCause          string   `json:"retry_cause"`
 	RetryNextEligibleAt string   `json:"retry_next_eligible_at"`
 	CleanupStatus       string   `json:"cleanup_status"`
+	System1State        string   `json:"system1_state,omitempty"`
+	System1ChecksUsed   int      `json:"system1_checks_used,omitempty"`
 	CreatedAt           string   `json:"created_at"`
 	UpdatedAt           string   `json:"updated_at"`
 	LaunchedAt          string   `json:"launched_at,omitempty"`
@@ -290,6 +294,13 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 	repairRequired := wave.GateState == parallelWaveGateImplementationRepair || wave.FailurePolicyState == parallelWaveFailurePolicyRepairRequired || wave.FailurePolicyState == parallelWaveFailurePolicyRepairAuthorized || wave.FailurePolicyState == parallelWaveFailurePolicyRepairInProgress
 	waveReviewReady := wave.GateState == parallelWaveGateImplementationReview && wave.FailurePolicyState == parallelWaveFailurePolicyPassed
 	acceptanceReady := wave.Phase == parallelWavePhaseAcceptance && wave.AcceptanceSessionId > 0 && wave.AcceptanceSessionStatus == "completed"
+	system1Escalated := false
+	for _, worker := range wave.Workers {
+		if worker.System1State == system1StateEscalated {
+			system1Escalated = true
+			break
+		}
+	}
 
 	operatorState, label, nextAction := "implementation_active", "Implementation running", "wait"
 	switch {
@@ -307,6 +318,8 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 		if wave.FailurePolicyState == parallelWaveFailurePolicyRepairAuthorized || wave.FailurePolicyState == parallelWaveFailurePolicyRepairInProgress {
 			nextAction = "monitor_repair"
 		}
+	case system1Escalated:
+		operatorState, label, nextAction = "system1_escalated", "System1 check escalated; Fixer second-stage review", "fixer_second_stage_review"
 	case waveReviewReady:
 		operatorState, label, nextAction = "wave_review_ready", "Ready for implementation review", "review_implementation"
 	case allWorkersTerminal:
@@ -641,9 +654,6 @@ func loadParallelWaveSessionCandidates(localSessionIDs []int, projectID int) ([]
 		if state.ReworkCount != 0 || state.ForcedStopCount != 0 {
 			return nil, fmt.Errorf("session %d has rework/forced-stop history and must be forked or handled serially", localSessionID)
 		}
-		if len(state.DeclaredWriteScope) == 0 {
-			return nil, fmt.Errorf("session %d must declare a non-empty write scope", localSessionID)
-		}
 		candidates = append(candidates, parallelWaveSessionCandidate{
 			LocalSessionID:     localSessionID,
 			GlobalSessionID:    globalSessionID,
@@ -756,9 +766,6 @@ func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, b
 		_ = tx.Rollback()
 	}()
 	if err := validateParallelWaveLineageBudgetTx(tx, lineage, projectID, len(candidates)); err != nil {
-		return 0, err
-	}
-	if err := validateParallelWaveAdmissionLeasesTx(tx, projectID, candidates); err != nil {
 		return 0, err
 	}
 
@@ -1022,6 +1029,11 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 	snapshot.LaunchedAt = launchedAt
 	snapshot.CompletedAt = completedAt
 
+	system1WorkerColumns := ""
+	if dbTableHasColumn("parallel_wave_worker", "system1_state") {
+		system1WorkerColumns = "COALESCE(p.system1_state, ''), COALESCE(p.system1_checks_used, 0),"
+	}
+
 	rows, err := db.Query(
 		`SELECT p.id,
 		        p.wave_id,
@@ -1053,6 +1065,7 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		        COALESCE(p.retry_cause, ''),
 		        COALESCE(p.retry_next_eligible_at, ''),
 		        COALESCE(p.cleanup_status, 'pending'),
+		        `+system1WorkerColumns+`
 		        p.created_at,
 		        p.updated_at,
 		        COALESCE(p.launched_at, ''),
@@ -1078,7 +1091,7 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 			scopePayload   string
 			changedPayload string
 		)
-		if err := rows.Scan(
+		scanArgs := []any{
 			&worker.Id,
 			&worker.WaveId,
 			&worker.ProjectId,
@@ -1104,13 +1117,19 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 			&worker.RetryCause,
 			&worker.RetryNextEligibleAt,
 			&worker.CleanupStatus,
+		}
+		if system1WorkerColumns != "" {
+			scanArgs = append(scanArgs, &worker.System1State, &worker.System1ChecksUsed)
+		}
+		scanArgs = append(scanArgs,
 			&worker.CreatedAt,
 			&worker.UpdatedAt,
 			&worker.LaunchedAt,
 			&worker.TerminalAt,
 			&worker.CleanedAt,
 			&worker.SessionReport,
-		); err != nil {
+		)
+		if err := rows.Scan(scanArgs...); err != nil {
 			return NetrunnerWaveSnapshot{}, err
 		}
 		worker.DeclaredWriteScope = decodeParallelWaveStringList(scopePayload)
@@ -1265,6 +1284,15 @@ func CreateNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input Cr
 	waveID, err := insertParallelWave(authorizedProjectId, normalizedProjectCWD, worktreeRoot, baseSHA, baseBranch, control.OrchestrationEpoch, epicDocID, lineage, candidates, dependencies, reviewPolicy, reviewBackend, reviewModel, reviewReasoning)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, fmt.Errorf("DB insert error: %v", err)
+	}
+	if input.System1Check != nil {
+		system1Packet, packetErr := normalizeSystem1CheckInput(input.System1Check)
+		if packetErr != nil {
+			return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, packetErr
+		}
+		if err := persistSystem1Packet(waveID, authorizedProjectId, system1Packet); err != nil {
+			return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, fmt.Errorf("failed to persist system1_check packet: %v", err)
+		}
 	}
 
 	wave, err := fetchNetrunnerWaveSnapshot(waveID, authorizedProjectId)
@@ -1603,16 +1631,6 @@ func validateWorkerCompletionState(projectCWD string, wave NetrunnerWaveSnapshot
 
 	if err := validateChangedParallelWaveSubmodules(worktreePath, baseSHA, headSHA); err != nil {
 		return err
-	}
-
-	trackedNamesRaw, err := gitCommandInWorktreeBytes(worktreePath, "diff", "--name-only", "-z", baseSHA, "--")
-	if err != nil {
-		return fmt.Errorf("failed to inspect changed paths: %w", err)
-	}
-	for _, path := range splitGitPathLines(string(trackedNamesRaw)) {
-		if !parallelWaveDeclaredWriteScopeContainsPath(worker.DeclaredWriteScope, path) {
-			return fmt.Errorf("worker completion rejected: changed path %q is outside declared write scope %v", path, worker.DeclaredWriteScope)
-		}
 	}
 
 	return nil
@@ -2630,6 +2648,15 @@ func LaunchNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input La
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, err
 	}
+	if input.System1Check != nil {
+		system1Packet, packetErr := normalizeSystem1CheckInput(input.System1Check)
+		if packetErr != nil {
+			return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, packetErr
+		}
+		if err := persistSystem1Packet(wave.Id, authorizedProjectId, system1Packet); err != nil {
+			return &mcp.CallToolResult{IsError: true}, LaunchNetrunnerWaveOutput{}, fmt.Errorf("failed to persist system1_check packet: %v", err)
+		}
+	}
 
 	control, _, err := fetchOrchestrationControl(authorizedProjectId)
 	if err != nil {
@@ -2955,11 +2982,28 @@ func WaitForNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input W
 			if err != nil {
 				return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, fmt.Errorf("failed to inspect wave worker %d: %v", worker.SessionId, err)
 			}
-			if terminal {
-				qualifying = append(qualifying, candidate)
-			} else {
+			if !terminal {
 				allTerminal = false
+				continue
 			}
+			// System1 first-stage review gate: a review_ready worker on a wave
+			// with a system1_check packet is checked before the Fixer is asked
+			// to accept. A passed or escalated worker stays review_ready; a
+			// failed check requeues the same worker (retry_wait) and it must
+			// not surface as a review candidate until it passes or exhausts
+			// its check budget.
+			if candidate.TerminalCondition == "review_ready" {
+				updatedWorker, outcome, system1Err := processSystem1ReviewForWorker(ctx, normalizedProjectCWD, wave, candidate.Worker)
+				if system1Err != nil {
+					return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, fmt.Errorf("system1 review failed for wave worker %d: %v", worker.SessionId, system1Err)
+				}
+				candidate.Worker = updatedWorker
+				if outcome == system1OutcomeRequeued {
+					allTerminal = false
+					continue
+				}
+			}
+			qualifying = append(qualifying, candidate)
 		}
 
 		if err := processParallelWaveWorkerRetries(ctx, normalizedProjectCWD, wave, deferredLaunchTimeout); err != nil {

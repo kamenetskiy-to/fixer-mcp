@@ -463,7 +463,7 @@ func TestPrepareParallelWaveLineageRejectsCrossProjectCycleEscalationAndNegative
 	}
 }
 
-func TestCreateNetrunnerWaveRejectsDuplicateSessionAndCrossWaveScopeLease(t *testing.T) {
+func TestCreateNetrunnerWaveRejectsDuplicateSessionAndAdmitsOverlappingScopes(t *testing.T) {
 	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
 	defer func() { db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID }()
 	repoDir := setupCleanGitRepo(t)
@@ -481,8 +481,8 @@ func TestCreateNetrunnerWaveRejectsDuplicateSessionAndCrossWaveScopeLease(t *tes
 	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'overlap', 'pending', '[\"docs/a/subtree\"]')"); err != nil {
 		t.Fatalf("seed overlapping session: %v", err)
 	}
-	if _, _, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{3}}); err == nil || !strings.Contains(err.Error(), "overlaps active wave") {
-		t.Fatalf("expected prefix-overlap lease rejection, got %v", err)
+	if _, _, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{3}}); err != nil {
+		t.Fatalf("active scope leases must not fence a later overlapping wave: %v", err)
 	}
 	if _, _, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{SessionIds: []int{2}}); err != nil {
 		t.Fatalf("disjoint concurrent wave should remain admissible: %v", err)

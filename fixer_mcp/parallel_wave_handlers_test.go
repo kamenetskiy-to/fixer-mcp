@@ -252,18 +252,28 @@ func TestNormalizeParallelWaveAdmissionWorkers(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects duplicate sessions and overlapping workers", func(t *testing.T) {
+	t.Run("rejects duplicate sessions", func(t *testing.T) {
 		if _, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
 			{SessionID: 7, DeclaredWriteScope: []string{"docs/a"}},
 			{SessionID: 7, DeclaredWriteScope: []string{"docs/b"}},
 		}); err == nil || !strings.Contains(err.Error(), "duplicated") {
 			t.Fatalf("expected duplicate session rejection, got %v", err)
 		}
-		if _, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
+	})
+
+	t.Run("admits overlapping missing and out-of-list scopes", func(t *testing.T) {
+		workers, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
 			{SessionID: 7, DeclaredWriteScope: []string{"docs"}},
 			{SessionID: 8, DeclaredWriteScope: []string{"docs/research"}},
-		}); err == nil || !strings.Contains(err.Error(), "overlapping declared write scopes") {
-			t.Fatalf("expected cross-worker overlap rejection, got %v", err)
+			{SessionID: 9, DeclaredWriteScope: nil},
+			{SessionID: 10, DeclaredWriteScope: []string{"."}},
+			{SessionID: 11, DeclaredWriteScope: []string{"fixer_mcp/main.go"}},
+		})
+		if err != nil {
+			t.Fatalf("expected overlapping/missing/broad/out-of-list scopes to be admitted, got %v", err)
+		}
+		if len(workers) != 5 {
+			t.Fatalf("expected five workers, got %+v", workers)
 		}
 	})
 }
@@ -776,6 +786,84 @@ func TestCreateNetrunnerWaveAllowsOverlappingParentChildScopes(t *testing.T) {
 	}
 	if callResult != nil || len(created.Workers) != 2 {
 		t.Fatalf("unexpected create output: result=%+v wave=%+v", callResult, created)
+	}
+}
+
+func TestCreateNetrunnerWaveAllowsMissingBroadAndOutOfListScopes(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer func() { _ = testDB.Close() }()
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Missing scope', 'pending', '')`); err != nil {
+		t.Fatalf("seed missing-scope session: %v", err)
+	}
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Broad scope', 'pending', '["."]')`); err != nil {
+		t.Fatalf("seed broad-scope session: %v", err)
+	}
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Out-of-list scope', 'pending', '["fixer_mcp/main.go"]')`); err != nil {
+		t.Fatalf("seed out-of-list-scope session: %v", err)
+	}
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	callResult, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 3, 4, 5},
+		BaseRef:    "HEAD",
+	})
+	if err != nil {
+		t.Fatalf("wave admission must not fail for missing/broad/out-of-list scopes: %v", err)
+	}
+	if callResult != nil || len(created.Workers) != 4 {
+		t.Fatalf("unexpected create output: result=%+v wave=%+v", callResult, created)
+	}
+}
+
+func TestValidateWorkerCompletionStateAllowsOutOfScopeChangedPath(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	repoDir, testDB, _, wave := setupRunningWaveTest(t)
+	defer func() { _ = testDB.Close() }()
+
+	worker := testWaveWorkerBySession(t, wave, 1)
+	absWorktreePath, err := resolveParallelWaveWorktreePath(repoDir, worker.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(absWorktreePath, "OUT_OF_SCOPE.txt"), []byte("committed outside declared scope\n"), 0o644); err != nil {
+		t.Fatalf("write out of scope file: %v", err)
+	}
+	runGitTestCommand(t, absWorktreePath, "add", "OUT_OF_SCOPE.txt")
+	runGitTestCommand(t, absWorktreePath, "-c", "user.name=Fixer Test", "-c", "user.email=fixer@example.test", "commit", "-m", "out-of-list change")
+
+	if err := validateWorkerCompletionState(repoDir, wave, worker); err != nil {
+		t.Fatalf("completion must not fail for an out-of-list changed path: %v", err)
+	}
+
+	finalized, err := finalizeParallelWaveWorker(repoDir, wave, worker, parallelWaveWorkerStatusReviewReady, "")
+	if err != nil {
+		t.Fatalf("finalizeParallelWaveWorker returned error: %v", err)
+	}
+	if finalized.Status != parallelWaveWorkerStatusReviewReady {
+		t.Fatalf("expected worker status review-ready after out-of-list change, got %s", finalized.Status)
+	}
+	if strings.Contains(finalized.FailureReason, "outside declared write scope") {
+		t.Fatalf("scope fence must be removed, got failure reason: %s", finalized.FailureReason)
 	}
 }
 

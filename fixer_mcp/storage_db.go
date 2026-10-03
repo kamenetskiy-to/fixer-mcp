@@ -22,6 +22,17 @@ func dbTableHasColumn(tableName string, columnName string) bool {
 	return count > 0
 }
 
+func dbTableExists(tableName string) bool {
+	var count int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+		tableName,
+	).Scan(&count); err != nil {
+		return false
+	}
+	return count > 0
+}
+
 func initDB() {
 	var err error
 	dsn := resolveFixerDBPath()
@@ -651,6 +662,44 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE worker_process ADD COLUMN parallel_wave_id INTEGER;`)
 	_, _ = db.Exec(`ALTER TABLE worker_process ADD COLUMN parallel_wave_worker_id INTEGER;`)
 	_, _ = db.Exec(`ALTER TABLE worker_process ADD COLUMN launch_origin TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN system1_state TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.Exec(`ALTER TABLE parallel_wave_worker ADD COLUMN system1_checks_used INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS wave_system1_packet (
+			wave_id INTEGER PRIMARY KEY,
+			project_id INTEGER NOT NULL,
+			criteria_prompt TEXT NOT NULL,
+			hard_ids TEXT NOT NULL DEFAULT '[]',
+			threshold REAL NOT NULL DEFAULT 0.75,
+			max_checks INTEGER NOT NULL DEFAULT 3,
+			contract_version TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(wave_id) REFERENCES parallel_wave(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+		CREATE TABLE IF NOT EXISTS wave_system1_check (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			wave_id INTEGER NOT NULL,
+			wave_worker_id INTEGER NOT NULL,
+			project_id INTEGER NOT NULL,
+			session_id INTEGER NOT NULL,
+			local_session_id INTEGER NOT NULL,
+			check_number INTEGER NOT NULL,
+			check_id TEXT NOT NULL DEFAULT '',
+			contract_version TEXT NOT NULL,
+			verdict TEXT NOT NULL DEFAULT 'fail',
+			overall_probability REAL NOT NULL DEFAULT 0,
+			threshold REAL NOT NULL DEFAULT 0.75,
+			escalated INTEGER NOT NULL DEFAULT 0,
+			summary TEXT NOT NULL DEFAULT '',
+			artifact_path TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(wave_id) REFERENCES parallel_wave(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+		);
+	`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS wave_system1_check_wave_idx ON wave_system1_check(wave_id, id);`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS project_doc_project_parent_idx ON project_doc(project_id, parent_doc_id);`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS project_doc_project_slug_unique_idx ON project_doc(project_id, slug) WHERE slug != '';`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS project_doc_project_path_unique_idx ON project_doc(project_id, path) WHERE path != '';`)

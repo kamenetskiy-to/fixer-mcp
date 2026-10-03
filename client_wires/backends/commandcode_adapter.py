@@ -183,6 +183,7 @@ class CommandCodeBackendAdapter(BackendAdapter):
             "--trust",
             "--skip-onboarding",
             "--no-auto-update",
+            "--max-turns", "200",
             "--output-format",
             "json",
         ])

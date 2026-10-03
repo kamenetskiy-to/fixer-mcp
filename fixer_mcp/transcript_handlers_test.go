@@ -59,13 +59,25 @@ func setupTranscriptPathTestDB(t *testing.T, projectOneCWD string, projectTwoCWD
 			(5, 1, 'p1 missing fourth', 'completed', 'codex'),
 			(6, 1, 'p1 droid no external fifth', 'completed', 'droid'),
 			(7, 1, 'p1 pending Hands manual sixth', 'pending', 'codex'),
-			(8, 1, 'p1 antigravity seventh', 'completed', 'antigravity');
+			(8, 1, 'p1 antigravity seventh', 'completed', 'antigravity'),
+			(9, 1, 'p1 commandcode eighth', 'completed', 'commandcode'),
+			(10, 1, 'p1 pi ninth', 'completed', 'pi'),
+			(11, 1, 'p1 commandcode worktree tenth', 'completed', 'commandcode'),
+			(12, 1, 'p1 pi worktree eleventh', 'completed', 'pi'),
+			(13, 1, 'p1 commandcode missing twelfth', 'completed', 'commandcode'),
+			(14, 1, 'p1 pi missing thirteenth', 'completed', 'pi');
 		INSERT INTO session_external_link (session_id, backend, external_session_id) VALUES
 			(2, 'droid', 'droid-project-two'),
 			(3, 'codex', 'codex-project-one-second'),
 			(4, 'droid', 'droid-project-one-third'),
 			(5, 'codex', 'codex-missing-fourth'),
-			(8, 'antigravity', 'antigravity-project-one-seventh');
+			(8, 'antigravity', 'antigravity-project-one-seventh'),
+			(9, 'commandcode', '8f0d2f5a-command-code-direct'),
+			(10, 'pi', '9a1e3b6c-pi-direct'),
+			(11, 'commandcode', 'ab2c4d7e-command-code-worktree'),
+			(12, 'pi', 'bc3d5e8f-pi-worktree'),
+			(13, 'commandcode', 'cd4e6f90-command-code-missing'),
+			(14, 'pi', 'de5f7012-pi-missing');
 		INSERT INTO session_codex_link (session_id, codex_session_id) VALUES
 			(3, 'codex-project-one-second'),
 			(5, 'codex-missing-fourth');
@@ -445,5 +457,236 @@ func TestGetNetrunnerTranscriptPathRejectsNetrunnerRole(t *testing.T) {
 	callResult, _, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 1})
 	if err == nil || callResult == nil || !callResult.IsError {
 		t.Fatalf("expected netrunner role to be rejected")
+	}
+}
+
+func TestCommandcodeAndPiTranscriptDirNamesMatchInstalledCliLayouts(t *testing.T) {
+	if got := commandcodeProjectTranscriptDirName("/Users/operator/projects/demo_app/.codex/netrunner_worktrees/wave-1/session-2"); got != "users-operator-projects-demo-app-codex-netrunner-worktrees-wave-1-session-2" {
+		t.Fatalf("commandcode project slug must match ~/.commandcode/projects/<slug> layout, got %q", got)
+	}
+	if got := commandcodeProjectTranscriptDirName("/Users/operator/projects/demo-tool"); got != "users-operator-projects-demo-tool" {
+		t.Fatalf("commandcode project slug must collapse runs and lowercase, got %q", got)
+	}
+	if got := piProjectTranscriptDirName("/Users/operator"); got != "--Users-operator--" {
+		t.Fatalf("pi session dir must match ~/.pi/agent/sessions/<dir> layout, got %q", got)
+	}
+	if got := piProjectTranscriptDirName("/Users/operator/projects/demo_app/.codex/netrunner_worktrees/wave-1/session-2"); got != "--Users-operator-projects-demo_app-.codex-netrunner_worktrees-wave-1-session-2--" {
+		t.Fatalf("pi session dir must preserve case and separators, got %q", got)
+	}
+}
+
+func writeTranscriptFixture(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{\"type\":\"session\"}\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+}
+
+func setupTemporaryHomeTranscriptRoots(t *testing.T) (string, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return filepath.Join(home, ".commandcode", "projects"), filepath.Join(home, ".pi", "agent", "sessions")
+}
+
+func TestGetNetrunnerTranscriptPathCommandCodeUsesProjectsStoreWithExactID(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalCommandcodeRoot := commandcodeSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		commandcodeSessionTranscriptRoot = originalCommandcodeRoot
+	}()
+
+	commandcodeRoot, _ := setupTemporaryHomeTranscriptRoots(t)
+	commandcodeSessionTranscriptRoot = commandcodeRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-1", "session-10")
+
+	directPath := filepath.Join(commandcodeRoot, commandcodeProjectTranscriptDirName(projectCWD), "8f0d2f5a-command-code-direct.jsonl")
+	writeTranscriptFixture(t, directPath)
+	worktreeDir := filepath.Join(commandcodeRoot, commandcodeProjectTranscriptDirName(worktreeCWD))
+	worktreePath := filepath.Join(worktreeDir, "ab2c4d7e-command-code-worktree.jsonl")
+	writeTranscriptFixture(t, worktreePath)
+
+	// Identity decoys that sort before the real files and contain the looked-up
+	// id as a substring: exact-id lookup must never return them.
+	for _, decoy := range []string{
+		filepath.Join(filepath.Dir(directPath), "8f0d2f5a-command-code-direct.checkpoints.jsonl"),
+		filepath.Join(filepath.Dir(directPath), "prefix-8f0d2f5a-command-code-direct.jsonl"),
+		filepath.Join(worktreeDir, "ab2c4d7e-command-code-worktree.checkpoints.jsonl"),
+		filepath.Join(worktreeDir, "ab2c4d7e-command-code-worktree-extra.jsonl"),
+	} {
+		writeTranscriptFixture(t, decoy)
+	}
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, directOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 8})
+	if err != nil {
+		t.Fatalf("commandcode direct lookup failed: %v", err)
+	}
+	if directOut.Backend != "commandcode" || directOut.GlobalSessionId != 9 || directOut.ExternalSessionId != "8f0d2f5a-command-code-direct" {
+		t.Fatalf("unexpected commandcode direct identity: %+v", directOut)
+	}
+	if !directOut.Found || !directOut.Exists || !directOut.Readable || directOut.TranscriptPath != directPath {
+		t.Fatalf("expected exact commandcode transcript %q, got %+v", directPath, directOut)
+	}
+
+	_, worktreeOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 10})
+	if err != nil {
+		t.Fatalf("commandcode worktree lookup failed: %v", err)
+	}
+	if worktreeOut.GlobalSessionId != 11 || !worktreeOut.Found || worktreeOut.TranscriptPath != worktreePath {
+		t.Fatalf("expected worktree commandcode transcript %q via exact-id discovery, got %+v", worktreePath, worktreeOut)
+	}
+
+	_, missingOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 12})
+	if err != nil {
+		t.Fatalf("missing commandcode lookup should not fail: %v", err)
+	}
+	if missingOut.GlobalSessionId != 13 || missingOut.Found || missingOut.TranscriptPath != "" {
+		t.Fatalf("expected missing commandcode transcript to fail closed, got %+v", missingOut)
+	}
+	if !strings.Contains(strings.Join(missingOut.SearchDiagnostics, "\n"), "cd4e6f90-command-code-missing.jsonl") {
+		t.Fatalf("expected missing diagnostics naming the exact external id, got %+v", missingOut.SearchDiagnostics)
+	}
+}
+
+func TestGetNetrunnerTranscriptPathPiUsesSessionStoreWithExactID(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-1", "session-11")
+
+	directPath := filepath.Join(piRoot, piProjectTranscriptDirName(projectCWD), "2026-09-13T00-20-45-085Z_9a1e3b6c-pi-direct.jsonl")
+	writeTranscriptFixture(t, directPath)
+	worktreeDir := filepath.Join(piRoot, piProjectTranscriptDirName(worktreeCWD))
+	worktreePath := filepath.Join(worktreeDir, "2026-09-14T10-00-00-000Z_bc3d5e8f-pi-worktree.jsonl")
+	writeTranscriptFixture(t, worktreePath)
+
+	// Identity decoys that sort before the real files: a dash-separated name
+	// and a different session id must never satisfy an exact-id lookup.
+	for _, decoy := range []string{
+		filepath.Join(filepath.Dir(directPath), "2026-09-13T00-20-45-085Z-9a1e3b6c-pi-direct.jsonl"),
+		filepath.Join(filepath.Dir(directPath), "2026-09-13T00-20-45-085Z_9a1e3b6c-pi-direct-extra.jsonl"),
+		filepath.Join(worktreeDir, "2026-09-14T10-00-00-000Z-bc3d5e8f-pi-worktree.jsonl"),
+		filepath.Join(worktreeDir, "2026-09-14T10-00-00-000Z_bc3d5e8f-pi-worktree-extra.jsonl"),
+	} {
+		writeTranscriptFixture(t, decoy)
+	}
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, directOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 9})
+	if err != nil {
+		t.Fatalf("pi direct lookup failed: %v", err)
+	}
+	if directOut.Backend != "pi" || directOut.GlobalSessionId != 10 || directOut.ExternalSessionId != "9a1e3b6c-pi-direct" {
+		t.Fatalf("unexpected pi direct identity: %+v", directOut)
+	}
+	if !directOut.Found || !directOut.Exists || !directOut.Readable || directOut.TranscriptPath != directPath {
+		t.Fatalf("expected exact pi transcript %q, got %+v", directPath, directOut)
+	}
+
+	_, worktreeOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 11})
+	if err != nil {
+		t.Fatalf("pi worktree lookup failed: %v", err)
+	}
+	if worktreeOut.GlobalSessionId != 12 || !worktreeOut.Found || worktreeOut.TranscriptPath != worktreePath {
+		t.Fatalf("expected worktree pi transcript %q via exact-id discovery, got %+v", worktreePath, worktreeOut)
+	}
+
+	_, missingOut, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 13})
+	if err != nil {
+		t.Fatalf("missing pi lookup should not fail: %v", err)
+	}
+	if missingOut.GlobalSessionId != 14 || missingOut.Found || missingOut.TranscriptPath != "" {
+		t.Fatalf("expected missing pi transcript to fail closed, got %+v", missingOut)
+	}
+	if !strings.Contains(strings.Join(missingOut.SearchDiagnostics, "\n"), "de5f7012-pi-missing") {
+		t.Fatalf("expected missing diagnostics naming the exact external id, got %+v", missingOut.SearchDiagnostics)
+	}
+}
+
+func TestSystem1AndPublicTranscriptLookupsResolveSameFile(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalCommandcodeRoot := commandcodeSessionTranscriptRoot
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		commandcodeSessionTranscriptRoot = originalCommandcodeRoot
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	commandcodeRoot, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	commandcodeSessionTranscriptRoot = commandcodeRoot
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	commandcodeWorktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-1", "session-10")
+	piWorktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-1", "session-11")
+
+	commandcodeWorktreePath := filepath.Join(commandcodeRoot, commandcodeProjectTranscriptDirName(commandcodeWorktreeCWD), "ab2c4d7e-command-code-worktree.jsonl")
+	writeTranscriptFixture(t, commandcodeWorktreePath)
+	piWorktreePath := filepath.Join(piRoot, piProjectTranscriptDirName(piWorktreeCWD), "2026-09-14T10-00-00-000Z_bc3d5e8f-pi-worktree.jsonl")
+	writeTranscriptFixture(t, piWorktreePath)
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	cases := []struct {
+		name           string
+		localSessionID int
+		globalID       int
+		backend        string
+		wantPath       string
+	}{
+		{"commandcode worktree", 10, 11, "commandcode", commandcodeWorktreePath},
+		{"pi worktree", 11, 12, "pi", piWorktreePath},
+	}
+	for _, testCase := range cases {
+		_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: testCase.localSessionID})
+		if err != nil {
+			t.Fatalf("%s: public lookup failed: %v", testCase.name, err)
+		}
+		system1Path, diagnostics := resolveSystem1WorkerTranscript(testCase.globalID, 1, testCase.backend, projectCWD)
+		if out.TranscriptPath != testCase.wantPath || system1Path != testCase.wantPath || out.TranscriptPath != system1Path {
+			t.Fatalf(
+				"%s: public and System1 must resolve the same transcript: public=%q system1=%q want=%q diagnostics=%v",
+				testCase.name, out.TranscriptPath, system1Path, testCase.wantPath, diagnostics,
+			)
+		}
 	}
 }

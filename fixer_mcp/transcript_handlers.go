@@ -255,6 +255,15 @@ func transcriptMatchByProjectCWD(path string, projectCWD string, acceptedTypes m
 // declaration of the same name must not be added on top of this one.
 var antigravitySessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".gemini", "antigravity-cli", "brain")
 
+// commandcodeSessionTranscriptRoot is the CommandCode CLI projects directory:
+// one subdirectory per encoded cwd holding <session-id>.jsonl session
+// transcripts (plus .meta.json/.checkpoints.jsonl sidecars).
+var commandcodeSessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".commandcode", "projects")
+
+// piSessionTranscriptRoot is the Pi agent session store: one subdirectory per
+// encoded cwd holding timestamped <timestamp>_<session-id>.jsonl transcripts.
+var piSessionTranscriptRoot = filepath.Join(os.Getenv("HOME"), ".pi", "agent", "sessions")
+
 func findAntigravityTranscriptPath(externalSessionID string, diagnostics *[]string) string {
 	sessionID := strings.TrimSpace(externalSessionID)
 	root := strings.TrimSpace(antigravitySessionTranscriptRoot)
@@ -369,6 +378,174 @@ func findDroidTranscriptPathByProjectCWD(projectCWD string, diagnostics *[]strin
 	}
 	*diagnostics = append(*diagnostics, fmt.Sprintf("no Droid JSONL session_start matching project cwd %q under %s", projectCWD, root))
 	return "", ""
+}
+
+// commandcodeProjectTranscriptDirName mirrors the CommandCode CLI project
+// slug: lowercased, every run of non-alphanumeric characters collapsed to one
+// '-', trimmed to alphanumerics ("root" when nothing remains).
+func commandcodeProjectTranscriptDirName(projectCWD string) string {
+	cleaned := strings.ToLower(filepath.Clean(strings.TrimSpace(projectCWD)))
+	var slug strings.Builder
+	pendingDash := false
+	for _, char := range cleaned {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			if pendingDash && slug.Len() > 0 {
+				slug.WriteByte('-')
+			}
+			pendingDash = false
+			slug.WriteRune(char)
+			continue
+		}
+		pendingDash = true
+	}
+	if slug.Len() == 0 {
+		return "root"
+	}
+	return slug.String()
+}
+
+// piProjectTranscriptDirName mirrors pi-coding-agent's session directory
+// encoding: one leading path separator is stripped, '/', '\' and ':' become
+// '-', and the result is wrapped in '--'.
+func piProjectTranscriptDirName(projectCWD string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(projectCWD))
+	if cleaned == "" || cleaned == "." {
+		return ""
+	}
+	trimmed := cleaned
+	if trimmed[0] == '/' || trimmed[0] == '\\' {
+		trimmed = trimmed[1:]
+	}
+	safe := strings.NewReplacer("/", "-", `\`, "-", ":", "-").Replace(trimmed)
+	return "--" + safe + "--"
+}
+
+// piTranscriptFileNameMatches implements exact-id filename discovery for the
+// Pi store: a bare <id>.jsonl or pi's timestamped <timestamp>_<id>.jsonl.
+// Substring containment is never accepted, so an unrelated session can never
+// be returned for a looked-up id.
+func piTranscriptFileNameMatches(name string, sessionID string) bool {
+	if name == sessionID+".jsonl" {
+		return true
+	}
+	return strings.HasSuffix(name, "_"+sessionID+".jsonl")
+}
+
+// findCommandcodeTranscriptPath resolves a CommandCode session transcript by
+// exact external session id: first the canonical
+// <root>/<slug(cwd)>/<id>.jsonl path, then exact-id filename discovery under
+// the root (sessions run in per-wave worktree cwds). No substring matching and
+// no unrelated session is ever returned.
+func findCommandcodeTranscriptPath(projectCWD string, externalSessionID string, diagnostics *[]string) string {
+	sessionID := strings.TrimSpace(externalSessionID)
+	root := strings.TrimSpace(commandcodeSessionTranscriptRoot)
+	if sessionID == "" {
+		*diagnostics = append(*diagnostics, "external session id is empty; cannot resolve CommandCode transcript filename")
+		return ""
+	}
+	if root == "" {
+		*diagnostics = append(*diagnostics, "CommandCode transcript root is not configured")
+		return ""
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("CommandCode transcript root not found: %s", root))
+		return ""
+	}
+
+	if strings.TrimSpace(projectCWD) != "" {
+		directPath := filepath.Join(root, commandcodeProjectTranscriptDirName(projectCWD), sessionID+".jsonl")
+		if exists, _, _, _ := transcriptFileMetadata(directPath); exists {
+			return directPath
+		}
+		*diagnostics = append(*diagnostics, fmt.Sprintf("CommandCode direct path not found: %s", directPath))
+	}
+
+	var fallback string
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() != sessionID+".jsonl" {
+			return nil
+		}
+		fallback = path
+		return filepath.SkipAll
+	})
+	if walkErr != nil {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("CommandCode transcript search failed: %v", walkErr))
+	}
+	if fallback == "" {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("no CommandCode JSONL named %s.jsonl under %s", sessionID, root))
+	}
+	return fallback
+}
+
+// findPiTranscriptPath resolves a Pi session transcript by exact external
+// session id: first the session directory encoded for the project cwd, then
+// exact-id filename discovery under the root (sessions run in per-wave
+// worktree cwds). Timestamped <timestamp>_<id>.jsonl names are matched by
+// exact id only.
+func findPiTranscriptPath(projectCWD string, externalSessionID string, diagnostics *[]string) string {
+	sessionID := strings.TrimSpace(externalSessionID)
+	root := strings.TrimSpace(piSessionTranscriptRoot)
+	if sessionID == "" {
+		*diagnostics = append(*diagnostics, "external session id is empty; cannot resolve Pi transcript filename")
+		return ""
+	}
+	if root == "" {
+		*diagnostics = append(*diagnostics, "Pi transcript root is not configured")
+		return ""
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Pi transcript root not found: %s", root))
+		return ""
+	}
+
+	if dirName := piProjectTranscriptDirName(projectCWD); dirName != "" {
+		preferredDir := filepath.Join(root, dirName)
+		for _, path := range candidateTranscriptFiles(preferredDir, "") {
+			if piTranscriptFileNameMatches(filepath.Base(path), sessionID) {
+				return path
+			}
+		}
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Pi transcript for external session id %q not found in %s", sessionID, preferredDir))
+	}
+
+	var fallback string
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !piTranscriptFileNameMatches(entry.Name(), sessionID) {
+			return nil
+		}
+		fallback = path
+		return filepath.SkipAll
+	})
+	if walkErr != nil {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Pi transcript search failed: %v", walkErr))
+	}
+	if fallback == "" {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("no Pi JSONL for external session id %q under %s", sessionID, root))
+	}
+	return fallback
+}
+
+// resolveBackendTranscriptPath is the single transcript lookup shared by the
+// public get_netrunner_transcript_path tool and the System1 reader, so public
+// metadata and System1 can never disagree. Every backend resolves by recorded
+// external session id only: no path is invented and no unrelated session is
+// ever returned.
+func resolveBackendTranscriptPath(backend string, projectCWD string, externalSessionID string, diagnostics *[]string) string {
+	switch backend {
+	case "codex":
+		return findCodexTranscriptPath(externalSessionID, diagnostics)
+	case "commandcode":
+		return findCommandcodeTranscriptPath(projectCWD, externalSessionID, diagnostics)
+	case "pi":
+		return findPiTranscriptPath(projectCWD, externalSessionID, diagnostics)
+	case "droid":
+		return findDroidTranscriptPath(projectCWD, externalSessionID, diagnostics)
+	case "antigravity":
+		return findAntigravityTranscriptPath(externalSessionID, diagnostics)
+	default:
+		*diagnostics = append(*diagnostics, fmt.Sprintf("backend %q is unsupported for transcript lookup", backend))
+		return ""
+	}
 }
 
 func persistDiscoveredSessionExternalID(sessionID int, backend string, externalSessionID string) error {
@@ -500,16 +677,7 @@ func GetNetrunnerTranscriptPath(ctx context.Context, req *mcp.CallToolRequest, i
 	if strings.TrimSpace(externalSessionID) == "" {
 		diagnostics = append(diagnostics, "transcript unavailable: no persisted external session id; transcript identity cannot be proven")
 	} else {
-		switch backend {
-		case "codex", "commandcode":
-			transcriptPath = findCodexTranscriptPath(externalSessionID, &diagnostics)
-		case "droid":
-			transcriptPath = findDroidTranscriptPath(projectCWD, externalSessionID, &diagnostics)
-		case "antigravity":
-			transcriptPath = findAntigravityTranscriptPath(externalSessionID, &diagnostics)
-		default:
-			diagnostics = append(diagnostics, fmt.Sprintf("backend %q is unsupported for transcript lookup", backend))
-		}
+		transcriptPath = resolveBackendTranscriptPath(backend, projectCWD, externalSessionID, &diagnostics)
 	}
 
 	exists, readable, fileSize, modifiedAt := transcriptFileMetadata(transcriptPath)

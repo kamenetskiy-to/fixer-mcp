@@ -7,23 +7,23 @@ import (
 	"testing"
 )
 
-func TestNormalizeParallelWaveAdmissionWorkersAllowsOnlySequentialOverlap(t *testing.T) {
+func TestNormalizeParallelWaveAdmissionWorkersAllowsOverlappingScopes(t *testing.T) {
 	workers := []parallelWaveAdmissionWorker{
 		{SessionID: 1, DeclaredWriteScope: []string{"docs"}},
 		{SessionID: 2, DeclaredWriteScope: []string{"docs/generated"}},
 	}
 
-	if _, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, nil); err == nil || !strings.Contains(err.Error(), "overlapping declared write scopes") {
-		t.Fatalf("expected unrelated overlapping scopes to be rejected, got %v", err)
-	}
-
-	dependencies := []WaveDependency{{Child: 2, Parents: []int64{1}}}
-	normalized, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, dependencies)
+	normalized, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, nil)
 	if err != nil {
-		t.Fatalf("expected parent-child overlap to be allowed: %v", err)
+		t.Fatalf("expected unrelated overlapping scopes to be admitted, got %v", err)
 	}
 	if len(normalized) != len(workers) || normalized[0].DeclaredWriteScope[0] != "docs" || normalized[1].DeclaredWriteScope[0] != "docs/generated" {
 		t.Fatalf("unexpected normalized workers: %+v", normalized)
+	}
+
+	dependencies := []WaveDependency{{Child: 2, Parents: []int64{1}}}
+	if _, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, dependencies); err != nil {
+		t.Fatalf("expected parent-child overlap to be allowed: %v", err)
 	}
 
 	transitiveWorkers := []parallelWaveAdmissionWorker{
@@ -39,20 +39,30 @@ func TestNormalizeParallelWaveAdmissionWorkersAllowsOnlySequentialOverlap(t *tes
 	}
 }
 
-func TestNormalizeParallelWaveDeclaredWriteScopeRejectsFoundationPaths(t *testing.T) {
+func TestNormalizeParallelWaveDeclaredWriteScopeAllowsFormerlyFencedScopes(t *testing.T) {
 	for _, scope := range [][]string{
 		{"fixer_mcp/main.go"},
 		{"client_wires/fixer_autonomous.py"},
 		{".codex/netrunner_worktrees"},
 		{"artifacts/runtime.db"},
+		{"."},
+		{"docs/a", "docs/a/subtree"},
 	} {
-		if _, err := normalizeParallelWaveDeclaredWriteScope(scope); err == nil || !strings.Contains(err.Error(), "foundation/bootstrap") {
-			t.Fatalf("expected foundation scope %v to be rejected, got %v", scope, err)
+		if _, err := normalizeParallelWaveDeclaredWriteScope(scope); err != nil {
+			t.Fatalf("expected formerly fenced scope %v to be admitted, got %v", scope, err)
 		}
 	}
 
 	if _, err := normalizeParallelWaveDeclaredWriteScope([]string{"docs/runtime.dbx"}); err != nil {
 		t.Fatalf("unexpected rejection for non-database suffix: %v", err)
+	}
+
+	if _, err := normalizeParallelWaveDeclaredWriteScope(nil); err != nil {
+		t.Fatalf("missing scope must be admitted: %v", err)
+	}
+
+	if _, err := normalizeParallelWaveDeclaredWriteScope([]string{"/absolute/path"}); err == nil {
+		t.Fatal("expected path-syntax validation to still reject absolute entries")
 	}
 }
 

@@ -125,40 +125,24 @@ func containsParallelWaveFoundationWriteScope(scope []string) (string, bool) {
 	return "", false
 }
 
+// normalizeParallelWaveDeclaredWriteScope normalizes declared write scope
+// entries for storage and prompts. The declared_write_scope fence is removed:
+// admission never rejects a scope for being missing, broad, overlapping, or
+// outside any predeclared path list. Only path syntax (empty, absolute, or
+// project-root-escaping entries) is still normalized/validated here.
 func normalizeParallelWaveDeclaredWriteScope(raw []string) ([]string, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("parallel wave declared_write_scope must contain at least one non-broad project-relative path")
-	}
-	normalized, err := normalizeDeclaredWriteScope(raw)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range normalized {
-		if entry == defaultWriteScopePath {
-			return nil, fmt.Errorf("parallel wave declared_write_scope cannot use broad %q scope", defaultWriteScopePath)
-		}
-	}
-	for leftIndex := 0; leftIndex < len(normalized); leftIndex++ {
-		for rightIndex := leftIndex + 1; rightIndex < len(normalized); rightIndex++ {
-			if writeScopePathsOverlap(normalized[leftIndex], normalized[rightIndex]) {
-				return nil, fmt.Errorf("parallel wave declared_write_scope entries overlap: %q and %q", normalized[leftIndex], normalized[rightIndex])
-			}
-		}
-	}
-	if matched, ok := containsParallelWaveFoundationWriteScope(normalized); ok {
-		return nil, fmt.Errorf("parallel wave declared_write_scope touches foundation/bootstrap path %q", matched)
-	}
-	return normalized, nil
+	return normalizeDeclaredWriteScope(raw)
 }
 
 func normalizeParallelWaveAdmissionWorkers(workers []parallelWaveAdmissionWorker) ([]parallelWaveAdmissionWorker, error) {
 	return normalizeParallelWaveAdmissionWorkersWithDependencies(workers, nil)
 }
 
-// normalizeParallelWaveAdmissionWorkersWithDependencies validates the scopes
-// that may run concurrently in a wave. A parent and its descendant are
-// intentionally allowed to overlap because the scheduler does not run the
-// descendant until the parent branch has completed and been merged.
+// normalizeParallelWaveAdmissionWorkersWithDependencies validates the session
+// ids that may run in a wave. Declared write scopes are informational only:
+// they never gate admission, so missing, broad, overlapping, or out-of-list
+// scopes are accepted unchanged. The dependencies parameter is retained for
+// caller compatibility and is no longer consulted for scope decisions.
 func normalizeParallelWaveAdmissionWorkersWithDependencies(workers []parallelWaveAdmissionWorker, dependencies []WaveDependency) ([]parallelWaveAdmissionWorker, error) {
 	if len(workers) < 1 {
 		return nil, fmt.Errorf("parallel wave admission requires at least one session")
@@ -177,12 +161,6 @@ func normalizeParallelWaveAdmissionWorkersWithDependencies(workers []parallelWav
 		normalizedScope, err := normalizeParallelWaveDeclaredWriteScope(worker.DeclaredWriteScope)
 		if err != nil {
 			return nil, fmt.Errorf("session %d: %w", worker.SessionID, err)
-		}
-		for _, existing := range normalizedWorkers {
-			if writeScopesOverlap(existing.DeclaredWriteScope, normalizedScope) &&
-				!parallelWaveSessionsHaveDependencyRelation(existing.SessionID, worker.SessionID, dependencies) {
-				return nil, fmt.Errorf("parallel wave sessions %d and %d have overlapping declared write scopes", existing.SessionID, worker.SessionID)
-			}
 		}
 		normalizedWorkers = append(normalizedWorkers, parallelWaveAdmissionWorker{
 			SessionID:          worker.SessionID,
