@@ -1,0 +1,16 @@
+{
+  "changelog": "Full declared-scope/lease retirement; Agy Claude Opus/Sonnet5.5 live-verified; System1/Jev preserved",
+  "changelog_url": "https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/RELEASE-1.0.10.md",
+  "created_at": "2026-10-04T15:12:28Z",
+  "format": 1,
+  "min_os": "Linux (glibc 2.31+)",
+  "min_python": "3.9",
+  "payload_path": "fixer-mcp-1.0.10-linux_arm64.tar.gz",
+  "payload_sha256": "58293c4b1e565c83b5a769601ffc8c31dad71110b3beca76bbe11c165c2fea92",
+  "payload_url": "https://raw.githubusercontent.com/kamenetskiy-to/fixer-mcp/main/releases/fixer-mcp-1.0.10-linux_arm64.tar.gz",
+  "platform": "linux_arm64",
+  "schema_compatibility_class": "project-workroom-v1",
+  "sha256": "58293c4b1e565c83b5a769601ffc8c31dad71110b3beca76bbe11c165c2fea92",
+  "source_revision": "868696b9f04719cd357fd0730b98390bc847ce24",
+  "version": "1.0.10"
+}
