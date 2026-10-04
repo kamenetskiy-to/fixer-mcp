@@ -93,6 +93,10 @@ class MCPStdioClient:
             return json.loads(content[0]["text"])
         return {}
 
+    def list_tools(self) -> list[dict[str, Any]]:
+        response = self.request("tools/list", {})
+        return response["result"].get("tools", [])
+
 
 def assert_no_host_paths(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
@@ -127,12 +131,32 @@ def main() -> int:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env["FIXER_DB_PATH"] = str(db_path)
+        for key in (
+            "FIXER_MCP_LOCKED_ROLE",
+            "FIXER_MCP_DEFAULT_ROLE",
+            "FIXER_MCP_DEFAULT_CWD",
+            "FIXER_MCP_AUTO_AUTH",
+            "FIXER_MCP_TOOL_PROFILE",
+        ):
+            env.pop(key, None)
 
         client = MCPStdioClient([str(binary)], cwd=runtime_dir, env=env)
         try:
             client.initialize()
             assert db_path.is_file(), "server did not initialize a fresh SQLite DB"
             assert_no_host_paths(db_path)
+
+            tools = {tool["name"]: tool for tool in client.list_tools()}
+            assert "create_task" in tools, "expected create_task tool in tools/list"
+            create_task_schema = tools["create_task"].get("inputSchema", {})
+            create_task_props = create_task_schema.get("properties", {})
+            assert "task_description" in create_task_props, create_task_schema
+            assert "declared_write_scope" not in create_task_props, create_task_schema
+            for tool_name, tool in tools.items():
+                props = tool.get("inputSchema", {}).get("properties", {})
+                assert "declared_write_scope" not in props, (
+                    f"tool {tool_name} inputSchema advertises retired declared_write_scope: {props}"
+                )
 
             overseer = client.call_tool("assume_role", {"role": "overseer"})
             assert overseer["status"] == "success", overseer
@@ -179,11 +203,11 @@ def main() -> int:
                 "create_task",
                 {
                     "task_description": "Docker clean smoke task",
-                    "declared_write_scope": ["."],
                 },
             )
             assert created["status"] == "success", created
             assert created["session_id"] == 1, created
+            assert "declared_write_scope" not in created, created
 
             netrunner = client.call_tool("assume_role", {"role": "netrunner", "cwd": str(nested_dir)})
             assert netrunner["status"] == "success", netrunner
@@ -192,9 +216,21 @@ def main() -> int:
             assert pending["tasks"] == [
                 {"session_id": created["session_id"], "task_description": "Docker clean smoke task"}
             ], pending
+            for task in pending["tasks"]:
+                assert "declared_write_scope" not in task, task
+
+            session_before = client.call_tool("get_session", {"session_id": created["session_id"]})
+            assert session_before["session"]["task_description"] == "Docker clean smoke task", session_before
+            assert session_before["session"]["status"] == "pending", session_before
+            assert "declared_write_scope" not in session_before["session"], session_before
 
             checkout = client.call_tool("checkout_task", {"session_id": created["session_id"]})
             assert checkout["status"] == "success", checkout
+            assert "declared_write_scope" not in checkout, checkout
+
+            session_after = client.call_tool("get_session", {"session_id": created["session_id"]})
+            assert session_after["session"]["status"] == "in_progress", session_after
+            assert "declared_write_scope" not in session_after["session"], session_after
 
             pending_after_checkout = client.call_tool("get_pending_tasks", {})
             assert pending_after_checkout["tasks"] == [], pending_after_checkout
