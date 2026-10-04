@@ -225,7 +225,6 @@ Map<String, dynamic> _session({
     'backend': backend,
     'model': model,
     'reasoning': reasoning,
-    'write_scope': ['fixer_mcp'],
     'created_at': '2026-07-20T09:00:00Z',
     'updated_at': '2026-07-20T10:00:00Z',
     'launched_at': launchedAt,

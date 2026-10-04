@@ -135,7 +135,7 @@ Reject TAs that are:
 
 ## Phase 4: Implementation Workers
 
-Implement section-by-section. Prefer sequential workers because sections usually share `front-page.php`, helpers, assets, and global CSS. Run parallel workers only when write scopes are truly disjoint.
+Implement section-by-section. Prefer sequential workers because sections usually share `front-page.php`, helpers, assets, and global CSS. Run parallel workers only when their file responsibilities are truly disjoint.
 
 Each implementation worker receives:
 
@@ -144,7 +144,7 @@ Each implementation worker receives:
 - `website_current/{desktop,tablet,mobile}.png`;
 - local URL;
 - reference URL;
-- explicit write scope;
+- explicit file ownership for its section;
 - requirement to generate `website_after` screenshots.
 
 Worker rules:
@@ -186,7 +186,7 @@ Require at least:
 
 The Fixer reviews each worker before accepting:
 
-1. Confirm changed files match the declared scope.
+1. Review the changed files against the worker's assigned section ownership.
 2. Confirm `website_after` has three valid PNGs.
 3. Spot-check the screenshots visually.
 4. Read residual risks and asset caveats.

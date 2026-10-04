@@ -1180,12 +1180,6 @@ class _SessionTabView extends StatelessWidget {
                     session.reasoning,
                   ),
                   (
-                    'Write scope',
-                    session.writeScope.isEmpty
-                        ? l10n.noneDeclared
-                        : session.writeScope.join(', '),
-                  ),
-                  (
                     l10n.isRussian ? 'Циклы доработки' : 'Rework loops',
                     session.reworkCount.toString(),
                   ),
@@ -3090,10 +3084,9 @@ class _SessionRow extends StatelessWidget {
 }
 
 class _TaskDraft {
-  const _TaskDraft({required this.taskDescription, required this.writeScope});
+  const _TaskDraft({required this.taskDescription});
 
   final String taskDescription;
-  final List<String> writeScope;
 }
 
 class _CreateTaskDialog extends StatefulWidget {
@@ -3105,12 +3098,10 @@ class _CreateTaskDialog extends StatefulWidget {
 
 class _CreateTaskDialogState extends State<_CreateTaskDialog> {
   final _descriptionController = TextEditingController();
-  final _scopeController = TextEditingController();
 
   @override
   void dispose() {
     _descriptionController.dispose();
-    _scopeController.dispose();
     super.dispose();
   }
 
@@ -3136,16 +3127,6 @@ class _CreateTaskDialogState extends State<_CreateTaskDialog> {
                     : 'Describe the operator action task for the new session.',
               ),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _scopeController,
-              decoration: InputDecoration(
-                labelText: l10n.isRussian ? 'Область записи' : 'Write scope',
-                hintText: l10n.isRussian
-                    ? 'Пути через запятую, необязательно'
-                    : 'Comma-separated paths, optional',
-              ),
-            ),
           ],
         ),
       ),
@@ -3160,16 +3141,8 @@ class _CreateTaskDialogState extends State<_CreateTaskDialog> {
             if (taskDescription.isEmpty) {
               return;
             }
-            final writeScope = _scopeController.text
-                .split(',')
-                .map((item) => item.trim())
-                .where((item) => item.isNotEmpty)
-                .toList();
             Navigator.of(context).pop(
-              _TaskDraft(
-                taskDescription: taskDescription,
-                writeScope: writeScope,
-              ),
+              _TaskDraft(taskDescription: taskDescription),
             );
           },
           child: Text(l10n.isRussian ? 'Создать' : 'Create'),

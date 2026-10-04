@@ -189,7 +189,6 @@ class MissionControlPlannedWaveTask {
     required this.key,
     required this.position,
     required this.taskDescription,
-    required this.declaredWriteScope,
     required this.dependsOn,
     required this.materializedSessionId,
     required this.localSessionId,
@@ -205,7 +204,6 @@ class MissionControlPlannedWaveTask {
       key: _asString(json['key'], fallback: 'task'),
       position: _asInt(json['position']),
       taskDescription: _asString(json['task_description']),
-      declaredWriteScope: _asStringList(json['declared_write_scope']),
       dependsOn: _asStringList(json['depends_on']),
       materializedSessionId: _asInt(json['materialized_session_id']),
       localSessionId: _asInt(json['local_session_id']),
@@ -222,7 +220,6 @@ class MissionControlPlannedWaveTask {
   final String key;
   final int position;
   final String taskDescription;
-  final List<String> declaredWriteScope;
   final List<String> dependsOn;
   final int materializedSessionId;
   final int localSessionId;

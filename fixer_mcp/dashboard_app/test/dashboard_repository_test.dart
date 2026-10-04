@@ -167,7 +167,6 @@ void main() {
               'backend': 'codex',
               'model': 'gpt-5.4',
               'reasoning': 'medium',
-              'write_scope': ['fixer_mcp/dashboard_app'],
               'attached_doc_count': 2,
               'mcp_count': 4,
               'proposal_count': 1,
@@ -387,7 +386,6 @@ void main() {
             'backend': 'codex',
             'model': 'gpt-5.4',
             'reasoning': 'medium',
-            'write_scope': ['fixer_mcp/dashboard_app'],
             'report_raw': '',
             'structured_final_report': {
               'files_changed': [
@@ -464,7 +462,6 @@ void main() {
               'backend': 'codex',
               'model': 'gpt-5.4',
               'reasoning': 'medium',
-              'write_scope': ['fixer_mcp/dashboard_app'],
               'report_raw': '',
               'structured_final_report': null,
               'attached_docs': [],

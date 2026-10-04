@@ -22,14 +22,13 @@ const (
 )
 
 type PlannedWaveTaskInput struct {
-	Key                string   `json:"key" jsonschema:"Stable key unique within the plan. Letters, numbers, dot, underscore, and hyphen are supported."`
-	TaskDescription    string   `json:"task_description" jsonschema:"Future Netrunner task description. No session is created until Initialize."`
-	DeclaredWriteScope []string `json:"declared_write_scope" jsonschema:"Project-relative write scope reserved only when Initialize delegates to normal wave admission."`
-	DependsOn          []string `json:"depends_on,omitempty" jsonschema:"Optional parent task keys that must complete before this task can launch."`
-	Backend            string   `json:"backend,omitempty" jsonschema:"Optional CLI backend persisted onto the future session. Supported runtime backends only."`
-	Model              string   `json:"model,omitempty" jsonschema:"Optional model persisted onto the future session. Defaults through the selected backend policy."`
-	Reasoning          string   `json:"reasoning,omitempty" jsonschema:"Optional reasoning effort persisted onto the future session. Defaults through the selected backend policy."`
-	McpServerNames     []string `json:"mcp_server_names,omitempty" jsonschema:"Project-allowed MCP servers assigned to the future session during Initialize."`
+	Key             string   `json:"key" jsonschema:"Stable key unique within the plan. Letters, numbers, dot, underscore, and hyphen are supported."`
+	TaskDescription string   `json:"task_description" jsonschema:"Future Netrunner task description. No session is created until Initialize."`
+	DependsOn       []string `json:"depends_on,omitempty" jsonschema:"Optional parent task keys that must complete before this task can launch."`
+	Backend         string   `json:"backend,omitempty" jsonschema:"Optional CLI backend persisted onto the future session. Supported runtime backends only."`
+	Model           string   `json:"model,omitempty" jsonschema:"Optional model persisted onto the future session. Defaults through the selected backend policy."`
+	Reasoning       string   `json:"reasoning,omitempty" jsonschema:"Optional reasoning effort persisted onto the future session. Defaults through the selected backend policy."`
+	McpServerNames  []string `json:"mcp_server_names,omitempty" jsonschema:"Project-allowed MCP servers assigned to the future session during Initialize."`
 }
 
 type CreatePlannedNetrunnerWaveInput struct {
@@ -59,7 +58,6 @@ type PlannedWaveTaskSnapshot struct {
 	Key                   string   `json:"key"`
 	Position              int      `json:"position"`
 	TaskDescription       string   `json:"task_description"`
-	DeclaredWriteScope    []string `json:"declared_write_scope"`
 	DependsOn             []string `json:"depends_on"`
 	Backend               string   `json:"backend"`
 	Model                 string   `json:"model"`
@@ -112,14 +110,13 @@ type InitializePlannedNetrunnerWaveOutput struct {
 }
 
 type normalizedPlannedWaveTask struct {
-	Key                string   `json:"key"`
-	TaskDescription    string   `json:"task_description"`
-	DeclaredWriteScope []string `json:"declared_write_scope"`
-	DependsOn          []string `json:"depends_on"`
-	Backend            string   `json:"backend"`
-	Model              string   `json:"model"`
-	Reasoning          string   `json:"reasoning"`
-	McpServerNames     []string `json:"mcp_server_names"`
+	Key             string   `json:"key"`
+	TaskDescription string   `json:"task_description"`
+	DependsOn       []string `json:"depends_on"`
+	Backend         string   `json:"backend"`
+	Model           string   `json:"model"`
+	Reasoning       string   `json:"reasoning"`
+	McpServerNames  []string `json:"mcp_server_names"`
 }
 
 type normalizedPlannedWaveDefinition struct {
@@ -201,18 +198,9 @@ func normalizePlannedWaveDefinition(input CreatePlannedNetrunnerWaveInput) (norm
 		if description == "" {
 			return normalizedPlannedWaveDefinition{}, "", fmt.Errorf("task %q task_description is required", key)
 		}
-		encodedScope, err := encodeDeclaredWriteScope(task.DeclaredWriteScope)
-		if err != nil {
-			return normalizedPlannedWaveDefinition{}, "", fmt.Errorf("task %q declared_write_scope: %w", key, err)
-		}
-		scope, err := decodeDeclaredWriteScope(encodedScope)
-		if err != nil {
-			return normalizedPlannedWaveDefinition{}, "", err
-		}
 		normalized.Tasks = append(normalized.Tasks, normalizedPlannedWaveTask{
-			Key:                key,
-			TaskDescription:    description,
-			DeclaredWriteScope: scope,
+			Key:             key,
+			TaskDescription: description,
 		})
 		launchConfig, mcpServerNames, err := normalizePlannedWaveTaskAssignments(task, authorizedProjectId)
 		if err != nil {
@@ -248,8 +236,7 @@ func normalizePlannedWaveDefinition(input CreatePlannedNetrunnerWaveInput) (norm
 		}
 		sort.Strings(normalized.Tasks[index].DependsOn)
 		admissionWorkers = append(admissionWorkers, parallelWaveAdmissionWorker{
-			SessionID:          childPosition,
-			DeclaredWriteScope: normalized.Tasks[index].DeclaredWriteScope,
+			SessionID: childPosition,
 		})
 		if len(parentPositions) > 0 {
 			dependencies = append(dependencies, WaveDependency{Child: int64(childPosition), Parents: parentPositions})
@@ -407,16 +394,15 @@ func CreatePlannedNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, i
 	}
 	planID := int(planID64)
 	for position, task := range definition.Tasks {
-		scope, _ := json.Marshal(task.DeclaredWriteScope)
 		dependencies, _ := json.Marshal(task.DependsOn)
 		mcpServerNames, _ := json.Marshal(task.McpServerNames)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO planned_wave_task (
 				planned_wave_id, project_id, task_key, position, task_description,
-				declared_write_scope, dependencies, cli_backend, cli_model, cli_reasoning,
+				dependencies, cli_backend, cli_model, cli_reasoning,
 				mcp_server_names, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-			planID, authorizedProjectId, task.Key, position+1, task.TaskDescription, string(scope), string(dependencies),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+			planID, authorizedProjectId, task.Key, position+1, task.TaskDescription, string(dependencies),
 			task.Backend, task.Model, task.Reasoning, string(mcpServerNames),
 		); err != nil {
 			return &mcp.CallToolResult{IsError: true}, CreatePlannedNetrunnerWaveOutput{}, fmt.Errorf("DB insert error: %v", err)
@@ -585,7 +571,7 @@ func fetchPlannedWaveSnapshot(ctx context.Context, planID int, projectID int) (P
 		plan.InitializedAt = initializedAt.String
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, task_key, position, task_description, declared_write_scope, dependencies,
+		SELECT id, task_key, position, task_description, dependencies,
 		       COALESCE(NULLIF(TRIM(cli_backend), ''), ?), COALESCE(cli_model, ''),
 		       COALESCE(cli_reasoning, ''), COALESCE(mcp_server_names, '[]'),
 		       COALESCE((
@@ -604,18 +590,14 @@ func fetchPlannedWaveSnapshot(ctx context.Context, planID int, projectID int) (P
 	plan.Tasks = []PlannedWaveTaskSnapshot{}
 	for rows.Next() {
 		var task PlannedWaveTaskSnapshot
-		var scopePayload string
 		var dependenciesPayload string
 		var mcpServerNamesPayload string
 		if err := rows.Scan(
-			&task.Id, &task.Key, &task.Position, &task.TaskDescription, &scopePayload,
+			&task.Id, &task.Key, &task.Position, &task.TaskDescription,
 			&dependenciesPayload, &task.Backend, &task.Model, &task.Reasoning,
 			&mcpServerNamesPayload, &task.MaterializedSessionId,
 		); err != nil {
 			return PlannedWaveSnapshot{}, err
-		}
-		if err := json.Unmarshal([]byte(scopePayload), &task.DeclaredWriteScope); err != nil {
-			return PlannedWaveSnapshot{}, fmt.Errorf("invalid planned task %q declared_write_scope: %w", task.Key, err)
 		}
 		if err := json.Unmarshal([]byte(dependenciesPayload), &task.DependsOn); err != nil {
 			return PlannedWaveSnapshot{}, fmt.Errorf("invalid planned task %q dependencies: %w", task.Key, err)
@@ -673,27 +655,23 @@ func materializePlannedWaveSessions(ctx context.Context, plan PlannedWaveSnapsho
 			return nil, nil, fmt.Errorf("failed to read planned task %q: %v", task.Key, err)
 		}
 		if !globalSessionID.Valid {
-			scope, err := encodeDeclaredWriteScope(task.DeclaredWriteScope)
-			if err != nil {
-				return nil, nil, err
-			}
 			var result sql.Result
 			if hasEpicDocColumn {
 				result, err = tx.ExecContext(ctx, `
 					INSERT INTO session (
-						project_id, task_description, status, declared_write_scope, epic_doc_id,
+						project_id, task_description, status, epic_doc_id,
 						cli_backend, cli_model, cli_reasoning
-					) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
-					plan.ProjectId, task.TaskDescription, scope, nullableEpicDocID(epicDocID),
+					) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
+					plan.ProjectId, task.TaskDescription, nullableEpicDocID(epicDocID),
 					task.Backend, task.Model, task.Reasoning,
 				)
 			} else {
 				result, err = tx.ExecContext(ctx, `
 					INSERT INTO session (
-						project_id, task_description, status, declared_write_scope,
+						project_id, task_description, status,
 						cli_backend, cli_model, cli_reasoning
-					) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
-					plan.ProjectId, task.TaskDescription, scope, task.Backend, task.Model, task.Reasoning,
+					) VALUES (?, ?, 'pending', ?, ?, ?)`,
+					plan.ProjectId, task.TaskDescription, task.Backend, task.Model, task.Reasoning,
 				)
 			}
 			if err != nil {

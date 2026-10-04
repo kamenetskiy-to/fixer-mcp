@@ -294,6 +294,51 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(notifications, 0);
   });
+
+  test('retired lease.changed frames are tolerated and change nothing', () async {
+    final repository = _ScriptedRepository(workroomFixture());
+    final store = ProjectWorkroomStore(
+      projectId: 1,
+      repository: repository,
+      cursorStore: MemoryProjectUiCursorStore(),
+      seedSnapshot: workroomFixture(),
+      reconnectDelay: (_) async {},
+    );
+    addTearDown(() async {
+      await store.stop();
+      await repository.close();
+    });
+
+    await store.start();
+    await _waitFor(
+      () => repository.watchCalls.length == 1,
+      () => 'initial stream subscription',
+    );
+
+    repository.controllers[0].add(
+      ProjectUiEventFrame(
+        ProjectUiEvent(
+          projectId: 1,
+          seq: 41,
+          eventId: 'event-41',
+          schemaVersion: 1,
+          kind: 'lease.changed',
+          aggregateType: 'project_write_lease',
+          aggregateId: 'lease-1',
+          aggregateRevision: 1,
+          createdAt: '2026-07-30T12:00:00Z',
+          payload: {'lease_summary': 'fixer_mcp/dashboard_app'},
+        ),
+      ),
+    );
+    await _waitFor(
+      () => store.state.lastAppliedSeq == 41,
+      () =>
+          'retired lease event applied '
+          '(${store.state.connectionStatus}: ${store.state.connectionMessage})',
+    );
+    expect(store.state.connectionStatus, WorkroomConnectionStatus.live);
+  });
 }
 
 ProjectUiEventFrame _turnEvent(int sequence, String eventId, String content) {
@@ -402,7 +447,6 @@ class _ScriptedRepository implements ProjectWorkroomRepository {
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,

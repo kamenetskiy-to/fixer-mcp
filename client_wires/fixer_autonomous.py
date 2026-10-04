@@ -556,7 +556,6 @@ def _build_wave_netrunner_prompt(
     wave_worker_id: int,
     branch_name: str,
     worker_cwd: Path,
-    declared_write_scope: list[str],
 ) -> str:
     return fixer_autonomous_prompts._build_wave_netrunner_prompt(
         session_id=session_id,
@@ -567,7 +566,6 @@ def _build_wave_netrunner_prompt(
         wave_worker_id=wave_worker_id,
         branch_name=branch_name,
         worker_cwd=worker_cwd,
-        declared_write_scope=declared_write_scope,
         positive_wave_int_fn=_positive_wave_int,
         validate_wave_branch_name_fn=_validate_wave_branch_name,
         default_how_to_fn=fixer_wire._build_default_how_to,
@@ -581,7 +579,6 @@ def _build_wave_netrunner_launch_plan(
     local_session_id: int,
     wave_id: int,
     wave_worker_id: int,
-    declared_write_scope: list[str],
     fixer_session_id: str,
     assigned_mcp_names: list[str],
     mcp_how_to: dict[str, str],
@@ -599,7 +596,6 @@ def _build_wave_netrunner_launch_plan(
         local_session_id=local_session_id,
         wave_id=wave_id,
         wave_worker_id=wave_worker_id,
-        declared_write_scope=declared_write_scope,
         fixer_session_id=fixer_session_id,
         assigned_mcp_names=assigned_mcp_names,
         mcp_how_to=mcp_how_to,
@@ -940,7 +936,6 @@ def launch_wave_netrunner_worker(
     local_session_id: int,
     wave_id: int,
     wave_worker_id: int,
-    declared_write_scope: list[str],
     fixer_session_id: str | None = None,
     backend: str | None = None,
     model: str | None = None,
@@ -994,7 +989,6 @@ def launch_wave_netrunner_worker(
         local_session_id=normalized_session_id,
         wave_id=normalized_wave_id,
         wave_worker_id=normalized_wave_worker_id,
-        declared_write_scope=declared_write_scope,
         fixer_session_id=resolved_fixer_session_id,
         assigned_mcp_names=assigned_names,
         mcp_how_to=fixer_wire._build_mcp_how_to_map(assigned_names, registry_meta),
@@ -1144,7 +1138,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     wave_worker_parser.add_argument("--session-id", type=int, required=True)
     wave_worker_parser.add_argument("--wave-id", type=int, required=True)
     wave_worker_parser.add_argument("--wave-worker-id", type=int, required=True)
-    wave_worker_parser.add_argument("--declared-write-scope", action="append", default=[])
     wave_worker_parser.add_argument("--fixer-session-id")
     wave_worker_parser.add_argument("--backend")
     wave_worker_parser.add_argument("--model")
@@ -1197,7 +1190,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.session_id,
                 args.wave_id,
                 args.wave_worker_id,
-                list(getattr(args, "declared_write_scope", []) or []),
                 getattr(args, "fixer_session_id", None),
                 getattr(args, "backend", None),
                 getattr(args, "model", None),

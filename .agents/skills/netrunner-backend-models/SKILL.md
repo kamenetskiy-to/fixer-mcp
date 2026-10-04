@@ -19,7 +19,7 @@ OpenAI subscription work goes through `pi`; the standalone `codex` backend is re
 
 | Task class | Default route | Notes |
 |---|---|---|
-| Simple / mechanical / breadth | `pi + openai-codex/gpt-5.6-luna + high` **or** `antigravity + Gemini 3.8 Flash + high` | The two interchangable mass routes. Prefer whichever has live capacity; Flash models take `low`/`medium`/`high` as the effort flag; Claude-in-Antigravity encodes thinking in the model name. |
+| Simple / mechanical / breadth | `pi + openai-codex/gpt-5.6-luna + high` **or** `antigravity + Gemini 3.8 Flash + high` | The two interchangable mass routes. Prefer whichever has live capacity; Flash models take `low`/`medium`/`high` as the effort flag; Claude-in-Antigravity encodes effort in the model variant (`Low`/`Medium`/`High`). |
 | Medium implementation | `antigravity + Gemini 3.8 Flash + high` | Gemini may take medium tasks; `pi + gpt-5.6-luna + high` is also acceptable for medium work. |
 | Complex implementation or research | `pi + opencode-personal/mimo-v2.6-pro + high`, or `pi + commandcode/xiaomi/mimo-v2.6-pro + high\|max` for the full ladder (`pi + opencode-go/deepseek-v4.1-flash + high\|max` remains valid) | MiMo 2.6 Pro is the Architect-preferred complex route (cheaper/stronger per his benchmarks); DeepSeek stays fully supported. Sendable: MiMo OpenCode `low/medium/high` (max clamps), MiMo CommandCode `low..max`, DeepSeek `high`/`max` only. |
 | Base harness (Pi) | `pi` | One CLI over the OpenAI, OpenCode Go and CommandCode subscriptions. MCP arrives only through the installed `pi-mcp-adapter` extension. |
@@ -29,7 +29,7 @@ OpenAI subscription work goes through `pi`; the standalone `codex` backend is re
 
 Retired or off by default:
 - `codex` backend: no longer used for waves (Architect, 2026-09-19). Reach the OpenAI subscription through `pi + openai-codex/<model>` instead.
-- `claude` CLI: the Architect has no Claude subscription, so it is an optional provider in the fleet manifest and not a wave route. `antigravity + Claude Sonnet 4.6 (Thinking)` remains available for one small task at a time when explicitly wanted.
+- `claude` CLI: the Architect has no Claude subscription, so it is an optional provider in the fleet manifest and not a wave route. `antigravity + Claude Opus 5.5` and `antigravity + Claude Sonnet 5.5` (effort `low`/`medium`/`high`) remain available for one small task at a time when explicitly wanted.
 - Claude Fable remains banned.
 
 ## Capability inventory
@@ -38,7 +38,7 @@ Retired or off by default:
 - `commandcode`: verified live inventory includes `zai-org/glm-5.3-flash`, `meta/muse-spark-1.2-contributor`, `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-flash-vision-exp`, `deepseek/deepseek-v4-pro`, `moonshotai/kimi-k3`, `qwen/qwen3.8-max`, `qwen/qwen3.8-27b`, `minimaxai/minimax-m3`, and `gpt-5.6-sol`.
 - `claude`: models `sonnet` (Sonnet 5) and `opus` (Opus 5); effort `low`, `medium`, `high`, `xhigh`, `max`; default `high`.
 - `kimi-code`: models `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k3`, `kimi-k3-256k`; native CLI selection is via `-m`. Per-invocation thinking effort is not exposed by the current native adapter, so reasoning remains `default`.
-- `antigravity`: models `Gemini 3.7 Flash` (default, `medium`), `Gemini 3.6 Flash`, `Gemini 3.1 Pro`, `Claude Sonnet 4.6 (Thinking)`, `Claude Opus 4.6 (Thinking)`; reasoning `low`, `medium`, `high` for Flash models, with `medium` unavailable on Gemini 3.1 Pro. Claude-in-Antigravity thinking is encoded in the model and has no separate effort option.
+- `antigravity`: models `Gemini 3.7 Flash` (default, `medium`), `Gemini 3.6 Flash`, `Gemini 3.1 Pro`, `Claude Opus 5.5`, `Claude Sonnet 5.5`; reasoning `low`, `medium`, `high` for Flash models, with `medium` unavailable on Gemini 3.1 Pro. Claude-in-Antigravity effort is encoded in the model variant (`Low`/`Medium`/`High`) and passed as no separate effort flag.
 - `pi`: providers `commandcode`, `google`, `kimi-coding`, `openai-codex`, `opencode-go`, `openrouter` (452 models on this machine at the last probe). Selection is `--provider <name>` plus `--model <pattern>`, where the pattern accepts `provider/id` and an optional `:<thinking>` suffix. The CLI accepts thinking levels `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, but each model clamps to the levels its own `thinkingLevelMap` declares, so check the model before promising a level. Headless modes are `--print`, `--mode json`, and `--mode rpc`; sessions are JSONL files handled with `--session`, `--session-id`, `--continue`, `--fork`, `--session-dir`, `--no-session`. There is no MCP in Pi core: MCP arrives through the installed `pi-mcp-adapter` extension, which exposes one `mcp` proxy tool whose calls address tools as `<server>_<tool>`; scope it with `--mcp-config <file>`. Project-local skills require `--approve`. Run `python3 scripts/pi_probe.py` for the live capability matrix before a Pi wave.
 
 ## Hard bans and cautions

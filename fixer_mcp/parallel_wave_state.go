@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -838,97 +837,9 @@ func parallelWaveAllWorkersTerminal(wave NetrunnerWaveSnapshot) bool {
 	return true
 }
 
-// parallelWaveScopeEntryContainsPath reports whether a single declared
-// write-scope entry contains a project-relative changed path. A trailing
-// "/**" glob denotes "this directory and everything inside it", so a file
-// written directly inside the directory matches the same way a deeper file
-// does.
-func parallelWaveScopeEntryContainsPath(scopeEntry string, path string) bool {
-	normalizedPath := filepath.ToSlash(filepath.Clean(path))
-	normalizedScopeEntry := filepath.ToSlash(filepath.Clean(scopeEntry))
-	if normalizedScopeEntry == defaultWriteScopePath {
-		return true
-	}
-	if strings.HasSuffix(normalizedScopeEntry, "/**") {
-		directory := strings.TrimSuffix(normalizedScopeEntry, "/**")
-		return normalizedPath == directory || strings.HasPrefix(normalizedPath, directory+"/")
-	}
-	return normalizedPath == normalizedScopeEntry ||
-		strings.HasPrefix(normalizedPath, normalizedScopeEntry+"/")
-}
-
-// parallelWaveDeclaredWriteScopeContainsPath is the parallel-wave completion
-// variant of declaredWriteScopeContainsPath. It additionally honors "/**"
-// glob entries, which the legacy overlap-only matcher silently rejects.
-func parallelWaveDeclaredWriteScopeContainsPath(scope []string, path string) bool {
-	for _, scopeEntry := range scope {
-		if parallelWaveScopeEntryContainsPath(scopeEntry, path) {
-			return true
-		}
-	}
-	return false
-}
-
-// releaseParallelWaveWorkerScopeLeases releases the scope-lease rows owned by
-// a terminal worker without waiting for whole-wave cleanup. A scope path is
-// deliberately kept while another non-terminal worker in the same wave still
-// declares an overlapping scope (for example a dependency-gated child that
-// inherits its parent's scope), so the release never opens a fence that a live
-// worker still relies on.
-func releaseParallelWaveWorkerScopeLeasesTx(tx *sql.Tx, wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
-	if len(worker.DeclaredWriteScope) == 0 {
-		return nil
-	}
-	blocked := make(map[string]struct{})
-	for _, other := range wave.Workers {
-		if other.Id == worker.Id {
-			continue
-		}
-		if _, terminal := parallelWaveWorkerTerminalCondition(other.Status); terminal {
-			continue
-		}
-		for _, otherPath := range other.DeclaredWriteScope {
-			for _, workerPath := range worker.DeclaredWriteScope {
-				if writeScopePathsOverlap(otherPath, workerPath) {
-					blocked[workerPath] = struct{}{}
-				}
-			}
-		}
-	}
-	for _, scopePath := range worker.DeclaredWriteScope {
-		if _, keep := blocked[scopePath]; keep {
-			continue
-		}
-		if _, err := tx.Exec(
-			`UPDATE parallel_wave_scope_lease
-			 SET active = 0,
-			     released_at = COALESCE(released_at, CURRENT_TIMESTAMP)
-			 WHERE wave_id = ? AND project_id = ? AND scope_path = ? AND active = 1`,
-			wave.Id,
-			wave.ProjectId,
-			scopePath,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func releaseParallelWaveWorkerScopeLeases(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := releaseParallelWaveWorkerScopeLeasesTx(tx, wave, worker); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// blockParallelWaveWorker closes a dependency-gated worker and releases its
-// lease in the same transaction. A blocked child is an execution consequence
-// of an already failed parent, not an additional provider failure.
+// blockParallelWaveWorker closes a dependency-gated worker in its own
+// transaction. A blocked child is an execution consequence of an already
+// failed parent, not an additional provider failure.
 func blockParallelWaveWorker(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWorkerSnapshot, reason string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -960,9 +871,6 @@ func blockParallelWaveWorker(wave NetrunnerWaveSnapshot, worker NetrunnerWaveWor
 	}
 	if changed == 0 {
 		return nil
-	}
-	if err := releaseParallelWaveWorkerScopeLeasesTx(tx, wave, worker); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
@@ -1413,7 +1321,7 @@ type TransitionNetrunnerWavePhaseInput struct {
 	AcceptanceSessionId int    `json:"acceptance_session_id,omitempty" jsonschema:"Project-scoped pending acceptance session required when entering acceptance."`
 	HandoffSha          string `json:"handoff_sha,omitempty" jsonschema:"Immutable committed Git handoff required when completing a wave that can create children."`
 	ReviewApproved      bool   `json:"review_approved" jsonschema:"Must be true to attest that the phase review happened: 'accepted' attests the work passed, 'rejected' closes the wave without attesting it (review_outcome)."`
-	ReviewOutcome       string `json:"review_outcome,omitempty" jsonschema:"Review verdict: accepted (default) or rejected. Rejected closes the wave and releases scope leases without claiming any result passed."`
+	ReviewOutcome       string `json:"review_outcome,omitempty" jsonschema:"Review verdict: accepted (default) or rejected. Rejected closes the wave without claiming any result passed."`
 }
 
 type TransitionNetrunnerWavePhaseOutput struct {
@@ -1548,7 +1456,7 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 		}
 		if outcome == "rejected" {
 			// A rejected review closes the wave WITHOUT attesting the work:
-			// scope leases are released and nothing claims any result passed
+			// nothing claims any result passed
 			// (feedback 95, backlog 206-208). Non-terminal workers must first be
 			// reworked or stopped so nothing is abandoned mid-flight.
 			projectCWD, cwdErr := projectCWDFromID(authorizedProjectId)
@@ -1624,9 +1532,6 @@ func TransitionNetrunnerWavePhase(ctx context.Context, req *mcp.CallToolRequest,
 				wave.Id,
 				authorizedProjectId,
 			)
-		}
-		if err == nil {
-			err = releaseParallelWaveScopeLeases(wave.Id, authorizedProjectId)
 		}
 	default:
 		return &mcp.CallToolResult{IsError: true}, TransitionNetrunnerWavePhaseOutput{}, fmt.Errorf("unsupported target_phase %q; supported values are %q and %q", input.TargetPhase, parallelWavePhaseAcceptance, parallelWavePhaseCompleted)

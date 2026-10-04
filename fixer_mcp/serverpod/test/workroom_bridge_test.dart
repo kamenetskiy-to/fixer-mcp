@@ -181,6 +181,116 @@ void main() {
     expect(event.payloadJson, '{"status":"complete"}');
   });
 
+  test('hands wire models carry no retired scope field', () {
+    final snapshot = decodeProjectWorkroomSnapshot({
+      'project_id': 7,
+      'project_name': 'Workroom',
+      'project_cwd': '/projects/workroom',
+      'protocol_version': 1,
+      'watermark_seq': 12,
+      'threads': <Object>[],
+      'turns': <Object>[],
+      'hands_actor_id': 'hands:project:7',
+      'hands_display_name': 'Руки',
+      'hands_authority_state': 'enabled',
+      'hands_default_lane': 'codex',
+      'hands_lanes': <Object>[],
+      'hands_mailbox': [
+        {
+          'id': 'instruction-1',
+          'ordinal': 1,
+          'instruction_text': 'Audit the bridge.',
+          'requested_lane': 'codex',
+          'risk_class': 'standard',
+          'review_policy': 'manual',
+          'state': 'queued',
+          'revision': 1,
+          'created_at': '2026-07-30T12:00:00Z',
+          'updated_at': '2026-07-30T12:00:00Z',
+          'declared_write_scope': ['fixer_mcp/dashboard_app'],
+        },
+      ],
+      'capabilities': ['project.view'],
+    });
+
+    final instruction = snapshot.handsMailbox.single;
+    expect(instruction.instructionText, 'Audit the bridge.');
+    expect(instruction.requestedLane, 'codex');
+
+    final json = instruction.toJson();
+    expect(json.keys, isNot(contains('declared_write_scope')));
+    expect(json.keys, isNot(contains('declaredWriteScope')));
+    expect(json['requested_lane'], 'codex');
+    expect(json['ordinal'], 1);
+    expect(json.keys.toSet(), <String>{
+      '__className__',
+      'id',
+      'ordinal',
+      'instruction_text',
+      'requested_lane',
+      'risk_class',
+      'review_policy',
+      'state',
+      'revision',
+      'created_at',
+      'updated_at',
+    });
+    expect(jsonEncode(json).contains('scope'), isFalse);
+    expect(jsonEncode(json).contains('lease'), isFalse);
+
+    final request = HandsInstructionRequest(
+      projectId: 7,
+      instructionText: 'Audit the bridge.',
+      requestedLane: 'codex',
+      idempotencyKey: 'hands-key',
+    );
+    final requestJson = request.toJson();
+    expect(requestJson.keys, isNot(contains('declaredWriteScope')));
+    expect(requestJson.keys, isNot(contains('declared_write_scope')));
+    expect(requestJson['requestedLane'], 'codex');
+    expect(requestJson.keys.toSet(), <String>{
+      '__className__',
+      'projectId',
+      'instructionText',
+      'requestedLane',
+      'idempotencyKey',
+    });
+    expect(jsonEncode(requestJson).contains('scope'), isFalse);
+    expect(jsonEncode(requestJson).contains('lease'), isFalse);
+
+    final full = WorkroomHandsInstruction(
+      instructionId: 'instruction-2',
+      ordinal: 2,
+      instructionText: 'Second instruction.',
+      requestedLane: 'codex',
+      riskClass: 'standard',
+      reviewPolicy: 'manual',
+      state: 'failed',
+      stateReasonCode: 'timeout',
+      stateReasonText: 'Lane timed out.',
+      revision: 2,
+      createdAt: '2026-07-30T12:00:00Z',
+      updatedAt: '2026-07-30T12:05:00Z',
+      terminalAt: '2026-07-30T12:06:00Z',
+    );
+    expect(full.toJson().keys.toSet(), <String>{
+      '__className__',
+      'id',
+      'ordinal',
+      'instruction_text',
+      'requested_lane',
+      'risk_class',
+      'review_policy',
+      'state',
+      'state_reason_code',
+      'state_reason_text',
+      'revision',
+      'created_at',
+      'updated_at',
+      'terminal_at',
+    });
+  });
+
   group('WorkroomStreamPump', () {
     test('replays an event committed after the snapshot watermark', () async {
       final fetchedAfter = <int>[];

@@ -28,9 +28,6 @@ func TestAcceptOrderCreatesProjectAndSession(t *testing.T) {
 		"description": "Implement the requested workflow.",
 		"revisions":   "Use the client's existing branding.",
 		"project_cwd": projectCWD,
-		"declared_write_scope": []string{
-			"client_project",
-		},
 	}, &response)
 
 	if response.Status != "success" || response.OrderID != 42 {
@@ -63,13 +60,6 @@ func TestAcceptOrderCreatesProjectAndSession(t *testing.T) {
 		t.Fatalf("expected one pending order session, got %d", sessionCount)
 	}
 
-	var storedScope string
-	if err := repo.db.QueryRow("SELECT declared_write_scope FROM session WHERE id = ?", response.SessionID).Scan(&storedScope); err != nil {
-		t.Fatalf("read declared write scope: %v", err)
-	}
-	if storedScope != `["client_project"]` {
-		t.Fatalf("unexpected declared write scope: %q", storedScope)
-	}
 }
 
 func TestAcceptOrderReusesProjectByNormalizedCWD(t *testing.T) {

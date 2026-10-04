@@ -179,7 +179,7 @@ func TestAutomaticWaveAcceptanceStillRequiresReviewerAndAcceptanceSession(t *tes
 	}
 
 	if _, err := testDB.Exec(
-		"INSERT INTO session (project_id, task_description, status, report, declared_write_scope, parallel_wave_id) VALUES (1, 'reviewer', 'completed', 'approved', '[\"fixer_mcp\"]', ?)",
+		"INSERT INTO session (project_id, task_description, status, report, parallel_wave_id) VALUES (1, 'reviewer', 'completed', 'approved', ?)",
 		parallelWaveReviewMarker(created.WaveId),
 	); err != nil {
 		t.Fatalf("seed completed reviewer: %v", err)

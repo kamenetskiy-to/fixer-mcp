@@ -26,7 +26,7 @@ void main() {
     expect(planned.tasks.last.model, 'gpt-5.6-sol');
     expect(planned.tasks.last.mcpServers, ['dart_flutter', 'fixer_mcp']);
     expect(snapshot.plannedWaves.last.readinessErrors, [
-      'frontend task overlaps an active scope lease',
+      'frontend task overlaps an already running task',
     ]);
 
     final repairWave = snapshot.waves.first;
@@ -153,7 +153,7 @@ void main() {
       expect(find.text('PLANNED, NOT INITIALIZED'), findsOneWidget);
       expect(
         find.textContaining(
-          'owns no Netrunner sessions, worktrees, resolved base SHA',
+          'owns no Netrunner sessions, worktrees, or resolved base SHA',
         ),
         findsOneWidget,
       );
@@ -165,7 +165,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('mission-plan-502')));
       await tester.pumpAndSettle();
       expect(
-        find.text('frontend task overlaps an active scope lease'),
+        find.text('frontend task overlaps an already running task'),
         findsWidgets,
       );
       expect(
@@ -519,7 +519,6 @@ Map<String, dynamic> _payload() {
             'key': 'backend',
             'position': 1,
             'task_description': 'Add the governed planned-wave contract.',
-            'declared_write_scope': ['fixer_mcp/dashboard_api'],
             'depends_on': <String>[],
             'backend': 'codex',
             'model': 'gpt-5.6-sol',
@@ -531,7 +530,6 @@ Map<String, dynamic> _payload() {
             'key': 'frontend',
             'position': 2,
             'task_description': 'Render Planned in Flutter Desktop.',
-            'declared_write_scope': ['dashboard_app/lib/mission_control'],
             'depends_on': ['backend'],
             'backend': 'codex',
             'model': 'gpt-5.6-sol',
@@ -556,7 +554,7 @@ Map<String, dynamic> _payload() {
         'operator_state': 'initialization_failed',
         'label': 'Initialization failed',
         'next_action': 'retry_initialize',
-        'failure_reason': 'frontend task overlaps an active scope lease',
+        'failure_reason': 'frontend task overlaps an already running task',
         'created_at': '2026-07-29T11:45:00Z',
         'updated_at': '2026-07-29T11:58:00Z',
         'task_counts': {'total': 1, 'planned': 1, 'materialized': 0},
@@ -566,11 +564,10 @@ Map<String, dynamic> _payload() {
             'key': 'frontend',
             'position': 1,
             'task_description': 'Blocked frontend task.',
-            'declared_write_scope': ['dashboard_app/lib/mission_control'],
             'depends_on': <String>[],
           },
         ],
-        'validation_errors': ['frontend task overlaps an active scope lease'],
+        'validation_errors': ['frontend task overlaps an already running task'],
         'action_capabilities': {
           'initialize': {
             'enabled': false,

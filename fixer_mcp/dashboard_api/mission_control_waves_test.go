@@ -326,7 +326,6 @@ func seedMissionControlWaves(t *testing.T, repo *Repository, now time.Time) {
 			task_key TEXT NOT NULL,
 			position INTEGER NOT NULL,
 			task_description TEXT NOT NULL,
-			declared_write_scope TEXT NOT NULL,
 			dependencies TEXT NOT NULL,
 			cli_backend TEXT NOT NULL DEFAULT 'codex',
 			cli_model TEXT NOT NULL DEFAULT '',
@@ -409,13 +408,13 @@ func seedMissionControlWaves(t *testing.T, repo *Repository, now time.Time) {
 	if _, err := repo.dbWrite.Exec(`
 		INSERT INTO planned_wave_task (
 			id, planned_wave_id, project_id, task_key, position, task_description,
-			declared_write_scope, dependencies, cli_backend, cli_model, cli_reasoning,
+			dependencies, cli_backend, cli_model, cli_reasoning,
 			mcp_server_names, materialized_session_id
 		) VALUES
-			(5001, 501, 1, 'backend', 1, 'Future backend', '["fixer_mcp"]', '[]', 'codex', 'gpt-5.6-sol', 'high', '["gopls"]', NULL),
-			(5002, 501, 1, 'frontend', 2, 'Future frontend', '["dashboard_app"]', '["backend"]', 'codex', 'gpt-5.6-sol', 'high', '["sqlite"]', NULL),
-			(5003, 502, 1, 'accepted', 1, 'Already initialized', '["docs"]', '[]', 'codex', 'gpt-5.6-sol', 'high', '[]', 30),
-			(6001, 601, 2, 'other', 1, 'Other project task', '["other"]', '[]', 'codex', 'gpt-5.6-sol', 'high', '[]', 40)`); err != nil {
+			(5001, 501, 1, 'backend', 1, 'Future backend', '[]', 'codex', 'gpt-5.6-sol', 'high', '["gopls"]', NULL),
+			(5002, 501, 1, 'frontend', 2, 'Future frontend', '["backend"]', 'codex', 'gpt-5.6-sol', 'high', '["sqlite"]', NULL),
+			(5003, 502, 1, 'accepted', 1, 'Already initialized', '[]', 'codex', 'gpt-5.6-sol', 'high', '[]', 30),
+			(6001, 601, 2, 'other', 1, 'Other project task', '[]', 'codex', 'gpt-5.6-sol', 'high', '[]', 40)`); err != nil {
 		t.Fatalf("seed Mission Control planned tasks: %v", err)
 	}
 

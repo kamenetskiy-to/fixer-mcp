@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,12 +28,11 @@ type FixerTurnReceipt struct {
 }
 
 type BridgeSubmitHandsInstructionInput struct {
-	InstructionText    string   `json:"instruction_text"`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty"`
-	RequestedLane      string   `json:"requested_lane,omitempty"`
-	RequestedModel     string   `json:"requested_model,omitempty"`
-	RequestedReasoning string   `json:"requested_reasoning,omitempty"`
-	IdempotencyKey     string   `json:"idempotency_key"`
+	InstructionText    string `json:"instruction_text"`
+	RequestedLane      string `json:"requested_lane,omitempty"`
+	RequestedModel     string `json:"requested_model,omitempty"`
+	RequestedReasoning string `json:"requested_reasoning,omitempty"`
+	IdempotencyKey     string `json:"idempotency_key"`
 }
 
 type HandsInstructionReceipt struct {
@@ -278,33 +274,6 @@ func truncateDashboardText(value string, limit int) string {
 	return string(runes[:limit-1]) + "…"
 }
 
-func normalizeBridgeWriteScope(raw []string) ([]string, string, error) {
-	if len(raw) == 0 {
-		return []string{}, "[]", nil
-	}
-	seen := map[string]struct{}{}
-	values := []string{}
-	for _, entry := range raw {
-		entry = strings.TrimSpace(entry)
-		if entry == "" || filepath.IsAbs(entry) {
-			return nil, "", fmt.Errorf("write scope entries must be non-empty project-relative paths")
-		}
-		cleaned := filepath.ToSlash(filepath.Clean(entry))
-		if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-			return nil, "", fmt.Errorf("write scope entries must stay within the project")
-		}
-		cleaned = strings.TrimPrefix(cleaned, "./")
-		if _, ok := seen[cleaned]; ok {
-			continue
-		}
-		seen[cleaned] = struct{}{}
-		values = append(values, cleaned)
-	}
-	sort.Strings(values)
-	payload, err := json.Marshal(values)
-	return values, string(payload), err
-}
-
 func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, principal BridgePrincipal, input BridgeSubmitHandsInstructionInput) (HandsInstructionReceipt, error) {
 	if !bridgePrincipalHasCapability(principal, "hands.instruction.submit") {
 		return HandsInstructionReceipt{}, ErrWorkroomAuthorization
@@ -317,11 +286,6 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 	if err != nil {
 		return HandsInstructionReceipt{}, err
 	}
-	writeScope, scopeJSON, err := normalizeBridgeWriteScope(input.DeclaredWriteScope)
-	if err != nil {
-		return HandsInstructionReceipt{}, err
-	}
-	input.DeclaredWriteScope = writeScope
 	input.RequestedLane = strings.ToLower(strings.TrimSpace(input.RequestedLane))
 	input.RequestedModel = strings.TrimSpace(input.RequestedModel)
 	input.RequestedReasoning = strings.ToLower(strings.TrimSpace(input.RequestedReasoning))
@@ -375,24 +339,13 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 	if !dashboardHandsProviderOptionContains(spec.reasoningOptions, reasoning) {
 		return HandsInstructionReceipt{}, fmt.Errorf("requested_reasoning is not registered")
 	}
-	riskClass, reviewPolicy := "read_only", "auto_read_only"
-	if len(writeScope) > 0 {
-		riskClass, reviewPolicy = "repository_write", "fixer_required"
-	}
+	// With declared write scopes retired, every Hands instruction is treated
+	// as potential repository work and keeps the manual review gate: human
+	// review replaces the retired scope claim as the acceptance mechanism.
+	riskClass, reviewPolicy := "repository_write", "fixer_required"
 	state, reasonCode, reasonText := "queued", "", ""
 	if authorityState != "enabled" {
 		state, reasonCode, reasonText = "unsupported", "hands_authority_unavailable", "The permanent Hands authority is not enabled."
-	} else if len(writeScope) > 0 {
-		var cwd string
-		if err := tx.QueryRowContext(ctx, `SELECT cwd FROM project WHERE id = ?`, projectID).Scan(&cwd); err != nil {
-			return HandsInstructionReceipt{}, err
-		}
-		if _, err := os.Stat(filepath.Join(cwd, ".git")); os.IsNotExist(err) {
-			state, riskClass, reasonCode = "unsupported", "unsupported_high_risk", "non_git_repository_write"
-			reasonText = "Repository-write Hands instructions require a Git project."
-		} else if err != nil {
-			return HandsInstructionReceipt{}, err
-		}
 	}
 	instructionID, err := newWorkroomUUID()
 	if err != nil {
@@ -403,7 +356,7 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 		"protocol": "fixer.hands.instruction", "protocol_version": 1,
 		"instruction_id": instructionID, "project_id": projectID, "actor_id": actorID,
 		"ordinal": ordinal, "instruction_text": input.InstructionText,
-		"declared_write_scope": writeScope, "requested_lane": lane, "risk_class": riskClass,
+		"requested_lane": lane, "risk_class": riskClass,
 		"review_policy": reviewPolicy, "issuer_principal_id": principal.PrincipalID,
 		"source": map[string]string{"channel_kind": "serverpod", "channel_id": principal.RequestID}, "created_at": now,
 	})
@@ -417,12 +370,12 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO hands_instruction (
 			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id,
-			issuer_principal_id, instruction_text, declared_write_scope_json, instruction_envelope_json,
+			issuer_principal_id, instruction_text, instruction_envelope_json,
 			requested_lane, risk_class, review_policy, state, state_reason_code, state_reason_text,
 			idempotency_key, revision, created_at, updated_at, terminal_at
-		) VALUES (?, ?, ?, ?, 'serverpod', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, 1, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, 'serverpod', ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, 1, ?, ?, ?)`,
 		instructionID, projectID, actorID, ordinal, principal.RequestID, principal.PrincipalID,
-		input.InstructionText, scopeJSON, string(envelopeJSON), lane, riskClass, reviewPolicy,
+		input.InstructionText, string(envelopeJSON), lane, riskClass, reviewPolicy,
 		state, reasonCode, reasonText, key, now, now, terminalAt); err != nil {
 		return HandsInstructionReceipt{}, err
 	}
@@ -431,10 +384,10 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO session (
 				project_id, task_description, status, cli_backend, cli_model, cli_reasoning,
-				declared_write_scope, session_kind, created_at, updated_at
-			) VALUES (?, ?, 'pending', ?, ?, ?, ?, 'hands_instruction', ?, ?)`, projectID,
+				session_kind, created_at, updated_at
+			) VALUES (?, ?, 'pending', ?, ?, ?, 'hands_instruction', ?, ?)`, projectID,
 			fmt.Sprintf("Permanent Hands instruction %d (%s).\n\n%s", ordinal, instructionID, input.InstructionText),
-			lane, model, reasoning, scopeJSON, now, now)
+			lane, model, reasoning, now, now)
 		if err != nil {
 			return HandsInstructionReceipt{}, err
 		}
@@ -558,6 +511,8 @@ func (r *Repository) CancelHandsInstruction(ctx context.Context, projectID int, 
 		return CommandReceipt{}, err
 	}
 	privileged := bridgePrincipalHasPrivilegedHandsRole(principal)
+	// The retired waiting state is kept here only as a dated legacy read so
+	// pre-retirement rows can still be cancelled; nothing writes that state anymore.
 	issuerMayCancelQueued := issuerPrincipalID == principal.PrincipalID && (state == "queued" || state == "waiting_for_lease")
 	if !privileged && !issuerMayCancelQueued {
 		return CommandReceipt{}, ErrWorkroomAuthorization
@@ -581,9 +536,6 @@ func (r *Repository) CancelHandsInstruction(ctx context.Context, projectID int, 
 		if _, err := tx.ExecContext(ctx, `UPDATE hands_generation SET status = 'stopped', ended_at = ?, stop_reason = 'cancelled_by_principal', updated_at = ? WHERE instruction_id = ? AND status IN ('planned', 'starting', 'running')`, now, now, instructionID); err != nil {
 			return CommandReceipt{}, err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE project_write_lease SET state = 'released', released_at = ?, release_reason = 'cancelled_by_principal' WHERE project_id = ? AND owner_id = ? AND owner_kind = 'hands_instruction' AND state = 'active'`, now, projectID, instructionID); err != nil {
-		return CommandReceipt{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO hands_instruction_event (

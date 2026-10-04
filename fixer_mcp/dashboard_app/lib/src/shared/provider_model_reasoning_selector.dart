@@ -94,7 +94,17 @@ class _ProviderModelReasoningSelectorState
             ? const <String>[]
             : <String>[selectedLeafId],
         selectedCallBack: (selected) {
-          widget.onSelected(_selectionFrom(selected));
+          final selection = _selectionFrom(selected);
+          // The cascade widget emits its initial selection before the parent
+          // has loaded real thread state; an emission identical to the current
+          // selection is not a user change and must never become a stale
+          // override that masks the real execution config.
+          if (selection.provider == widget.selectedProvider &&
+              selection.model == widget.selectedModel &&
+              selection.reasoning == widget.selectedReasoning) {
+            return;
+          }
+          widget.onSelected(selection);
         },
         fieldDecoration: FieldDecoration(
           hintText: widget.hintText,

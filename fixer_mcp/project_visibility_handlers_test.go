@@ -64,7 +64,6 @@ func setupGetProjectsTestDB(t *testing.T) *sql.DB {
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
 				cli_model TEXT NOT NULL DEFAULT '',
 				cli_reasoning TEXT NOT NULL DEFAULT '',
-				declared_write_scope TEXT NOT NULL DEFAULT '["."]',
 				parallel_wave_id TEXT NOT NULL DEFAULT '',
 				repair_source_session_id INTEGER,
 				rework_count INTEGER NOT NULL DEFAULT 0,
@@ -301,20 +300,20 @@ func setupListNetrunnerWavesTestDB(t *testing.T) *sql.DB {
 	_, err := testDB.Exec(`
 		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root, control_reason, failure_reason)
 			VALUES (1, 1, 'completed', 'completed', 'closed', 'active', 'passed', 'sha1', 'cwd1', 'wt1', '', '');
-		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, branch_name, worktree_path, base_sha)
 			VALUES
-				(1, 1, 1, 'completed', '["docs/a"]', 'fixer/wave-1/session-1', '/tmp/wt-1-1', 'sha1'),
-				(1, 1, 3, 'completed', '["docs/b"]', 'fixer/wave-1/session-3', '/tmp/wt-1-3', 'sha1');
+				(1, 1, 1, 'completed', 'fixer/wave-1/session-1', '/tmp/wt-1-1', 'sha1'),
+				(1, 1, 3, 'completed', 'fixer/wave-1/session-3', '/tmp/wt-1-3', 'sha1');
 		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root)
 			VALUES (2, 1, 'running', 'implementation', 'none', 'active', 'none', 'sha2', 'cwd1', 'wt2');
-		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
-			VALUES (2, 1, 1, 'running', '["docs/a"]', 'fixer/wave-2/session-1', '/tmp/wt-2-1', 'sha2');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, branch_name, worktree_path, base_sha)
+			VALUES (2, 1, 1, 'running', 'fixer/wave-2/session-1', '/tmp/wt-2-1', 'sha2');
 		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root, control_reason, failure_reason)
 			VALUES (3, 1, 'failed', 'implementation', 'implementation_repair', 'paused_for_architect', 'repair_required', 'sha3', 'cwd1', 'wt3', 'Architect must review the repair authorization', 'Tests failed on worker 2');
 		INSERT INTO parallel_wave (id, project_id, status, phase, gate_state, control_state, failure_policy_state, base_sha, project_cwd, worktree_root)
 			VALUES (4, 2, 'running', 'implementation', 'none', 'active', 'none', 'sha4', 'cwd2', 'wt4');
-		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
-			VALUES (4, 2, 2, 'running', '["docs/x"]', 'fixer/wave-4/session-2', '/tmp/wt-4-2', 'sha4');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, branch_name, worktree_path, base_sha)
+			VALUES (4, 2, 2, 'running', 'fixer/wave-4/session-2', '/tmp/wt-4-2', 'sha4');
 	`)
 	if err != nil {
 		_ = testDB.Close()

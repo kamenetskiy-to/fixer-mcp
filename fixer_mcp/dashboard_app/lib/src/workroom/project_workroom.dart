@@ -303,7 +303,6 @@ ProjectWorkroomSnapshot seedWorkroomSnapshot(ProjectWorkspaceSnapshot legacy) {
       operationalState: 'idle',
       selectedLane: 'codex',
       queueDepth: 0,
-      activeLeaseSummary: '',
       lanes: [
         for (final backend in const [
           'codex',

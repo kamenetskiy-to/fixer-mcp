@@ -19,12 +19,12 @@ func setupListProjectSessionsTestDB(t *testing.T) *sql.DB {
 	_, err := testDB.Exec(`
 		UPDATE session SET status = 'completed', cli_backend = 'codex', report = 'Fixed the widget rendering bug' WHERE id = 1;
 		UPDATE session SET cli_backend = 'codex' WHERE id = 3;
-		INSERT INTO session (project_id, task_description, status, cli_backend, declared_write_scope)
-			VALUES (1, 'Investigate widget flakiness', 'in_progress', 'claude', '["docs/c"]');
+		INSERT INTO session (project_id, task_description, status, cli_backend)
+			VALUES (1, 'Investigate widget flakiness', 'in_progress', 'claude');
 		INSERT INTO parallel_wave (id, project_id, base_sha, project_cwd, worktree_root)
 			VALUES (1, 1, 'deadbeef', 'irrelevant', 'irrelevant');
-		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, declared_write_scope, branch_name, worktree_path, base_sha)
-			VALUES (1, 1, 1, 'completed', '["docs/a"]', 'fixer/wave-1/session-1', '/tmp/wt-1', 'deadbeef');
+		INSERT INTO parallel_wave_worker (wave_id, project_id, session_id, status, branch_name, worktree_path, base_sha)
+			VALUES (1, 1, 1, 'completed', 'fixer/wave-1/session-1', '/tmp/wt-1', 'deadbeef');
 	`)
 	if err != nil {
 		_ = testDB.Close()

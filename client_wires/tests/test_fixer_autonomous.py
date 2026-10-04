@@ -526,18 +526,95 @@ class FixerAutonomousTests(unittest.TestCase):
             wave_worker_id=44,
             branch_name="fixer/wave-3/session-7",
             worker_cwd=Path("/tmp/project/.codex/netrunner_worktrees/wave-3/session-7"),
-            declared_write_scope=["client_wires/fixer_autonomous.py"],
         )
 
         self.assertIn("wave_id: `3`", prompt)
         self.assertIn("wave_worker_id: `44`", prompt)
         self.assertIn("branch_name: `fixer/wave-3/session-7`", prompt)
-        self.assertIn("declared_write_scope (informational only; never enforced): client_wires/fixer_autonomous.py", prompt)
-        self.assertNotIn("Operate only inside the assigned declared_write_scope.", prompt)
+        self.assertNotIn("declared_write_scope", prompt)
+        self.assertNotIn("declared-write-scope", prompt)
+        self.assertNotIn("Operate only inside", prompt)
         self.assertIn("Do not merge, rebase, remove worktrees, or alter wave state.", prompt)
         self.assertIn("Report changed files in the completion report.", prompt)
         self.assertIn("Do not call fixer_mcp.wake_fixer_autonomous", prompt)
         self.assertIn("submit the mandatory doc proposal and completion report", prompt)
+
+    def test_wave_worker_cli_has_no_declared_write_scope_option(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as help_exit:
+                fixer_autonomous._parse_args(["launch-wave-worker", "--help"])
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertNotIn("--declared-write-scope", stdout.getvalue())
+
+        args = fixer_autonomous._parse_args(
+            [
+                "launch-wave-worker",
+                "--project-cwd", "/tmp/project",
+                "--worker-cwd", "/tmp/worker",
+                "--session-id", "7",
+                "--wave-id", "3",
+                "--wave-worker-id", "44",
+            ]
+        )
+        self.assertEqual(args.session_id, 7)
+        self.assertFalse(hasattr(args, "declared_write_scope"))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as reject_exit:
+                fixer_autonomous._parse_args(
+                    [
+                        "launch-wave-worker",
+                        "--project-cwd", "/tmp/project",
+                        "--worker-cwd", "/tmp/worker",
+                        "--session-id", "7",
+                        "--wave-id", "3",
+                        "--wave-worker-id", "44",
+                        "--declared-write-scope", ".",
+                    ]
+                )
+        self.assertEqual(reject_exit.exception.code, 2)
+
+    def test_wave_launch_plan_envelope_and_command_have_no_scope_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
+            project_cwd = Path(project_tmp)
+            worker_cwd = Path(worker_tmp)
+            db_path = project_cwd / "fixer.db"
+            db_path.touch()
+
+            available_servers = {fixer_wire.FORCED_MCP_SERVER: {"command": "fixer_mcp"}}
+            adapter = _FakeBackendAdapter()
+            launch_selection = fixer_wire.SessionLaunchSelection(
+                backend="codex",
+                model="gpt-5.5",
+                reasoning="xhigh",
+            )
+
+            with (
+                patch.object(_FakeBackendAdapter, "ensure_runtime_files"),
+                patch.object(fixer_autonomous, "_build_common_codex_env", return_value={"BASE_ENV": "1"}),
+            ):
+                plan = fixer_autonomous._build_wave_netrunner_launch_plan(
+                    project_cwd=project_cwd,
+                    worker_cwd=worker_cwd,
+                    local_session_id=7,
+                    wave_id=3,
+                    wave_worker_id=44,
+                    fixer_session_id="fixer-session-123",
+                    assigned_mcp_names=[],
+                    mcp_how_to={fixer_wire.FORCED_MCP_SERVER: "Use for project tools."},
+                    launch_selection=launch_selection,
+                    available_servers=available_servers,
+                    config_env_vars={},
+                    adapter=adapter,
+                    ensure_sqlite_scaffold=lambda _cwd, *, interactive=False: None,
+                    db_path=db_path,
+                )
+
+        self.assertNotIn("declared_write_scope", plan.prompt)
+        self.assertNotIn("declared_write_scope", json.dumps(plan.metadata, default=str))
+        self.assertNotIn("declared_write_scope", json.dumps(plan.command, default=str))
+        self.assertFalse(any("--declared-write-scope" in str(part) for part in plan.command))
 
     def test_build_wave_netrunner_launch_plan_uses_worker_cwd_and_project_auth(self) -> None:
         with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as worker_tmp:
@@ -580,7 +657,6 @@ class FixerAutonomousTests(unittest.TestCase):
                     local_session_id=7,
                     wave_id=3,
                     wave_worker_id=44,
-                    declared_write_scope=["client_wires/fixer_autonomous.py"],
                     fixer_session_id="fixer-session-123",
                     assigned_mcp_names=["eslint"],
                     mcp_how_to={
@@ -653,7 +729,6 @@ class FixerAutonomousTests(unittest.TestCase):
                     local_session_id=5,
                     wave_id=821,
                     wave_worker_id=1260,
-                    declared_write_scope=["client_wires/fixer_autonomous_wave.py"],
                     fixer_session_id="fixer-session-pi",
                     assigned_mcp_names=[],
                     mcp_how_to={fixer_wire.FORCED_MCP_SERVER: "Use for project tools."},
@@ -707,7 +782,6 @@ class FixerAutonomousTests(unittest.TestCase):
                     local_session_id=7,
                     wave_id=3,
                     wave_worker_id=44,
-                    declared_write_scope=["client_wires/fixer_autonomous.py"],
                     fixer_session_id="fixer-session-123",
                     assigned_mcp_names=["sqlite"],
                     mcp_how_to={"sqlite": "Use sqlite."},
@@ -756,7 +830,6 @@ class FixerAutonomousTests(unittest.TestCase):
                         local_session_id=7,
                         wave_id=3,
                         wave_worker_id=44,
-                        declared_write_scope=["client_wires/fixer_autonomous.py"],
                         fixer_session_id="fixer-session-123",
                         assigned_mcp_names=["sqlite"],
                         mcp_how_to={"sqlite": "Use sqlite."},
@@ -2043,6 +2116,33 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertEqual(args[1], "explicit-fixer-session")
         self.assertIn("fixer_mcp.get_overseer_fixer_messages", args[2])
         self.assertEqual(launched["command"], ["codex", "exec", "resume", "explicit-fixer-session", "prompt"])
+
+
+class DeclaredScopeSkillRetirementTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[2]
+    RETIRED_PHRASES = (
+        "declared_write_scope",
+        "declared-write-scope",
+        "declared write scope",
+        "write scope",
+        "write_scope",
+        "declared scope",
+        "scope drift",
+        "scope_check",
+        "path fence",
+        "path-fence",
+        "operate only inside",
+        "outside the scope",
+    )
+
+    def test_skill_instructions_carry_no_declared_scope_wording(self) -> None:
+        skill_files = sorted((self.ROOT / ".agents" / "skills").glob("**/SKILL.md"))
+        self.assertTrue(skill_files, "no SKILL.md files found to scan")
+        for path in skill_files:
+            content = path.read_text(encoding="utf-8").lower()
+            with self.subTest(skill=str(path.relative_to(self.ROOT))):
+                for phrase in self.RETIRED_PHRASES:
+                    self.assertNotIn(phrase, content)
 
 
 if __name__ == "__main__":

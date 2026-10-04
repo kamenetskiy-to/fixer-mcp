@@ -164,19 +164,14 @@ func updateParallelWaveSnapshotReview(wave *NetrunnerWaveSnapshot, projectID int
 }
 
 func createParallelWaveReviewSession(wave NetrunnerWaveSnapshot) (parallelWaveReviewSession, error) {
-	declaredWriteScope, err := encodeDeclaredWriteScope([]string{"fixer_mcp", "dashboard_api"})
-	if err != nil {
-		return parallelWaveReviewSession{}, err
-	}
 	taskDescription := parallelWaveReviewTaskDescription(wave)
 	result, err := db.Exec(
 		`INSERT INTO session (
-			project_id, task_description, status, declared_write_scope, parallel_wave_id,
+			project_id, task_description, status, parallel_wave_id,
 			cli_backend, cli_model, cli_reasoning
-		) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
 		authorizedProjectId,
 		taskDescription,
-		declaredWriteScope,
 		parallelWaveReviewMarker(wave.Id),
 		defaultParallelWaveReviewBackend,
 		defaultParallelWaveReviewModel,

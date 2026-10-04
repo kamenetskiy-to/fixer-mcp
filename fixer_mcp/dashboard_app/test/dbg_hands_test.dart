@@ -62,7 +62,7 @@ class _FakeSelectorRepository implements ProjectWorkroomRepository {
   @override
   Future<GenUiActionReceipt> invokeAction({required int projectId, required String surfaceId, required int surfaceRevision, required GenUiActionDescriptor action, required Map<String, dynamic> input, required bool confirmed, required String idempotencyKey}) async => throw UnimplementedError();
   @override
-  Future<HandsInstructionReceipt> submitHandsInstruction({required int projectId, required String instructionText, required List<String> declaredWriteScope, required String requestedLane, required String requestedModel, required String requestedReasoning, required String idempotencyKey}) async => throw UnimplementedError();
+  Future<HandsInstructionReceipt> submitHandsInstruction({required int projectId, required String instructionText, required String requestedLane, required String requestedModel, required String requestedReasoning, required String idempotencyKey}) async => throw UnimplementedError();
   @override
   Future<GenUiActionReceipt> cancelHandsInstruction({required int projectId, required String instructionId, required String reason, required String idempotencyKey}) async => throw UnimplementedError();
   @override

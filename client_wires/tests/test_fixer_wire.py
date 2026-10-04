@@ -1401,7 +1401,7 @@ class BackendCatalogTests(unittest.TestCase):
         self.assertNotIn("Gemini 3.5 Flash", descriptors["antigravity"].model_options)
         self.assertIn("Gemini 3.7 Flash", descriptors["antigravity"].model_options)
         self.assertIn("Gemini 3.6 Flash", descriptors["antigravity"].model_options)
-        self.assertIn("Claude Sonnet 4.6 (Thinking)", descriptors["antigravity"].model_options)
+        self.assertIn("Claude Sonnet 5.5", descriptors["antigravity"].model_options)
         self.assertIn("high", descriptors["antigravity"].reasoning_options)
 
     def test_junie_backend_descriptor_exposes_droid_public_aliases(self) -> None:

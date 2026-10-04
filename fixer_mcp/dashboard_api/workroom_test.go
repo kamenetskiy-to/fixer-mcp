@@ -98,14 +98,14 @@ func openWorkroomRepository(t *testing.T) (*Repository, time.Time) {
 		CREATE TABLE session (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, task_description TEXT NOT NULL,
 			status TEXT NOT NULL, report TEXT, cli_backend TEXT NOT NULL DEFAULT 'codex', cli_model TEXT NOT NULL DEFAULT '',
-			cli_reasoning TEXT NOT NULL DEFAULT '', declared_write_scope TEXT NOT NULL DEFAULT '[]',
+			cli_reasoning TEXT NOT NULL DEFAULT '',
 			session_kind TEXT NOT NULL DEFAULT 'netrunner', rework_count INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT, updated_at TEXT
 		);
 		CREATE TABLE hands_instruction (
 			id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, actor_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
 			source_channel_kind TEXT NOT NULL, source_channel_id TEXT NOT NULL, source_message_id TEXT NOT NULL DEFAULT '',
-			issuer_principal_id TEXT NOT NULL, instruction_text TEXT NOT NULL, declared_write_scope_json TEXT NOT NULL,
+			issuer_principal_id TEXT NOT NULL, instruction_text TEXT NOT NULL,
 			instruction_envelope_json TEXT NOT NULL, requested_lane TEXT NOT NULL, risk_class TEXT NOT NULL,
 			review_policy TEXT NOT NULL, state TEXT NOT NULL, state_reason_code TEXT, state_reason_text TEXT,
 			compat_session_id INTEGER, idempotency_key TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -132,10 +132,6 @@ func openWorkroomRepository(t *testing.T) (*Repository, time.Time) {
 		CREATE TABLE project_hands_mcp_server (project_id INTEGER NOT NULL, mcp_server_id INTEGER NOT NULL, PRIMARY KEY(project_id, mcp_server_id));
 		CREATE TABLE project_hands_doc (project_id INTEGER NOT NULL, project_doc_id INTEGER NOT NULL, PRIMARY KEY(project_id, project_doc_id));
 		CREATE TABLE session_mcp_server (session_id INTEGER NOT NULL, mcp_server_id INTEGER NOT NULL, PRIMARY KEY(session_id, mcp_server_id));
-		CREATE TABLE project_write_lease (
-			id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, owner_id TEXT NOT NULL,
-			owner_kind TEXT NOT NULL, state TEXT NOT NULL, released_at TEXT, release_reason TEXT
-		);
 		CREATE TABLE workroom_audit_event (
 			id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, principal_id TEXT NOT NULL,
 			action_id TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
@@ -469,7 +465,7 @@ func TestInternalWorkroomHandsAndFeedbackMutationsAreDurable(t *testing.T) {
 	if status := doSignedBridgeJSON(t, request, &hands); status != http.StatusAccepted {
 		t.Fatalf("submit Hands returned %d", status)
 	}
-	if hands.State != "queued" || hands.RiskClass != "read_only" || hands.InstructionID == "" {
+	if hands.State != "queued" || hands.RiskClass != "repository_write" || hands.InstructionID == "" {
 		t.Fatalf("unexpected Hands receipt: %+v", hands)
 	}
 
@@ -616,6 +612,31 @@ func TestHandsCodexLaneRegistersRunningDeepseekModels(t *testing.T) {
 	}
 	if receipt.Ordinal <= 0 {
 		t.Fatalf("unexpected receipt ordinal: %+v", receipt)
+	}
+}
+
+func TestHandsAntigravityLaneRegistersClaude55EffortVariants(t *testing.T) {
+	spec, ok := dashboardHandsProviderSpecFor("antigravity")
+	if !ok {
+		t.Fatal("antigravity Hands lane spec is missing")
+	}
+	for _, model := range []string{
+		"Claude Opus 5.5 (Low)", "Claude Opus 5.5 (Medium)", "Claude Opus 5.5 (High)",
+		"Claude Sonnet 5.5 (Low)", "Claude Sonnet 5.5 (Medium)", "Claude Sonnet 5.5 (High)",
+	} {
+		if !dashboardHandsProviderOptionContains(spec.modelOptions, model) {
+			t.Fatalf("antigravity lane must advertise agy inventory entry %q", model)
+		}
+	}
+	for _, retired := range []string{"Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)"} {
+		if dashboardHandsProviderOptionContains(spec.modelOptions, retired) {
+			t.Fatalf("antigravity lane must not advertise retired display catalog entry %q", retired)
+		}
+	}
+	for _, gemini := range []string{"Gemini 3.6 Flash", "Gemini 3.1 Pro"} {
+		if !dashboardHandsProviderOptionContains(spec.modelOptions, gemini) {
+			t.Fatalf("antigravity Gemini entries must stay unchanged: missing %q", gemini)
+		}
 	}
 }
 

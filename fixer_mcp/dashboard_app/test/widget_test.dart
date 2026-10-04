@@ -249,7 +249,6 @@ class FakeDashboardRepository implements DashboardRepository {
   Future<ProjectWorkspaceSnapshot> createTask(
     int projectId, {
     required String taskDescription,
-    List<String> declaredWriteScope = const <String>[],
   }) async => _project;
 
   @override
@@ -488,7 +487,6 @@ final _project = ProjectWorkspaceSnapshot(
       backend: 'codex',
       model: 'gpt-5.4',
       reasoning: 'medium',
-      writeScope: ['fixer_mcp/dashboard_app'],
       attachedDocCount: 2,
       mcpCount: 4,
       proposalCount: 1,
@@ -593,7 +591,6 @@ const _explorerSession = NetrunnerExplorerRecord(
   backend: 'codex',
   model: 'gpt-5.4',
   reasoning: 'medium',
-  writeScope: ['fixer_mcp/dashboard_app'],
   createdAt: '2026-07-23T00:30:00Z',
   updatedAt: '2026-07-23T01:00:00Z',
   launchedAt: '2026-07-23T00:35:00Z',
@@ -615,7 +612,6 @@ final _detail = NetrunnerDetailSnapshot(
     backend: 'codex',
     model: 'gpt-5.4',
     reasoning: 'medium',
-    writeScope: ['fixer_mcp/dashboard_app'],
     reportRaw:
         '{"files_changed":["fixer_mcp/dashboard_app/lib/src/dashboard_view.dart"]}',
     structuredFinalReport: FinalReportRecord(

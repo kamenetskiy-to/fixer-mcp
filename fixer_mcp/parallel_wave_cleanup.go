@@ -174,8 +174,5 @@ func markParallelWaveCleanedIfReady(waveID int, projectID int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := releaseParallelWaveScopeLeases(waveID, projectID); err != nil {
-		return false, err
-	}
 	return true, nil
 }

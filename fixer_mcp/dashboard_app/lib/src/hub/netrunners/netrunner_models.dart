@@ -92,7 +92,6 @@ class NetrunnerExplorerRecord {
     required this.backend,
     required this.model,
     required this.reasoning,
-    required this.writeScope,
     required this.createdAt,
     required this.updatedAt,
     required this.launchedAt,
@@ -112,7 +111,6 @@ class NetrunnerExplorerRecord {
   final String backend;
   final String model;
   final String reasoning;
-  final List<String> writeScope;
   final String createdAt;
   final String updatedAt;
   final String launchedAt;
@@ -135,7 +133,6 @@ class NetrunnerExplorerRecord {
       backend: _asString(json['backend']),
       model: _asString(json['model']),
       reasoning: _asString(json['reasoning']),
-      writeScope: _asStringList(json['write_scope']),
       createdAt: _asString(json['created_at']),
       updatedAt: _asString(json['updated_at']),
       launchedAt: _asString(json['launched_at']),
@@ -155,11 +152,6 @@ List<T> _asList<T>(Object? value, T Function(Map<String, dynamic>) decode) {
       .whereType<Map>()
       .map((item) => decode(Map<String, dynamic>.from(item)))
       .toList();
-}
-
-List<String> _asStringList(Object? value) {
-  if (value is! List) return const [];
-  return value.map((item) => item.toString()).toList(growable: false);
 }
 
 String _asString(Object? value) => value?.toString() ?? '';

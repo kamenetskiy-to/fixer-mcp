@@ -17,8 +17,6 @@ const (
 	explicitLaunchMaxWait       = 21600
 	explicitLaunchDefaultPoll   = 5
 	explicitLaunchMaxPoll       = 60
-	defaultDeclaredWriteScope   = `["."]`
-	defaultWriteScopePath       = "."
 	defaultCliBackend           = "codex"
 	defaultCliModel             = "gpt-5.6-luna"
 	defaultCliReasoning         = "high"

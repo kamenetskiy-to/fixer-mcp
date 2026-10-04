@@ -24,7 +24,6 @@ abstract class DashboardRepository {
   Future<ProjectWorkspaceSnapshot> createTask(
     int projectId, {
     required String taskDescription,
-    List<String> declaredWriteScope = const <String>[],
   });
   Future<NetrunnerDetailSnapshot> setSessionAttachedDocs(
     int sessionId,
@@ -173,12 +172,10 @@ class BridgeDashboardRepository implements DashboardRepository {
   Future<ProjectWorkspaceSnapshot> createTask(
     int projectId, {
     required String taskDescription,
-    List<String> declaredWriteScope = const <String>[],
   }) async {
     await _runtimeClient
         .postDashboardJson('/api/actions/projects/$projectId/tasks', {
           'task_description': taskDescription,
-          'declared_write_scope': declaredWriteScope,
         });
     return loadProjectWorkspace(projectId);
   }

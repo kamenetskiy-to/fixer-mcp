@@ -10,8 +10,8 @@
 // ignore_for_file: invalid_use_of_internal_member
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
+
 import 'package:serverpod/serverpod.dart' as _i1;
-import 'package:fixer_dashboard_server/src/generated/protocol.dart' as _i2;
 
 @_i1.immutable
 abstract class HandsInstructionRequest
@@ -19,7 +19,6 @@ abstract class HandsInstructionRequest
   const HandsInstructionRequest._({
     required this.projectId,
     required this.instructionText,
-    required this.declaredWriteScope,
     required this.requestedLane,
     required this.idempotencyKey,
   });
@@ -27,7 +26,6 @@ abstract class HandsInstructionRequest
   const factory HandsInstructionRequest({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String idempotencyKey,
   }) = _HandsInstructionRequestImpl;
@@ -38,9 +36,6 @@ abstract class HandsInstructionRequest
     return HandsInstructionRequest(
       projectId: jsonSerialization['projectId'] as int,
       instructionText: jsonSerialization['instructionText'] as String,
-      declaredWriteScope: _i2.Protocol().deserialize<List<String>>(
-        jsonSerialization['declaredWriteScope'],
-      ),
       requestedLane: jsonSerialization['requestedLane'] as String,
       idempotencyKey: jsonSerialization['idempotencyKey'] as String,
     );
@@ -49,8 +44,6 @@ abstract class HandsInstructionRequest
   final int projectId;
 
   final String instructionText;
-
-  final List<String> declaredWriteScope;
 
   final String requestedLane;
 
@@ -62,7 +55,6 @@ abstract class HandsInstructionRequest
   HandsInstructionRequest copyWith({
     int? projectId,
     String? instructionText,
-    List<String>? declaredWriteScope,
     String? requestedLane,
     String? idempotencyKey,
   });
@@ -84,10 +76,6 @@ abstract class HandsInstructionRequest
                   instructionText,
                 ) ||
                 other.instructionText == instructionText) &&
-            const _i1.DeepCollectionEquality().equals(
-              other.declaredWriteScope,
-              declaredWriteScope,
-            ) &&
             (identical(
                   other.requestedLane,
                   requestedLane,
@@ -106,7 +94,6 @@ abstract class HandsInstructionRequest
       runtimeType,
       projectId,
       instructionText,
-      const _i1.DeepCollectionEquality().hash(declaredWriteScope),
       requestedLane,
       idempotencyKey,
     );
@@ -118,7 +105,6 @@ abstract class HandsInstructionRequest
       '__className__': 'HandsInstructionRequest',
       'projectId': projectId,
       'instructionText': instructionText,
-      'declaredWriteScope': declaredWriteScope.toJson(),
       'requestedLane': requestedLane,
       'idempotencyKey': idempotencyKey,
     };
@@ -130,7 +116,6 @@ abstract class HandsInstructionRequest
       '__className__': 'HandsInstructionRequest',
       'projectId': projectId,
       'instructionText': instructionText,
-      'declaredWriteScope': declaredWriteScope.toJson(),
       'requestedLane': requestedLane,
       'idempotencyKey': idempotencyKey,
     };
@@ -146,13 +131,11 @@ class _HandsInstructionRequestImpl extends HandsInstructionRequest {
   const _HandsInstructionRequestImpl({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String idempotencyKey,
   }) : super._(
          projectId: projectId,
          instructionText: instructionText,
-         declaredWriteScope: declaredWriteScope,
          requestedLane: requestedLane,
          idempotencyKey: idempotencyKey,
        );
@@ -164,16 +147,12 @@ class _HandsInstructionRequestImpl extends HandsInstructionRequest {
   HandsInstructionRequest copyWith({
     int? projectId,
     String? instructionText,
-    List<String>? declaredWriteScope,
     String? requestedLane,
     String? idempotencyKey,
   }) {
     return HandsInstructionRequest(
       projectId: projectId ?? this.projectId,
       instructionText: instructionText ?? this.instructionText,
-      declaredWriteScope:
-          declaredWriteScope ??
-          this.declaredWriteScope.map((e0) => e0).toList(),
       requestedLane: requestedLane ?? this.requestedLane,
       idempotencyKey: idempotencyKey ?? this.idempotencyKey,
     );

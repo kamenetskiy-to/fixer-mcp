@@ -5,7 +5,7 @@ description: "Use this skill when a project Fixer should dispatch multiple bound
 
 # Run Netrunner Wave
 
-Use this skill for every Fixer-managed Netrunner launch. A wave may contain one worker, multiple independent workers, or dependency-gated workers sequenced through an explicit DAG. Declared write scopes never gate admission; use a dependency DAG when worker outputs must be merged in order.
+Use this skill for every Fixer-managed Netrunner launch. A wave may contain one worker, multiple independent workers, or dependency-gated workers sequenced through an explicit DAG. Use a dependency DAG when worker outputs must be merged in order.
 
 ## Preconditions
 
@@ -14,7 +14,6 @@ Use this skill for every Fixer-managed Netrunner launch. A wave may contain one 
 - The registered project root must be a Git repository. If it is not a Git repository, initialize it first (`git init && git add . && git commit -m "Initial commit"`). Absence of a Git repository is NEVER a reason to refuse a wave.
 - There is no active orchestration freeze or stale epoch blocker.
 - The wave has at least one pending session.
-- `declared_write_scope` is optional informational context only. Sessions with a missing scope, a broad scope such as `.`, or overlapping scopes are all admissible and are never rejected for their scope.
 
 ## Review Policy
 
@@ -92,7 +91,7 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
 ## Flow
 
 1. Slice the work into independent tasks with explicit ownership, acceptance criteria, tests, and forbidden areas.
-2. Create each worker session with `create_task`. A `declared_write_scope` may be attached as informational context; it is never required, never precomputed, and never enforced.
+2. Create each worker session with `create_task`.
 3. Attach only relevant docs with `set_session_attached_docs`.
 4. Assign only required MCP servers with `set_session_mcp_servers`.
 5. If old candidate sessions are stale, zombie `in_progress`, secret-dependent,
@@ -117,7 +116,7 @@ Re-slice it into a dependency DAG or request an explicitly manual operator sessi
    - inspect the worker worktree when needed
    - verify the worker reported a commit SHA, a clean worktree, and required tests
    - verify the automatic reviewer is terminal and its report is available before using it as review evidence
-   - reject for rework if task changes are uncommitted or the worktree is dirty; never reject a delivery for changed paths outside a declared scope
+   - reject for rework if task changes are uncommitted or the worktree is dirty
    - approve or reject doc proposals by Fixer judgment
    - complete the session or append precise rework
 12. Continue waiting until all implementation workers are terminal; use
@@ -179,8 +178,8 @@ A rejected review never needs a fake PASS (feedback 95). Two governed roads:
 2. **Closed-rejected**: `transition_netrunner_wave_phase(target_phase=
    "completed", review_approved=true, review_outcome="rejected")` closes the
    wave from any phase once all workers are terminal: nothing is attested as
-   passed, the verdict is labelled on the wave, and its scope leases are
-   released as bookkeeping (leases never fence later waves).
+   passed and the verdict is labelled on the wave. No write-path reservation
+   machinery is involved.
 
 Everything else on a wave-linked session stays wave-owned while the wave runs.
 
@@ -240,10 +239,8 @@ Per worker, at most `max_checks` System1 checks run (default 3, clamped 1..3):
 Each check stores its packet and verdict as a wave artifact and a short row
 readable via `get_system1_reviews`.
 
-The `declared_write_scope` fence has been deliberately removed: scope entries
-are informational only and never gate admission, launch, or completion.
-System1 is deliberately independent of scope handling — do not remove or
-weaken the System1 layer together with the scope machinery.
+System1 is deliberately independent of worker ownership and admission
+bookkeeping — do not remove or weaken the System1 layer in unrelated changes.
 
 ## Droid Backend Launches
 

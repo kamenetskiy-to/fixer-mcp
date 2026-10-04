@@ -97,7 +97,6 @@ class _FakeArchitectCockpitRepository implements ArchitectCockpitRepository {
         backend: 'codex',
         model: 'gpt-5.6',
         reasoning: 'high',
-        writeScope: const ['lib/checkout.dart'],
         reportRaw: '',
         structuredFinalReport: const FinalReportRecord(
           filesChanged: ['lib/checkout.dart'],

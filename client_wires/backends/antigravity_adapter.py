@@ -54,6 +54,7 @@ class AntigravityBackendAdapter(BackendAdapter):
 
     def _resolve_model_with_reasoning(self, model: str | None, reasoning: str | None) -> str:
         candidate = (model or "").strip() or self.default_model
+        candidate = _ANTIGRAVITY_MODEL_SLUG_ALIASES.get(candidate.lower(), candidate)
         requested_reasoning = (reasoning or "").strip().lower()
         if requested_reasoning in ("", "default"):
             requested_reasoning = ""
@@ -61,13 +62,8 @@ class AntigravityBackendAdapter(BackendAdapter):
         if candidate == "default":
             return candidate
 
-        if candidate in self.model_options and candidate == "default":
-            return candidate
-
         if candidate in _ANTIGRAVITY_CLI_MODEL_OPTIONS:
             label = _antigravity_model_variant_label(candidate)
-            if label and label.lower() == "thinking" and requested_reasoning == "high":
-                return candidate
             if requested_reasoning and label and requested_reasoning != label.lower():
                 raise RuntimeError(
                     f"Antigravity model {candidate!r} already includes reasoning {label!r}, "
@@ -82,9 +78,6 @@ class AntigravityBackendAdapter(BackendAdapter):
             raise RuntimeError(
                 f"Unsupported model {candidate!r} for backend {self.name!r}. Supported models: {supported}"
             )
-
-        if base_key in {"claudesonnet46", "claudeopus46"} and requested_reasoning:
-            requested_reasoning = "thinking"
 
         if not requested_reasoning:
             if len(variants) == 1:
@@ -222,9 +215,36 @@ _ANTIGRAVITY_CLI_MODEL_OPTIONS = (
     "Gemini 3.6 Flash (Low)",
     "Gemini 3.1 Pro (Low)",
     "Gemini 3.1 Pro (High)",
-    "Claude Sonnet 4.6 (Thinking)",
-    "Claude Opus 4.6 (Thinking)",
+    "Claude Opus 5.5 (Low)",
+    "Claude Opus 5.5 (Medium)",
+    "Claude Opus 5.5 (High)",
+    "Claude Sonnet 5.5 (Low)",
+    "Claude Sonnet 5.5 (Medium)",
+    "Claude Sonnet 5.5 (High)",
 )
+# Raw upstream model slugs exactly as listed by `agy models` (agy 1.2.16).
+# The CLI documents `--model` in slug form, so accept upstream ids as
+# canonicalizing aliases for the display-variant options above instead of
+# failing them as unknown models.
+_ANTIGRAVITY_MODEL_SLUG_ALIASES = {
+    "gemini-3.8-flash-low": "Gemini 3.8 Flash (Low)",
+    "gemini-3.8-flash-medium": "Gemini 3.8 Flash (Medium)",
+    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High)",
+    "gemini-3.7-flash-low": "Gemini 3.7 Flash (Low)",
+    "gemini-3.7-flash-medium": "Gemini 3.7 Flash (Medium)",
+    "gemini-3.7-flash-high": "Gemini 3.7 Flash (High)",
+    "gemini-3.6-flash-low": "Gemini 3.6 Flash (Low)",
+    "gemini-3.6-flash-medium": "Gemini 3.6 Flash (Medium)",
+    "gemini-3.6-flash-high": "Gemini 3.6 Flash (High)",
+    "gemini-3.1-pro-low": "Gemini 3.1 Pro (Low)",
+    "gemini-3.1-pro-high": "Gemini 3.1 Pro (High)",
+    "claude-opus-5-5-low": "Claude Opus 5.5 (Low)",
+    "claude-opus-5-5-medium": "Claude Opus 5.5 (Medium)",
+    "claude-opus-5-5-high": "Claude Opus 5.5 (High)",
+    "claude-sonnet-5-5-low": "Claude Sonnet 5.5 (Low)",
+    "claude-sonnet-5-5-medium": "Claude Sonnet 5.5 (Medium)",
+    "claude-sonnet-5-5-high": "Claude Sonnet 5.5 (High)",
+}
 _ANTIGRAVITY_MCP_CONFIG_PATH_ENV = "FIXER_ANTIGRAVITY_MCP_CONFIG_PATH"
 
 
@@ -311,7 +331,7 @@ def normalize_antigravity_reasoning_alias(model: str | None, reasoning: str | No
 
 
 def _antigravity_model_variant(model: str) -> tuple[str, str] | None:
-    candidate = model.strip()
+    candidate = _ANTIGRAVITY_MODEL_SLUG_ALIASES.get(model.strip().lower(), model.strip())
     if not candidate:
         return None
     for option in _ANTIGRAVITY_CLI_MODEL_OPTIONS:

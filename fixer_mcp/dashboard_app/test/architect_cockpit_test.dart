@@ -81,7 +81,6 @@ class _FakeDashboardRuntimeClient extends DashboardRuntimeClient {
           'backend': 'codex',
           'model': 'gpt-5.6',
           'reasoning': 'high',
-          'write_scope': <String>[],
           'attached_doc_count': 0,
           'mcp_count': 0,
           'proposal_count': 0,
@@ -158,7 +157,6 @@ class _FakeArchitectCockpitRepository implements ArchitectCockpitRepository {
         backend: 'codex',
         model: 'gpt-5.6',
         reasoning: 'high',
-        writeScope: const ['fixer_mcp/dashboard_app'],
         reportRaw: '',
         structuredFinalReport: const FinalReportRecord(
           filesChanged: ['fixer_mcp/dashboard_app/lib/main.dart'],

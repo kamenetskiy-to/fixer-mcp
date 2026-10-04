@@ -417,4 +417,3 @@ func TestValidateProjectDocBundleCanonicalPath(t *testing.T) {
 		})
 	}
 }
-

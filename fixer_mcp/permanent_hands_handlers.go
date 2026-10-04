@@ -107,20 +107,19 @@ type HandsProviderLane struct {
 }
 
 type HandsInstructionSummary struct {
-	InstructionID      string   `json:"instruction_id"`
-	Ordinal            int      `json:"ordinal"`
-	InstructionText    string   `json:"instruction_text"`
-	DeclaredWriteScope []string `json:"declared_write_scope"`
-	RequestedLane      string   `json:"requested_lane"`
-	RiskClass          string   `json:"risk_class"`
-	ReviewPolicy       string   `json:"review_policy"`
-	State              string   `json:"state"`
-	StateReasonCode    string   `json:"state_reason_code,omitempty"`
-	StateReasonText    string   `json:"state_reason_text,omitempty"`
-	Revision           int      `json:"revision"`
-	CreatedAt          string   `json:"created_at"`
-	UpdatedAt          string   `json:"updated_at"`
-	TerminalAt         string   `json:"terminal_at,omitempty"`
+	InstructionID   string `json:"instruction_id"`
+	Ordinal         int    `json:"ordinal"`
+	InstructionText string `json:"instruction_text"`
+	RequestedLane   string `json:"requested_lane"`
+	RiskClass       string `json:"risk_class"`
+	ReviewPolicy    string `json:"review_policy"`
+	State           string `json:"state"`
+	StateReasonCode string `json:"state_reason_code,omitempty"`
+	StateReasonText string `json:"state_reason_text,omitempty"`
+	Revision        int    `json:"revision"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+	TerminalAt      string `json:"terminal_at,omitempty"`
 }
 
 type HandsInstructionEvent struct {
@@ -145,8 +144,6 @@ type HandsGeneration struct {
 	ProcessStartIdentity string         `json:"process_start_identity,omitempty"`
 	BinaryBuildID        string         `json:"binary_build_id,omitempty"`
 	BinaryEpoch          int            `json:"binary_epoch,omitempty"`
-	LeaseSetID           string         `json:"lease_set_id,omitempty"`
-	FencingToken         int64          `json:"fencing_token,omitempty"`
 	LaunchMode           string         `json:"launch_mode"`
 	ResultEnvelope       map[string]any `json:"result_envelope,omitempty"`
 	StartedAt            string         `json:"started_at,omitempty"`
@@ -171,7 +168,6 @@ type GetHandsStateOutput struct {
 	Lanes             []HandsProviderLane      `json:"lanes"`
 	ActiveInstruction *HandsInstructionSummary `json:"active_instruction,omitempty"`
 	ActiveGeneration  *HandsGeneration         `json:"active_generation,omitempty"`
-	ActiveLeaseCount  int                      `json:"active_lease_count"`
 	JournalHeadSeq    int64                    `json:"journal_head_seq"`
 }
 
@@ -218,10 +214,10 @@ func scopedHandsProjectID(explicitProjectID int) (int, error) {
 
 func scanHandsInstruction(scanner interface{ Scan(...any) error }) (HandsInstructionSummary, int, string, error) {
 	var item HandsInstructionSummary
-	var declaredScopeJSON, envelopeJSON string
+	var envelopeJSON string
 	var compatSessionID int
 	err := scanner.Scan(
-		&item.InstructionID, &item.Ordinal, &item.InstructionText, &declaredScopeJSON,
+		&item.InstructionID, &item.Ordinal, &item.InstructionText,
 		&item.RequestedLane, &item.RiskClass, &item.ReviewPolicy, &item.State,
 		&item.StateReasonCode, &item.StateReasonText, &compatSessionID, &item.Revision,
 		&item.CreatedAt, &item.UpdatedAt, &item.TerminalAt, &envelopeJSON,
@@ -229,17 +225,11 @@ func scanHandsInstruction(scanner interface{ Scan(...any) error }) (HandsInstruc
 	if err != nil {
 		return HandsInstructionSummary{}, 0, "", err
 	}
-	if err := json.Unmarshal([]byte(declaredScopeJSON), &item.DeclaredWriteScope); err != nil {
-		return HandsInstructionSummary{}, 0, "", fmt.Errorf("decode instruction write scope: %w", err)
-	}
-	if item.DeclaredWriteScope == nil {
-		item.DeclaredWriteScope = []string{}
-	}
 	return item, compatSessionID, envelopeJSON, nil
 }
 
 const handsInstructionSelectColumns = `
-	id, ordinal, instruction_text, declared_write_scope_json,
+	id, ordinal, instruction_text,
 	requested_lane, risk_class, review_policy, state,
 	COALESCE(state_reason_code, ''), COALESCE(state_reason_text, ''),
 	COALESCE(compat_session_id, 0), revision, created_at, updated_at,
@@ -284,7 +274,7 @@ func readHandsGenerationRows(ctx context.Context, projectID int, instructionID s
 		SELECT generation, provider, model, reasoning, status,
 		       COALESCE(external_session_id, ''), COALESCE(process_id, 0),
 		       COALESCE(process_start_identity, ''), COALESCE(binary_build_id, ''),
-		       COALESCE(binary_epoch, 0), COALESCE(lease_set_id, ''), COALESCE(fencing_token, 0),
+		       COALESCE(binary_epoch, 0),
 		       launch_mode, COALESCE(result_envelope_json, ''),
 		       COALESCE(started_at, ''), COALESCE(heartbeat_at, ''), COALESCE(ended_at, ''),
 		       exit_code, COALESCE(stop_reason, '')
@@ -304,7 +294,7 @@ func readHandsGenerationRows(ctx context.Context, projectID int, instructionID s
 			&generation.Generation, &generation.Provider, &generation.Model, &generation.Reasoning,
 			&generation.Status, &generation.ExternalSessionID, &generation.ProcessID,
 			&generation.ProcessStartIdentity, &generation.BinaryBuildID, &generation.BinaryEpoch,
-			&generation.LeaseSetID, &generation.FencingToken, &generation.LaunchMode, &resultJSON,
+			&generation.LaunchMode, &resultJSON,
 			&generation.StartedAt, &generation.HeartbeatAt, &generation.EndedAt, &exitCode,
 			&generation.StopReason,
 		); err != nil {
@@ -377,21 +367,6 @@ func GetHandsState(ctx context.Context, req *mcp.CallToolRequest, input GetHands
 			output.ActiveGeneration = &generations[len(generations)-1]
 		}
 	}
-	leaseQuery := `SELECT COUNT(*) FROM project_write_lease WHERE project_id = ? AND owner_kind = 'hands_instruction' AND state = 'active'`
-	leaseArgs := []any{projectID}
-	if authorizedRole == "netrunner" {
-		if output.ActiveInstruction == nil {
-			output.ActiveLeaseCount = 0
-		} else {
-			leaseQuery += " AND owner_id = ?"
-			leaseArgs = append(leaseArgs, output.ActiveInstruction.InstructionID)
-		}
-	}
-	if authorizedRole != "netrunner" || output.ActiveInstruction != nil {
-		if err := db.QueryRowContext(ctx, leaseQuery, leaseArgs...).Scan(&output.ActiveLeaseCount); err != nil {
-			return &mcp.CallToolResult{IsError: true}, GetHandsStateOutput{}, err
-		}
-	}
 	if output.AuthorityState != "enabled" {
 		output.DerivedState = "disabled"
 	} else if output.ActiveInstruction == nil {
@@ -402,9 +377,10 @@ func GetHandsState(ctx context.Context, req *mcp.CallToolRequest, input GetHands
 			output.DerivedState = "running"
 		case "awaiting_review":
 			output.DerivedState = "awaiting_review"
-		case "waiting_for_lease":
-			output.DerivedState = "waiting_for_lease"
 		default:
+			// Legacy rows may still carry the retired waiting state from
+			// before the scope-lease retirement; they read as plain queued
+			// work, never as an active lease wait.
 			output.DerivedState = "queued"
 		}
 	}
@@ -555,13 +531,12 @@ func appendWorkroomAuditTx(ctx context.Context, tx *sql.Tx, projectID int, princ
 }
 
 type SubmitHandsInstructionInput struct {
-	InstructionText    string   `json:"instruction_text" jsonschema:"Immutable instruction text, at most 64 KiB."`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Normalized project-relative paths. An empty list declares read-only work."`
-	RequestedLane      string   `json:"requested_lane,omitempty" jsonschema:"Registered provider lane: codex, commandcode, claude, kimi-code, antigravity, grok, or pi. Defaults to the project lane."`
-	SourceChannelKind  string   `json:"source_channel_kind,omitempty" jsonschema:"Durable registered source channel; defaults to fixer_mcp."`
-	SourceChannelID    string   `json:"source_channel_id,omitempty" jsonschema:"Durable source conversation identifier; defaults to the authenticated project."`
-	SourceMessageID    string   `json:"source_message_id,omitempty" jsonschema:"Optional durable source message identifier."`
-	IdempotencyKey     string   `json:"idempotency_key" jsonschema:"Stable caller-generated key within the source channel."`
+	InstructionText   string `json:"instruction_text" jsonschema:"Immutable instruction text, at most 64 KiB."`
+	RequestedLane     string `json:"requested_lane,omitempty" jsonschema:"Registered provider lane: codex, commandcode, claude, kimi-code, antigravity, grok, or pi. Defaults to the project lane."`
+	SourceChannelKind string `json:"source_channel_kind,omitempty" jsonschema:"Durable registered source channel; defaults to fixer_mcp."`
+	SourceChannelID   string `json:"source_channel_id,omitempty" jsonschema:"Durable source conversation identifier; defaults to the authenticated project."`
+	SourceMessageID   string `json:"source_message_id,omitempty" jsonschema:"Optional durable source message identifier."`
+	IdempotencyKey    string `json:"idempotency_key" jsonschema:"Stable caller-generated key within the source channel."`
 }
 
 type SubmitHandsInstructionOutput struct {
@@ -576,37 +551,7 @@ type SubmitHandsInstructionOutput struct {
 	ReasonText    string `json:"reason_text,omitempty"`
 }
 
-func normalizedHandsWriteScope(raw []string) ([]string, string, error) {
-	if len(raw) == 0 {
-		return []string{}, "[]", nil
-	}
-	normalized, err := normalizeDeclaredWriteScope(raw)
-	if err != nil {
-		return nil, "", err
-	}
-	payload, err := json.Marshal(normalized)
-	if err != nil {
-		return nil, "", err
-	}
-	return normalized, string(payload), nil
-}
-
-func projectUsesGitTx(ctx context.Context, tx *sql.Tx, projectID int) (bool, error) {
-	var cwd string
-	if err := tx.QueryRowContext(ctx, `SELECT cwd FROM project WHERE id = ?`, projectID).Scan(&cwd); err != nil {
-		return false, err
-	}
-	_, err := os.Stat(filepath.Join(cwd, ".git"))
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
-}
-
-func createHandsCompatibilitySessionTx(ctx context.Context, tx *sql.Tx, projectID int, instructionID string, ordinal int, instructionText, declaredScopeJSON, provider, model, reasoning string) (int, error) {
+func createHandsCompatibilitySessionTx(ctx context.Context, tx *sql.Tx, projectID int, instructionID string, ordinal int, instructionText, provider, model, reasoning string) (int, error) {
 	taskDescription := fmt.Sprintf(
 		"Permanent Hands instruction %d (%s).\n\n%s\n\nExecution envelope: provider=%s model=%s reasoning=%s. The instruction, not this compatibility session, is the accountability unit.",
 		ordinal, instructionID, instructionText, provider, model, reasoning,
@@ -614,9 +559,9 @@ func createHandsCompatibilitySessionTx(ctx context.Context, tx *sql.Tx, projectI
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO session (
 			project_id, task_description, status, cli_backend, cli_model, cli_reasoning,
-			declared_write_scope, session_kind, created_at, updated_at
-		) VALUES (?, ?, 'pending', ?, ?, ?, ?, 'hands_instruction', ?, ?)`,
-		projectID, taskDescription, provider, model, reasoning, declaredScopeJSON,
+			session_kind, created_at, updated_at
+		) VALUES (?, ?, 'pending', ?, ?, ?, 'hands_instruction', ?, ?)`,
+		projectID, taskDescription, provider, model, reasoning,
 		workroomTimestamp(), workroomTimestamp())
 	if err != nil {
 		return 0, err
@@ -660,11 +605,6 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, err
 	}
-	writeScope, writeScopeJSON, err := normalizedHandsWriteScope(input.DeclaredWriteScope)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, err
-	}
-	input.DeclaredWriteScope = writeScope
 	input.RequestedLane = strings.ToLower(strings.TrimSpace(input.RequestedLane))
 	if input.RequestedLane != "" {
 		if _, ok := handsProviders[input.RequestedLane]; !ok {
@@ -734,25 +674,15 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 			requestedLane, strings.Join(handsLaneNames(), ", "),
 		)
 	}
-	riskClass := "read_only"
-	reviewPolicy := "auto_read_only"
-	if len(writeScope) > 0 {
-		riskClass = "repository_write"
-		reviewPolicy = "fixer_required"
-	}
+	// With declared write scopes retired, every Hands instruction is treated
+	// as potential repository work and keeps the manual review gate: human
+	// review replaces the retired scope claim as the acceptance mechanism.
+	riskClass := "repository_write"
+	reviewPolicy := "fixer_required"
 	state := "queued"
 	reasonCode, reasonText := "", ""
 	if authorityState != "enabled" {
 		state, reasonCode, reasonText = "unsupported", "hands_authority_unavailable", "The permanent Hands authority is not enabled for this project."
-	} else if len(writeScope) > 0 {
-		usesGit, err := projectUsesGitTx(ctx, tx, authorizedProjectId)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, err
-		}
-		if !usesGit {
-			state, riskClass = "unsupported", "unsupported_high_risk"
-			reasonCode, reasonText = "non_git_repository_write", "Repository-write Hands instructions require a Git project so execution can be isolated and reviewed."
-		}
 	}
 	instructionID, err := newWorkroomID()
 	if err != nil {
@@ -762,7 +692,7 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 	envelope := map[string]any{
 		"protocol": "fixer.hands.instruction", "protocol_version": 1,
 		"instruction_id": instructionID, "project_id": authorizedProjectId, "actor_id": actorID,
-		"ordinal": ordinal, "instruction_text": input.InstructionText, "declared_write_scope": writeScope,
+		"ordinal": ordinal, "instruction_text": input.InstructionText,
 		"requested_lane": requestedLane, "risk_class": riskClass, "review_policy": reviewPolicy,
 		"source":              map[string]string{"channel_kind": input.SourceChannelKind, "channel_id": input.SourceChannelID, "message_id": input.SourceMessageID},
 		"issuer_principal_id": principalID, "created_at": now,
@@ -778,14 +708,14 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO hands_instruction (
 			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id,
-			source_message_id, issuer_principal_id, instruction_text, declared_write_scope_json,
+			source_message_id, issuer_principal_id, instruction_text,
 			instruction_envelope_json, requested_lane, risk_class, review_policy, state,
 			state_reason_code, state_reason_text, idempotency_key, revision,
 			created_at, updated_at, terminal_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, 1, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, 1, ?, ?, ?)`,
 		instructionID, authorizedProjectId, actorID, ordinal, input.SourceChannelKind,
 		input.SourceChannelID, input.SourceMessageID, principalID, input.InstructionText,
-		writeScopeJSON, string(envelopeJSON), requestedLane, riskClass, reviewPolicy, state,
+		string(envelopeJSON), requestedLane, riskClass, reviewPolicy, state,
 		reasonCode, reasonText, idempotencyKey, now, now, terminalAt); err != nil {
 		return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, err
 	}
@@ -793,7 +723,7 @@ func SubmitHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 	if state == "queued" {
 		compatSessionID, err = createHandsCompatibilitySessionTx(
 			ctx, tx, authorizedProjectId, instructionID, ordinal, input.InstructionText,
-			writeScopeJSON, requestedLane, model, reasoning,
+			requestedLane, model, reasoning,
 		)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, SubmitHandsInstructionOutput{}, err
@@ -873,65 +803,6 @@ func handsInstructionForCompatibilitySession(ctx context.Context, globalSessionI
 	return instructionID, err == nil, err
 }
 
-func findHandsLeaseConflictTx(ctx context.Context, tx *sql.Tx, projectID int, writeScope []string) (string, error) {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT owner_kind, owner_id, scope_path
-		FROM project_write_lease
-		WHERE project_id = ? AND state = 'active'
-		ORDER BY owner_kind, owner_id, scope_path`, projectID)
-	if err != nil {
-		return "", err
-	}
-	for rows.Next() {
-		var ownerKind, ownerID, scopePath string
-		if err := rows.Scan(&ownerKind, &ownerID, &scopePath); err != nil {
-			_ = rows.Close()
-			return "", err
-		}
-		for _, requested := range writeScope {
-			if writeScopePathsOverlap(requested, scopePath) {
-				_ = rows.Close()
-				return fmt.Sprintf("scope %q overlaps active %s %s scope %q", requested, ownerKind, ownerID, scopePath), nil
-			}
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return "", err
-	}
-	legacyRows, err := tx.QueryContext(ctx, `
-		SELECT wave_id, scope_path FROM parallel_wave_scope_lease
-		WHERE project_id = ? AND active = 1 ORDER BY wave_id, scope_path`, projectID)
-	if err != nil {
-		return "", err
-	}
-	defer legacyRows.Close()
-	for legacyRows.Next() {
-		var waveID int
-		var scopePath string
-		if err := legacyRows.Scan(&waveID, &scopePath); err != nil {
-			return "", err
-		}
-		for _, requested := range writeScope {
-			if writeScopePathsOverlap(requested, scopePath) {
-				return fmt.Sprintf("scope %q overlaps active wave %d scope %q", requested, waveID, scopePath), nil
-			}
-		}
-	}
-	return "", legacyRows.Err()
-}
-
-func nextHandsFencingTokenTx(ctx context.Context, tx *sql.Tx, projectID int) (int64, error) {
-	var token int64
-	err := tx.QueryRowContext(ctx, `
-		INSERT INTO project_write_fence (project_id, next_token, updated_at)
-		VALUES (?, 2, ?)
-		ON CONFLICT(project_id) DO UPDATE SET
-			next_token = project_write_fence.next_token + 1,
-			updated_at = excluded.updated_at
-		RETURNING next_token - 1`, projectID, workroomTimestamp()).Scan(&token)
-	return token, err
-}
-
 func currentHandsBinaryEpochTx(ctx context.Context, tx *sql.Tx, projectID int) (int, error) {
 	var epoch int
 	err := tx.QueryRowContext(ctx, `SELECT COALESCE(running_build_epoch, 0) FROM mcp_binary_state WHERE project_id = ?`, projectID).Scan(&epoch)
@@ -939,34 +810,6 @@ func currentHandsBinaryEpochTx(ctx context.Context, tx *sql.Tx, projectID int) (
 		return 0, nil
 	}
 	return epoch, err
-}
-
-func transitionHandsToWaitingForLeaseTx(ctx context.Context, tx *sql.Tx, projectID int, instructionID, fromState, reason, actorID, causationID string, revision int) (int64, error) {
-	if fromState == "waiting_for_lease" {
-		var head int64
-		err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM project_ui_event WHERE project_id = ?`, projectID).Scan(&head)
-		return head, err
-	}
-	now := workroomTimestamp()
-	revision++
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE hands_instruction
-		SET state = 'waiting_for_lease', state_reason_code = 'write_lease_unavailable',
-		    state_reason_text = ?, revision = ?, updated_at = ?
-		WHERE id = ? AND project_id = ?`, reason, revision, now, instructionID, projectID); err != nil {
-		return 0, err
-	}
-	if _, err := appendHandsInstructionEventTx(ctx, tx, instructionID, "instruction.waiting_for_lease", fromState, "waiting_for_lease", "system", actorID,
-		map[string]any{"reason_code": "write_lease_unavailable", "reason_text": reason}); err != nil {
-		return 0, err
-	}
-	event, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
-		Kind: "hands.instruction.changed", AggregateType: "hands_instruction", AggregateID: instructionID,
-		AggregateRevision: revision,
-		Payload:           map[string]any{"instruction_id": instructionID, "state": "waiting_for_lease", "revision": revision, "reason_code": "write_lease_unavailable", "reason_text": reason, "updated_at": now},
-		ActorKind:         "system", ActorID: actorID, CausationID: causationID, CorrelationID: causationID,
-	})
-	return event.Seq, err
 }
 
 func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, projectID int) error {
@@ -980,21 +823,23 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var instructionID, state, riskClass, writeScopeJSON, sessionStatus string
+	var instructionID, state, riskClass, sessionStatus string
 	var revision int
 	err = tx.QueryRowContext(ctx, `
 		SELECT instruction.id, instruction.state, instruction.risk_class,
-		       instruction.declared_write_scope_json, instruction.revision, compat.status
+		       instruction.revision, compat.status
 		FROM hands_instruction instruction
 		JOIN session compat ON compat.id = instruction.compat_session_id
 		WHERE instruction.project_id = ? AND compat.id = ? AND compat.session_kind = 'hands_instruction'`,
-		projectID, globalSessionID).Scan(&instructionID, &state, &riskClass, &writeScopeJSON, &revision, &sessionStatus)
+		projectID, globalSessionID).Scan(&instructionID, &state, &riskClass, &revision, &sessionStatus)
 	if err != nil {
 		return err
 	}
 	if sessionStatus == "in_progress" && state == "running" {
 		return nil
 	}
+	// The retired waiting state is kept here only as a dated legacy read so
+	// pre-retirement rows can still start; nothing writes that state anymore.
 	if !workroomContainsString([]string{"queued", "waiting_for_lease"}, state) || sessionStatus != "pending" {
 		return fmt.Errorf("Hands instruction cannot start from instruction=%s session=%s", state, sessionStatus)
 	}
@@ -1004,80 +849,32 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 		WHERE project_id = ? AND id <> ? AND state IN ('starting', 'running')`, projectID, instructionID).Scan(&activeOtherCount); err != nil {
 		return err
 	}
-	var writeScope []string
-	if err := json.Unmarshal([]byte(writeScopeJSON), &writeScope); err != nil {
-		return err
-	}
 	conflictReason := ""
 	if activeOtherCount > 0 {
 		conflictReason = "another Hands generation is starting or running"
-	} else if riskClass == "repository_write" {
-		conflictReason, err = findHandsLeaseConflictTx(ctx, tx, projectID, writeScope)
-		if err != nil {
-			return err
-		}
 	}
 	if conflictReason != "" {
-		if _, err := transitionHandsToWaitingForLeaseTx(ctx, tx, projectID, instructionID, state, conflictReason, "hands-dispatch", causationID, revision); err != nil {
-			return err
-		}
-		if err := appendWorkroomAuditTx(ctx, tx, projectID, principalID, "hands.instruction.start", "hands_instruction", instructionID, "denied", "waiting_for_lease", causationID, causationID,
-			map[string]any{"reason_code": "write_lease_unavailable", "reason_text": conflictReason}); err != nil {
+		// One active Hands generation per project stays a plain busy denial:
+		// the instruction keeps its queued state and waits for a later retry.
+		// No scope-lease state, event, or authority is involved.
+		if err := appendWorkroomAuditTx(ctx, tx, projectID, principalID, "hands.instruction.start", "hands_instruction", instructionID, "denied", "busy", causationID, causationID,
+			map[string]any{"reason_code": "hands_generation_busy", "reason_text": conflictReason}); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		notifyHandsWaiters(projectID)
-		return fmt.Errorf("hands_instruction_waiting_for_lease: %s", conflictReason)
+		return fmt.Errorf("hands_instruction_busy: %s", conflictReason)
 	}
 
-	leaseSetID := ""
-	var fencingToken int64
 	binaryEpoch := 0
 	providerProcessID, providerProcessStartIdentity := currentHandsProviderProcessIdentity()
 	if providerProcessID <= 0 || providerProcessStartIdentity == "" {
 		return fmt.Errorf("provider_process_identity_unavailable: cannot establish immutable parent process identity")
 	}
-	if riskClass == "repository_write" {
-		leaseSetID, err = newWorkroomID()
-		if err != nil {
-			return err
-		}
-		fencingToken, err = nextHandsFencingTokenTx(ctx, tx, projectID)
-		if err != nil {
-			return err
-		}
-		binaryEpoch, err = currentHandsBinaryEpochTx(ctx, tx, projectID)
-		if err != nil {
-			return err
-		}
-		now := workroomTimestamp()
-		for _, scopePath := range writeScope {
-			leaseID, err := newWorkroomID()
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO project_write_lease (
-					id, project_id, lease_set_id, owner_kind, owner_id, scope_path,
-					fencing_token, state, process_id, process_start_identity,
-					binary_build_id, binary_epoch, created_at, heartbeat_at
-				) VALUES (?, ?, ?, 'hands_instruction', ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
-				leaseID, projectID, leaseSetID, instructionID, scopePath, fencingToken,
-				providerProcessID, providerProcessStartIdentity,
-				mcpRunningBuildID, binaryEpoch, now, now); err != nil {
-				return err
-			}
-		}
-		if _, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
-			Kind: "lease.changed", AggregateType: "project_write_lease", AggregateID: leaseSetID,
-			AggregateRevision: int(fencingToken),
-			Payload:           map[string]any{"lease_set_id": leaseSetID, "owner_kind": "hands_instruction", "owner_id": instructionID, "scope": writeScope, "fencing_token": fencingToken, "state": "active"},
-			ActorKind:         "system", ActorID: "hands-lease-authority", CausationID: causationID, CorrelationID: causationID,
-		}); err != nil {
-			return err
-		}
+	binaryEpoch, err = currentHandsBinaryEpochTx(ctx, tx, projectID)
+	if err != nil {
+		return err
 	}
 	var generation int
 	if err := tx.QueryRowContext(ctx, `SELECT MAX(generation) FROM hands_generation WHERE instruction_id = ?`, instructionID).Scan(&generation); err != nil {
@@ -1094,15 +891,15 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE hands_generation
 		SET status = 'starting', process_id = ?, process_start_identity = ?,
-		    binary_build_id = ?, binary_epoch = ?, lease_set_id = NULLIF(?, ''),
-		    fencing_token = NULLIF(?, 0), started_at = ?, heartbeat_at = ?, updated_at = ?
+		    binary_build_id = ?, binary_epoch = ?,
+		    started_at = ?, heartbeat_at = ?, updated_at = ?
 		WHERE instruction_id = ? AND generation = ? AND status = 'planned'`,
 		providerProcessID, providerProcessStartIdentity, mcpRunningBuildID, binaryEpoch,
-		leaseSetID, fencingToken, now, now, now, instructionID, generation); err != nil {
+		now, now, now, instructionID, generation); err != nil {
 		return err
 	}
 	if _, err := appendHandsInstructionEventTx(ctx, tx, instructionID, "generation.starting", state, "starting", "hands", "hands:"+instructionID,
-		map[string]any{"generation": generation, "lease_set_id": leaseSetID, "fencing_token": fencingToken}); err != nil {
+		map[string]any{"generation": generation}); err != nil {
 		return err
 	}
 	if _, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
@@ -1124,7 +921,7 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 		return err
 	}
 	if _, err := appendHandsInstructionEventTx(ctx, tx, instructionID, "generation.running", "starting", "running", "hands", "hands:"+instructionID,
-		map[string]any{"generation": generation, "lease_set_id": leaseSetID, "fencing_token": fencingToken}); err != nil {
+		map[string]any{"generation": generation}); err != nil {
 		return err
 	}
 	if _, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
@@ -1138,13 +935,13 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 	if _, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
 		Kind: "hands.generation.changed", AggregateType: "hands_generation", AggregateID: fmt.Sprintf("%s:%d", instructionID, generation),
 		AggregateRevision: 2,
-		Payload:           map[string]any{"instruction_id": instructionID, "generation": generation, "status": "running", "lease_set_id": leaseSetID, "fencing_token": fencingToken, "started_at": now},
+		Payload:           map[string]any{"instruction_id": instructionID, "generation": generation, "status": "running", "started_at": now},
 		ActorKind:         "hands", ActorID: "hands:" + instructionID, CausationID: causationID, CorrelationID: causationID,
 	}); err != nil {
 		return err
 	}
 	if err := appendWorkroomAuditTx(ctx, tx, projectID, principalID, "hands.instruction.start", "hands_instruction", instructionID, "authorized", "running", causationID, causationID,
-		map[string]any{"generation": generation, "lease_set_id": leaseSetID, "fencing_token": fencingToken}); err != nil {
+		map[string]any{"generation": generation}); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1152,37 +949,6 @@ func checkoutHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 	}
 	notifyHandsWaiters(projectID)
 	return nil
-}
-
-func releaseHandsLeasesTx(ctx context.Context, tx *sql.Tx, projectID int, instructionID, releaseReason, actorID, causationID string) (int64, error) {
-	var leaseSetID string
-	var token int
-	err := tx.QueryRowContext(ctx, `
-		SELECT lease_set_id, MAX(fencing_token)
-		FROM project_write_lease
-		WHERE project_id = ? AND owner_kind = 'hands_instruction' AND owner_id = ? AND state = 'active'
-		GROUP BY lease_set_id LIMIT 1`, projectID, instructionID).Scan(&leaseSetID, &token)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	now := workroomTimestamp()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE project_write_lease
-		SET state = 'released', released_at = ?, release_reason = ?, heartbeat_at = ?
-		WHERE project_id = ? AND owner_kind = 'hands_instruction' AND owner_id = ? AND state = 'active'`,
-		now, releaseReason, now, projectID, instructionID); err != nil {
-		return 0, err
-	}
-	event, err := appendProjectUIEventTx(ctx, tx, projectID, workroomEventInput{
-		Kind: "lease.changed", AggregateType: "project_write_lease", AggregateID: leaseSetID,
-		AggregateRevision: token + 1,
-		Payload:           map[string]any{"lease_set_id": leaseSetID, "owner_kind": "hands_instruction", "owner_id": instructionID, "fencing_token": token, "state": "released", "release_reason": releaseReason},
-		ActorKind:         "system", ActorID: actorID, CausationID: causationID, CorrelationID: causationID,
-	})
-	return event.Seq, err
 }
 
 func completeHandsCompatibilitySession(ctx context.Context, globalSessionID, projectID int, report SessionFinalReport, normalizedReport string) (bool, error) {
@@ -1259,9 +1025,6 @@ func completeHandsCompatibilitySession(ctx context.Context, globalSessionID, pro
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE legacy_manual_session_link SET disposition = 'terminal', classified_at = ?, classified_by = 'hands_completion'
 		WHERE project_id = ? AND session_id = ?`, now, projectID, globalSessionID); err != nil {
-		return true, err
-	}
-	if _, err := releaseHandsLeasesTx(ctx, tx, projectID, instructionID, "generation_reported", "hands-lease-authority", causationID); err != nil {
 		return true, err
 	}
 	if _, err := appendHandsInstructionEventTx(ctx, tx, instructionID, "generation.reported", state, targetState, "hands", "hands:"+instructionID,
@@ -1367,6 +1130,8 @@ func CancelHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 		}
 		return nil, output, nil
 	}
+	// The retired waiting state is kept here only as a dated legacy read so
+	// pre-retirement rows can still be cancelled; nothing writes that state anymore.
 	if !workroomContainsString([]string{"queued", "waiting_for_lease", "starting", "running"}, state) {
 		return &mcp.CallToolResult{IsError: true}, HandsCommandOutput{}, fmt.Errorf("instruction cannot be cancelled from state %s", state)
 	}
@@ -1397,9 +1162,6 @@ func CancelHandsInstruction(ctx context.Context, req *mcp.CallToolRequest, input
 		if _, err := tx.ExecContext(ctx, `UPDATE legacy_manual_session_link SET disposition = 'terminal', classified_at = ?, classified_by = 'hands_cancel' WHERE project_id = ? AND session_id = ?`, now, authorizedProjectId, compatSessionID); err != nil {
 			return &mcp.CallToolResult{IsError: true}, HandsCommandOutput{}, err
 		}
-	}
-	if _, err := releaseHandsLeasesTx(ctx, tx, authorizedProjectId, input.InstructionID, "cancelled_by_fixer", "hands-lease-authority", causationID); err != nil {
-		return &mcp.CallToolResult{IsError: true}, HandsCommandOutput{}, err
 	}
 	if _, err := appendHandsInstructionEventTx(ctx, tx, input.InstructionID, "instruction.cancelled", state, "cancelled", "fixer", principalID,
 		map[string]any{"reason": input.Reason, "generation": generation}); err != nil {

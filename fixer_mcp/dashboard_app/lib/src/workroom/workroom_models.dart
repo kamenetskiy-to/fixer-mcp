@@ -68,7 +68,6 @@ const registeredProjectUiEventKinds = <String>{
   'hands.instruction.changed',
   'hands.instruction.event_appended',
   'hands.generation.changed',
-  'lease.changed',
   'planned_wave.changed',
   'wave.changed',
   'session.changed',
@@ -76,6 +75,13 @@ const registeredProjectUiEventKinds = <String>{
   'document.changed',
   'skill.changed',
   'project.changed',
+};
+
+/// Event kinds produced by pre-retirement servers for the retired
+/// declared-write-scope lease machinery. They are accepted so replayed history
+/// and old servers cannot break the stream, but no state is derived from them.
+const retiredProjectUiEventKinds = <String>{
+  'lease.changed',
 };
 
 class WorkroomProtocolException implements Exception {
@@ -812,7 +818,6 @@ class HandsInstruction {
     required this.stateReasonCode,
     required this.stateReasonText,
     required this.requestedLane,
-    required this.declaredWriteScope,
     required this.issuer,
     required this.createdAt,
     required this.updatedAt,
@@ -830,7 +835,6 @@ class HandsInstruction {
   final String stateReasonCode;
   final String stateReasonText;
   final String requestedLane;
-  final List<String> declaredWriteScope;
   final String issuer;
   final String createdAt;
   final String updatedAt;
@@ -850,7 +854,6 @@ class HandsInstruction {
 
   bool get canCancel => const {
     'queued',
-    'waiting_for_lease',
     'starting',
     'running',
   }.contains(state);
@@ -881,11 +884,6 @@ class HandsInstruction {
         'lane',
         'provider',
       ], fallback: 'codex'),
-      declaredWriteScope: _readStringList(json, const [
-        'declared_write_scope',
-        'declaredWriteScope',
-        'write_scope',
-      ]),
       issuer: _readString(json, const [
         'issuer',
         'issuer_principal_id',
@@ -925,7 +923,6 @@ class HandsInstruction {
     String? stateReasonCode,
     String? stateReasonText,
     String? requestedLane,
-    List<String>? declaredWriteScope,
     String? updatedAt,
     List<HandsInstructionEvent>? events,
     String? report,
@@ -941,7 +938,6 @@ class HandsInstruction {
       stateReasonCode: stateReasonCode ?? this.stateReasonCode,
       stateReasonText: stateReasonText ?? this.stateReasonText,
       requestedLane: requestedLane ?? this.requestedLane,
-      declaredWriteScope: declaredWriteScope ?? this.declaredWriteScope,
       issuer: issuer,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -962,7 +958,6 @@ class WorkroomHandsState {
     required this.operationalState,
     required this.selectedLane,
     required this.queueDepth,
-    required this.activeLeaseSummary,
     required this.lanes,
     required this.instructions,
     required this.selectedInstructionId,
@@ -974,7 +969,6 @@ class WorkroomHandsState {
   final String operationalState;
   final String selectedLane;
   final int queueDepth;
-  final String activeLeaseSummary;
   final List<HandsProviderLane> lanes;
   final List<HandsInstruction> instructions;
   final String selectedInstructionId;
@@ -1015,11 +1009,6 @@ class WorkroomHandsState {
         'default_lane',
       ], fallback: 'codex'),
       queueDepth: _readInt(json, const ['queue_depth', 'queueDepth']),
-      activeLeaseSummary: _readString(json, const [
-        'active_lease_summary',
-        'lease_summary',
-        'activeLeaseSummary',
-      ]),
       lanes: _readMapList(json, const [
         'lanes',
         'provider_lanes',
@@ -1037,7 +1026,6 @@ class WorkroomHandsState {
     String? operationalState,
     String? selectedLane,
     int? queueDepth,
-    String? activeLeaseSummary,
     List<HandsProviderLane>? lanes,
     List<HandsInstruction>? instructions,
     String? selectedInstructionId,
@@ -1049,7 +1037,6 @@ class WorkroomHandsState {
       operationalState: operationalState ?? this.operationalState,
       selectedLane: selectedLane ?? this.selectedLane,
       queueDepth: queueDepth ?? this.queueDepth,
-      activeLeaseSummary: activeLeaseSummary ?? this.activeLeaseSummary,
       lanes: lanes ?? this.lanes,
       instructions: instructions ?? this.instructions,
       selectedInstructionId:
@@ -1336,7 +1323,8 @@ class ProjectUiEvent {
       );
     }
     final kind = _readString(json, const ['kind']);
-    if (!registeredProjectUiEventKinds.contains(kind)) {
+    if (!registeredProjectUiEventKinds.contains(kind) &&
+        !retiredProjectUiEventKinds.contains(kind)) {
       throw WorkroomProtocolException(
         'event_kind_unsupported',
         'Event kind "$kind" requires a newer application.',
@@ -1723,19 +1711,6 @@ List<T> _readMapList<T>(
     }
   }
   return _asList(value).map((item) => convert(_decodeMap(item))).toList();
-}
-
-List<String> _readStringList(Map<String, dynamic> json, List<String> keys) {
-  dynamic value;
-  for (final key in keys) {
-    if (json.containsKey(key)) {
-      value = json[key];
-      break;
-    }
-  }
-  return _asList(
-    value,
-  ).whereType<Object>().map((item) => item.toString()).toList(growable: false);
 }
 
 String _readString(

@@ -12,28 +12,27 @@ import (
 // the Architect accepts a client order. ProjectCWD is optional when the
 // caller wants dashboard_api to allocate a deterministic local order root.
 type AcceptOrderInput struct {
-	OrderID            int      `json:"order_id"`
-	ProjectID          int      `json:"project_id,omitempty"`
-	SessionID          int      `json:"session_id,omitempty"`
-	ClientID           string   `json:"client_id,omitempty"`
-	ClientEmail        string   `json:"client_email,omitempty"`
-	ClientName         string   `json:"client_name,omitempty"`
-	ProjectName        string   `json:"project_name,omitempty"`
-	ProjectCWD         string   `json:"project_cwd,omitempty"`
-	ProjectRoot        string   `json:"project_root,omitempty"`
-	SourceProjectCWD   string   `json:"source_project_cwd,omitempty"`
-	SourceProjectRoot  string   `json:"source_project_root,omitempty"`
-	WorktreeRoot       string   `json:"worktree_root,omitempty"`
-	BranchName         string   `json:"branch_name,omitempty"`
-	PreviewProvider    string   `json:"preview_provider,omitempty"`
-	PreviewTTLSeconds  int      `json:"preview_ttl_seconds,omitempty"`
-	CWD                string   `json:"cwd,omitempty"`
-	Title              string   `json:"title,omitempty"`
-	Description        string   `json:"description,omitempty"`
-	TaskDescription    string   `json:"task_description,omitempty"`
-	Revisions          string   `json:"revisions,omitempty"`
-	RevisionNotes      string   `json:"revision_notes,omitempty"`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty"`
+	OrderID           int    `json:"order_id"`
+	ProjectID         int    `json:"project_id,omitempty"`
+	SessionID         int    `json:"session_id,omitempty"`
+	ClientID          string `json:"client_id,omitempty"`
+	ClientEmail       string `json:"client_email,omitempty"`
+	ClientName        string `json:"client_name,omitempty"`
+	ProjectName       string `json:"project_name,omitempty"`
+	ProjectCWD        string `json:"project_cwd,omitempty"`
+	ProjectRoot       string `json:"project_root,omitempty"`
+	SourceProjectCWD  string `json:"source_project_cwd,omitempty"`
+	SourceProjectRoot string `json:"source_project_root,omitempty"`
+	WorktreeRoot      string `json:"worktree_root,omitempty"`
+	BranchName        string `json:"branch_name,omitempty"`
+	PreviewProvider   string `json:"preview_provider,omitempty"`
+	PreviewTTLSeconds int    `json:"preview_ttl_seconds,omitempty"`
+	CWD               string `json:"cwd,omitempty"`
+	Title             string `json:"title,omitempty"`
+	Description       string `json:"description,omitempty"`
+	TaskDescription   string `json:"task_description,omitempty"`
+	Revisions         string `json:"revisions,omitempty"`
+	RevisionNotes     string `json:"revision_notes,omitempty"`
 }
 
 // UnmarshalJSON accepts both the snake_case control-plane contract and the
@@ -47,29 +46,28 @@ func (input *AcceptOrderInput) UnmarshalJSON(data []byte) error {
 	*input = AcceptOrderInput(snake)
 
 	var camel struct {
-		ID                 int      `json:"id"`
-		OrderID            int      `json:"orderId"`
-		ProjectID          int      `json:"projectId"`
-		SessionID          int      `json:"sessionId"`
-		ClientID           string   `json:"clientId"`
-		ClientEmail        string   `json:"clientEmail"`
-		ClientName         string   `json:"clientName"`
-		ProjectName        string   `json:"projectName"`
-		ProjectCWD         string   `json:"projectCwd"`
-		ProjectRoot        string   `json:"projectRoot"`
-		SourceProjectCWD   string   `json:"sourceProjectCwd"`
-		SourceProjectRoot  string   `json:"sourceProjectRoot"`
-		WorktreeRoot       string   `json:"worktreeRoot"`
-		BranchName         string   `json:"branchName"`
-		PreviewProvider    string   `json:"previewProvider"`
-		PreviewTTLSeconds  int      `json:"previewTtlSeconds"`
-		CWD                string   `json:"cwd"`
-		Title              string   `json:"title"`
-		Description        string   `json:"description"`
-		TaskDescription    string   `json:"taskDescription"`
-		Revisions          string   `json:"revisions"`
-		RevisionNotes      string   `json:"revisionNotes"`
-		DeclaredWriteScope []string `json:"declaredWriteScope"`
+		ID                int    `json:"id"`
+		OrderID           int    `json:"orderId"`
+		ProjectID         int    `json:"projectId"`
+		SessionID         int    `json:"sessionId"`
+		ClientID          string `json:"clientId"`
+		ClientEmail       string `json:"clientEmail"`
+		ClientName        string `json:"clientName"`
+		ProjectName       string `json:"projectName"`
+		ProjectCWD        string `json:"projectCwd"`
+		ProjectRoot       string `json:"projectRoot"`
+		SourceProjectCWD  string `json:"sourceProjectCwd"`
+		SourceProjectRoot string `json:"sourceProjectRoot"`
+		WorktreeRoot      string `json:"worktreeRoot"`
+		BranchName        string `json:"branchName"`
+		PreviewProvider   string `json:"previewProvider"`
+		PreviewTTLSeconds int    `json:"previewTtlSeconds"`
+		CWD               string `json:"cwd"`
+		Title             string `json:"title"`
+		Description       string `json:"description"`
+		TaskDescription   string `json:"taskDescription"`
+		Revisions         string `json:"revisions"`
+		RevisionNotes     string `json:"revisionNotes"`
 	}
 	if err := json.Unmarshal(data, &camel); err != nil {
 		return err
@@ -140,9 +138,6 @@ func (input *AcceptOrderInput) UnmarshalJSON(data []byte) error {
 	if input.RevisionNotes == "" {
 		input.RevisionNotes = camel.RevisionNotes
 	}
-	if len(input.DeclaredWriteScope) == 0 {
-		input.DeclaredWriteScope = camel.DeclaredWriteScope
-	}
 	return nil
 }
 
@@ -203,10 +198,6 @@ func (r *Repository) AcceptOrder(ctx context.Context, input AcceptOrderInput) (A
 		}
 	}()
 	projectName := orderProjectName(input)
-	declaredWriteScope, err := encodeStringList(input.DeclaredWriteScope)
-	if err != nil {
-		return AcceptOrderResponse{}, err
-	}
 
 	tx, err := r.dbWrite.BeginTx(ctx, nil)
 	if err != nil {
@@ -240,11 +231,10 @@ func (r *Repository) AcceptOrder(ctx context.Context, input AcceptOrderInput) (A
 	}
 
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO session (project_id, task_description, status, declared_write_scope)
-		 VALUES (?, ?, 'pending', ?)`,
+		`INSERT INTO session (project_id, task_description, status)
+		 VALUES (?, ?, 'pending')`,
 		project.ID,
 		taskDescription,
-		declaredWriteScope,
 	)
 	if err != nil {
 		return AcceptOrderResponse{}, err

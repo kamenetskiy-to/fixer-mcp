@@ -183,7 +183,6 @@ WorkroomHandsInstruction _decodeHandsInstruction(Map<String, dynamic> json) {
     instructionId: _requiredString(json, 'id'),
     ordinal: _requiredInt(json, 'ordinal'),
     instructionText: _requiredString(json, 'instruction_text'),
-    declaredWriteScope: _stringList(json, 'declared_write_scope'),
     requestedLane: _requiredString(json, 'requested_lane'),
     riskClass: _requiredString(json, 'risk_class'),
     reviewPolicy: _requiredString(json, 'review_policy'),

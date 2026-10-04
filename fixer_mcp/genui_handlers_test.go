@@ -31,6 +31,17 @@ func setupWorkroomHandlerTestDB(t *testing.T) {
 	authorizedSessionId = 0
 }
 
+func TestProjectUIEventKindsRejectRetiredLeaseChanged(t *testing.T) {
+	if _, ok := registeredProjectUIEventKinds["lease.changed"]; ok {
+		t.Fatal("retired lease.changed UI event kind must not be accepted for new journal events")
+	}
+	for _, required := range []string{"hands.instruction.changed", "hands.generation.changed", "wave.changed"} {
+		if _, ok := registeredProjectUIEventKinds[required]; !ok {
+			t.Fatalf("active event kind %q must stay registered", required)
+		}
+	}
+}
+
 func TestRequestGenUISurfaceKnownRequestIsDurableAndIdempotent(t *testing.T) {
 	setupWorkroomHandlerTestDB(t)
 	ctx := context.Background()

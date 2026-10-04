@@ -118,7 +118,6 @@ type NetrunnerWaveWorkerSnapshot struct {
 	ProjectId           int      `json:"project_id"`
 	SessionId           int      `json:"session_id"`
 	Status              string   `json:"status"`
-	DeclaredWriteScope  []string `json:"declared_write_scope"`
 	BranchName          string   `json:"branch_name"`
 	WorktreePath        string   `json:"worktree_path"`
 	BaseSha             string   `json:"base_sha"`
@@ -655,9 +654,8 @@ func loadParallelWaveSessionCandidates(localSessionIDs []int, projectID int) ([]
 			return nil, fmt.Errorf("session %d has rework/forced-stop history and must be forked or handled serially", localSessionID)
 		}
 		candidates = append(candidates, parallelWaveSessionCandidate{
-			LocalSessionID:     localSessionID,
-			GlobalSessionID:    globalSessionID,
-			DeclaredWriteScope: state.DeclaredWriteScope,
+			LocalSessionID:  localSessionID,
+			GlobalSessionID: globalSessionID,
 		})
 	}
 
@@ -831,18 +829,11 @@ func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, b
 			return 0, err
 		}
 	}
-	if err := insertParallelWaveScopeLeasesTx(tx, projectID, waveID, candidates); err != nil {
-		return 0, err
-	}
 	waveIDText := strconv.Itoa(waveID)
 	globalSessionIDByLocalID := make(map[int]int, len(candidates))
 
 	for _, candidate := range candidates {
 		globalSessionIDByLocalID[candidate.LocalSessionID] = candidate.GlobalSessionID
-		encodedScope, err := json.Marshal(candidate.DeclaredWriteScope)
-		if err != nil {
-			return 0, err
-		}
 		branchName, err := parallelWaveBranchName(waveID, candidate.LocalSessionID)
 		if err != nil {
 			return 0, err
@@ -857,17 +848,15 @@ func insertParallelWave(projectID int, projectCWD string, worktreeRoot string, b
 				project_id,
 				session_id,
 				status,
-				declared_write_scope,
 				branch_name,
 				worktree_path,
 				base_sha,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 			waveID,
 			projectID,
 			candidate.GlobalSessionID,
 			parallelWaveWorkerStatusCreated,
-			string(encodedScope),
 			branchName,
 			worktreePath,
 			baseSHA,
@@ -1045,7 +1034,6 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		            AND ranked.id <= p.session_id
 		        ) AS local_session_id,
 		        p.status,
-		        p.declared_write_scope,
 		        p.branch_name,
 		        p.worktree_path,
 		        p.base_sha,
@@ -1088,7 +1076,6 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 	for rows.Next() {
 		var (
 			worker         NetrunnerWaveWorkerSnapshot
-			scopePayload   string
 			changedPayload string
 		)
 		scanArgs := []any{
@@ -1097,7 +1084,6 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 			&worker.ProjectId,
 			&worker.SessionId,
 			&worker.Status,
-			&scopePayload,
 			&worker.BranchName,
 			&worker.WorktreePath,
 			&worker.BaseSha,
@@ -1132,7 +1118,6 @@ func fetchNetrunnerWaveSnapshot(waveID int, projectID int) (NetrunnerWaveSnapsho
 		if err := rows.Scan(scanArgs...); err != nil {
 			return NetrunnerWaveSnapshot{}, err
 		}
-		worker.DeclaredWriteScope = decodeParallelWaveStringList(scopePayload)
 		worker.ChangedPaths = decodeParallelWaveStringList(changedPayload)
 		workers = append(workers, worker)
 	}
@@ -1236,20 +1221,11 @@ func CreateNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input Cr
 	admissionWorkers := make([]parallelWaveAdmissionWorker, 0, len(candidates))
 	for _, candidate := range candidates {
 		admissionWorkers = append(admissionWorkers, parallelWaveAdmissionWorker{
-			SessionID:          candidate.LocalSessionID,
-			DeclaredWriteScope: candidate.DeclaredWriteScope,
+			SessionID: candidate.LocalSessionID,
 		})
 	}
-	normalizedAdmission, err := normalizeParallelWaveAdmissionWorkersWithDependencies(admissionWorkers, dependencies)
-	if err != nil {
+	if _, err := normalizeParallelWaveAdmissionWorkersWithDependencies(admissionWorkers, dependencies); err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateNetrunnerWaveOutput{}, err
-	}
-	scopeByLocalID := make(map[int][]string, len(normalizedAdmission))
-	for _, worker := range normalizedAdmission {
-		scopeByLocalID[worker.SessionID] = worker.DeclaredWriteScope
-	}
-	for index := range candidates {
-		candidates[index].DeclaredWriteScope = scopeByLocalID[candidates[index].LocalSessionID]
 	}
 	lineage, err := prepareParallelWaveLineage(input, authorizedProjectId, len(candidates))
 	if err != nil {
@@ -1674,11 +1650,6 @@ func finalizeParallelWaveWorker(projectCWD string, wave NetrunnerWaveSnapshot, w
 	}
 	for _, updatedWorker := range updatedWave.Workers {
 		if updatedWorker.Id == worker.Id {
-			if updatedWorker.Status == parallelWaveWorkerStatusReviewReady || updatedWorker.Status == parallelWaveWorkerStatusCompleted {
-				if leaseErr := releaseParallelWaveWorkerScopeLeases(updatedWave, updatedWorker); leaseErr != nil {
-					log.Printf("warning: failed to release terminal worker %d scope leases: %v", updatedWorker.SessionId, leaseErr)
-				}
-			}
 			return updatedWorker, nil
 		}
 	}
@@ -2366,9 +2337,6 @@ func launchParallelWaveWorkerProcess(
 		"--wave-worker-id", strconv.Itoa(worker.Id),
 		"--branch-name", worker.BranchName,
 	}
-	for _, scopeEntry := range worker.DeclaredWriteScope {
-		commandArgs = append(commandArgs, "--declared-write-scope", scopeEntry)
-	}
 	if trimmedFixerSessionID := strings.TrimSpace(input.FixerSessionId); trimmedFixerSessionID != "" {
 		commandArgs = append(commandArgs, "--fixer-session-id", trimmedFixerSessionID)
 	}
@@ -2549,15 +2517,14 @@ func abortLaunchedWaveWorkerProcess(
 
 // abandonNeverLaunchedParallelWaveWorkers deterministically closes out workers
 // whose process never launched. The worker that actually failed remains
-// failed; dependency-gated or otherwise untouched workers become blocked and
-// release their leases immediately instead of remaining stranded until whole-
-// wave cleanup.
+// failed; dependency-gated or otherwise untouched workers become blocked
+// instead of remaining open until whole-wave cleanup.
 func abandonNeverLaunchedParallelWaveWorkers(projectCWD string, waveID int, projectID int, workerFailures map[int]string, worktreePaths []string) []string {
 	partialWave, err := fetchNetrunnerWaveSnapshot(waveID, projectID)
 	if err == nil {
 		// A launch abort invalidates the whole admission attempt, including
 		// dependency-gated workers that never received a worktree. Close those
-		// rows out as blocked so an initialized wave cannot retain live leases.
+		// rows out as blocked so an initialized wave cannot retain open workers.
 		for _, worker := range partialWave.Workers {
 			reason, selected := workerFailures[worker.Id]
 			switch worker.Status {
@@ -2599,19 +2566,6 @@ func abandonNeverLaunchedParallelWaveWorkers(projectCWD string, waveID int, proj
 	rollbackFailures := rollbackParallelWaveWorktrees(projectCWD, worktreePaths)
 	if len(rollbackFailures) > 0 {
 		log.Printf("warning: wave %d launch-failure worktree rollback: %s", waveID, strings.Join(rollbackFailures, "; "))
-	}
-	partialWave, err = fetchNetrunnerWaveSnapshot(waveID, projectID)
-	if err != nil {
-		log.Printf("warning: failed to fetch wave %d after launch abandonment: %v", waveID, err)
-		return rollbackFailures
-	}
-	for _, worker := range partialWave.Workers {
-		if worker.Status != parallelWaveWorkerStatusFailed && worker.Status != parallelWaveWorkerStatusBlocked {
-			continue
-		}
-		if leaseErr := releaseParallelWaveWorkerScopeLeases(partialWave, worker); leaseErr != nil {
-			log.Printf("warning: failed to release abandoned worker %d scope leases: %v", worker.SessionId, leaseErr)
-		}
 	}
 	return rollbackFailures
 }

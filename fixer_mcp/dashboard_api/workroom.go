@@ -238,8 +238,12 @@ var dashboardHandsProviderSpecs = map[string]dashboardHandsProviderSpec{
 		modelOptions: []string{
 			"Gemini 3.6 Flash",
 			"Gemini 3.1 Pro",
-			"Claude Sonnet 4.6 (Thinking)",
-			"Claude Opus 4.6 (Thinking)",
+			"Claude Opus 5.5 (Low)",
+			"Claude Opus 5.5 (Medium)",
+			"Claude Opus 5.5 (High)",
+			"Claude Sonnet 5.5 (Low)",
+			"Claude Sonnet 5.5 (Medium)",
+			"Claude Sonnet 5.5 (High)",
 		},
 		reasoningOptions: []string{"default", "low", "medium", "high"},
 	},
@@ -267,20 +271,19 @@ func dashboardHandsProviderOptionContains(options []string, value string) bool {
 }
 
 type WorkroomHandsInstruction struct {
-	ID                 string   `json:"id"`
-	Ordinal            int      `json:"ordinal"`
-	InstructionText    string   `json:"instruction_text"`
-	DeclaredWriteScope []string `json:"declared_write_scope"`
-	RequestedLane      string   `json:"requested_lane"`
-	RiskClass          string   `json:"risk_class"`
-	ReviewPolicy       string   `json:"review_policy"`
-	State              string   `json:"state"`
-	StateReasonCode    string   `json:"state_reason_code,omitempty"`
-	StateReasonText    string   `json:"state_reason_text,omitempty"`
-	Revision           int      `json:"revision"`
-	CreatedAt          string   `json:"created_at"`
-	UpdatedAt          string   `json:"updated_at"`
-	TerminalAt         string   `json:"terminal_at,omitempty"`
+	ID              string `json:"id"`
+	Ordinal         int    `json:"ordinal"`
+	InstructionText string `json:"instruction_text"`
+	RequestedLane   string `json:"requested_lane"`
+	RiskClass       string `json:"risk_class"`
+	ReviewPolicy    string `json:"review_policy"`
+	State           string `json:"state"`
+	StateReasonCode string `json:"state_reason_code,omitempty"`
+	StateReasonText string `json:"state_reason_text,omitempty"`
+	Revision        int    `json:"revision"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+	TerminalAt      string `json:"terminal_at,omitempty"`
 }
 
 type ProjectWorkroomSnapshot struct {
@@ -435,9 +438,8 @@ func bridgePrincipalHasPrivilegedHandsRole(principal BridgePrincipal) bool {
 
 func scanWorkroomInstruction(scanner interface{ Scan(...any) error }) (WorkroomHandsInstruction, error) {
 	var instruction WorkroomHandsInstruction
-	var scopeJSON string
 	err := scanner.Scan(
-		&instruction.ID, &instruction.Ordinal, &instruction.InstructionText, &scopeJSON,
+		&instruction.ID, &instruction.Ordinal, &instruction.InstructionText,
 		&instruction.RequestedLane, &instruction.RiskClass, &instruction.ReviewPolicy,
 		&instruction.State, &instruction.StateReasonCode, &instruction.StateReasonText,
 		&instruction.Revision, &instruction.CreatedAt, &instruction.UpdatedAt, &instruction.TerminalAt,
@@ -445,17 +447,11 @@ func scanWorkroomInstruction(scanner interface{ Scan(...any) error }) (WorkroomH
 	if err != nil {
 		return WorkroomHandsInstruction{}, err
 	}
-	if err := json.Unmarshal([]byte(scopeJSON), &instruction.DeclaredWriteScope); err != nil {
-		return WorkroomHandsInstruction{}, err
-	}
-	if instruction.DeclaredWriteScope == nil {
-		instruction.DeclaredWriteScope = []string{}
-	}
 	return instruction, nil
 }
 
 const workroomInstructionColumns = `
-	id, ordinal, instruction_text, declared_write_scope_json, requested_lane,
+	id, ordinal, instruction_text, requested_lane,
 	risk_class, review_policy, state, COALESCE(state_reason_code, ''),
 	COALESCE(state_reason_text, ''), revision, created_at, updated_at, COALESCE(terminal_at, '')`
 
@@ -576,6 +572,8 @@ func (r *Repository) ProjectWorkroomSnapshot(ctx context.Context, projectID int,
 			return ProjectWorkroomSnapshot{}, err
 		}
 		output.HandsMailbox = append(output.HandsMailbox, instruction)
+		// The retired waiting state is kept here only as a dated legacy read so
+		// pre-retirement rows stay visible; nothing writes that state anymore.
 		if output.ActiveInstruction == nil && (instruction.State == "queued" || instruction.State == "waiting_for_lease" || instruction.State == "starting" || instruction.State == "running" || instruction.State == "awaiting_review") {
 			copy := instruction
 			output.ActiveInstruction = &copy

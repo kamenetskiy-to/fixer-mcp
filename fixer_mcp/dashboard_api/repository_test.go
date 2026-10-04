@@ -334,9 +334,6 @@ func TestActionRoutesMutateSessionState(t *testing.T) {
 	var createResp CreateTaskResponse
 	postJSON(t, server.URL+"/api/actions/projects/1/tasks", map[string]any{
 		"task_description": "Operator-created task",
-		"declared_write_scope": []string{
-			"fixer_mcp/dashboard_api",
-		},
 	}, &createResp)
 	if createResp.Status != "success" || createResp.SessionID == 0 {
 		t.Fatalf("unexpected create task response: %+v", createResp)
@@ -460,7 +457,6 @@ func seedFixtureDB(db *sql.DB, projectCWD string) error {
 			cli_backend TEXT NOT NULL DEFAULT 'codex',
 			cli_model TEXT NOT NULL DEFAULT '',
 			cli_reasoning TEXT NOT NULL DEFAULT '',
-			declared_write_scope TEXT NOT NULL DEFAULT '["."]',
 			repair_source_session_id INTEGER,
 			rework_count INTEGER NOT NULL DEFAULT 0,
 			forced_stop_count INTEGER NOT NULL DEFAULT 0
@@ -558,10 +554,10 @@ func seedFixtureDB(db *sql.DB, projectCWD string) error {
 	statements := []string{
 		"INSERT INTO project (id, name, cwd) VALUES (1, 'Fixer MCP', '" + strings.ReplaceAll(projectCWD, "'", "''") + "')",
 		"INSERT INTO project (id, name, cwd) VALUES (2, 'Another Project', '/tmp/another-project')",
-		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, declared_write_scope, rework_count, forced_stop_count) VALUES (10, 1, 'Foundation work', 'completed', '', 'codex', 'gpt-5.4', 'medium', '[\"fixer_mcp\"]', 0, 0)",
-		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, declared_write_scope, repair_source_session_id, rework_count, forced_stop_count) VALUES (11, 1, 'Implement read bridge\\nMore detail here', 'in_progress', '" + strings.ReplaceAll(report, "'", "''") + "', 'codex', 'gpt-5.4', 'medium', '[\"fixer_mcp\",\"dashboard_api\"]', 10, 1, 0)",
-		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, declared_write_scope, rework_count, forced_stop_count) VALUES (12, 1, 'Review endpoint contract', 'review', '', 'codex', 'gpt-5.4', 'medium', '[\"fixer_mcp\"]', 2, 1)",
-		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, declared_write_scope, rework_count, forced_stop_count) VALUES (20, 2, 'Other project session', 'pending', '', 'codex', 'gpt-5.4', 'medium', '[\".\"]', 0, 0)",
+		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, rework_count, forced_stop_count) VALUES (10, 1, 'Foundation work', 'completed', '', 'codex', 'gpt-5.4', 'medium', 0, 0)",
+		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, repair_source_session_id, rework_count, forced_stop_count) VALUES (11, 1, 'Implement read bridge\\nMore detail here', 'in_progress', '" + strings.ReplaceAll(report, "'", "''") + "', 'codex', 'gpt-5.4', 'medium', 10, 1, 0)",
+		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, rework_count, forced_stop_count) VALUES (12, 1, 'Review endpoint contract', 'review', '', 'codex', 'gpt-5.4', 'medium', 2, 1)",
+		"INSERT INTO session (id, project_id, task_description, status, report, cli_backend, cli_model, cli_reasoning, rework_count, forced_stop_count) VALUES (20, 2, 'Other project session', 'pending', '', 'codex', 'gpt-5.4', 'medium', 0, 0)",
 		"INSERT INTO project_doc (id, project_id, title, content, doc_type) VALUES (1, 1, 'Bridge Brief', 'Bridge contract details go here', 'architecture')",
 		"INSERT INTO project_doc (id, project_id, title, content, doc_type) VALUES (2, 1, 'Runtime Modes', 'Runtime mode notes', 'documentation')",
 		"INSERT INTO netrunner_attached_doc (session_id, project_doc_id) VALUES (11, 1)",

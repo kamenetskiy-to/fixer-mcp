@@ -920,9 +920,6 @@ func TestForkRepairSessionFrom_CopiesContextAndProvenance(t *testing.T) {
 		_ = testDB.Close()
 	}()
 
-	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = '[\"fixer_mcp/main.go\"]' WHERE id = 1"); err != nil {
-		t.Fatalf("seed write scope: %v", err)
-	}
 	if _, err := testDB.Exec("INSERT INTO netrunner_attached_doc (session_id, project_doc_id) VALUES (1, 1), (1, 2)"); err != nil {
 		t.Fatalf("seed attached docs: %v", err)
 	}
@@ -945,9 +942,9 @@ func TestForkRepairSessionFrom_CopiesContextAndProvenance(t *testing.T) {
 		t.Fatalf("expected new local session id 2, got %+v", out)
 	}
 
-	var description, declaredWriteScope string
+	var description string
 	var repairSourceID, attachedDocCount, mcpCount int
-	if err := db.QueryRow("SELECT task_description, declared_write_scope, repair_source_session_id FROM session WHERE id = 3").Scan(&description, &declaredWriteScope, &repairSourceID); err != nil {
+	if err := db.QueryRow("SELECT task_description, repair_source_session_id FROM session WHERE id = 3").Scan(&description, &repairSourceID); err != nil {
 		t.Fatalf("query forked session: %v", err)
 	}
 	if repairSourceID != 1 {
@@ -955,9 +952,6 @@ func TestForkRepairSessionFrom_CopiesContextAndProvenance(t *testing.T) {
 	}
 	if !strings.Contains(description, "Repair fork source session: 1.") || !strings.Contains(description, "Repair fork reason: forced stop") {
 		t.Fatalf("unexpected repair provenance in task description: %q", description)
-	}
-	if declaredWriteScope != "[\"fixer_mcp/main.go\"]" {
-		t.Fatalf("expected copied write scope, got %q", declaredWriteScope)
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM netrunner_attached_doc WHERE session_id = 3").Scan(&attachedDocCount); err != nil {
 		t.Fatalf("count copied docs: %v", err)

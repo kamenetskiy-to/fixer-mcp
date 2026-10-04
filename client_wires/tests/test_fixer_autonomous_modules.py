@@ -223,7 +223,10 @@ class FixerAutonomousModuleTests(unittest.TestCase):
                     fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV: "fixer",
                 }
 
-            def fake_prompt(**_kwargs: object) -> str:
+            captured_prompt_kwargs: dict[str, object] = {}
+
+            def fake_prompt(**kwargs: object) -> str:
+                captured_prompt_kwargs.update(kwargs)
                 return "wave-prompt"
 
             plan = fixer_autonomous_wave._build_wave_netrunner_launch_plan(
@@ -232,7 +235,6 @@ class FixerAutonomousModuleTests(unittest.TestCase):
                 local_session_id=5,
                 wave_id=821,
                 wave_worker_id=1260,
-                declared_write_scope=["client_wires/fixer_autonomous_wave.py"],
                 fixer_session_id="fixer-session-pi",
                 assigned_mcp_names=[],
                 mcp_how_to={fixer_wire.FORCED_MCP_SERVER: "Use for project tools."},
@@ -250,6 +252,8 @@ class FixerAutonomousModuleTests(unittest.TestCase):
         self.assertEqual(plan.env[fixer_wire.FIXER_MCP_LOCKED_ROLE_ENV], "netrunner")
         self.assertEqual(plan.env[fixer_wire.FIXER_MCP_DEFAULT_ROLE_ENV], "netrunner")
         self.assertEqual(plan.env[fixer_wire.FIXER_DB_PATH_ENV], str(db_path.resolve()))
+        # The wave execution-envelope contract carries no scope fields at all.
+        self.assertNotIn("declared_write_scope", captured_prompt_kwargs)
 
 
 if __name__ == "__main__":

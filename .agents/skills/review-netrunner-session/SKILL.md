@@ -15,8 +15,7 @@ It applies to manual, autonomous, and Fixer MCP-native worker launches.
 1. Authenticate as `fixer`.
 2. Load current internal Fixer MCP docs.
 3. Read the target session with `get_session` and confirm its structured report
-   and current task text. A `declared_write_scope`, when present, is
-   informational only: never reject a delivery for changed paths outside it.
+   and current task text.
 4. Read append-only worker history with `view_netrunner_logs` when available.
 5. Read pending doc proposals with `review_doc_proposals`.
 6. Validate the actual work, not only the worker report or logs.

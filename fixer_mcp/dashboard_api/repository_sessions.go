@@ -41,24 +41,23 @@ type NetrunnerWaveGroup struct {
 }
 
 type NetrunnerExplorerSession struct {
-	ID               int      `json:"id"`
-	LocalID          int      `json:"local_id"`
-	ProjectID        int      `json:"project_id"`
-	WaveID           int      `json:"wave_id,omitempty"`
-	Role             string   `json:"role"`
-	Kind             string   `json:"kind"`
-	Headline         string   `json:"headline"`
-	TaskPreview      string   `json:"task_preview"`
-	Status           string   `json:"status"`
-	MembershipStatus string   `json:"membership_status,omitempty"`
-	Backend          string   `json:"backend,omitempty"`
-	Model            string   `json:"model,omitempty"`
-	Reasoning        string   `json:"reasoning,omitempty"`
-	WriteScope       []string `json:"write_scope"`
-	CreatedAt        string   `json:"created_at,omitempty"`
-	UpdatedAt        string   `json:"updated_at,omitempty"`
-	LaunchedAt       string   `json:"launched_at,omitempty"`
-	CompletedAt      string   `json:"completed_at,omitempty"`
+	ID               int    `json:"id"`
+	LocalID          int    `json:"local_id"`
+	ProjectID        int    `json:"project_id"`
+	WaveID           int    `json:"wave_id,omitempty"`
+	Role             string `json:"role"`
+	Kind             string `json:"kind"`
+	Headline         string `json:"headline"`
+	TaskPreview      string `json:"task_preview"`
+	Status           string `json:"status"`
+	MembershipStatus string `json:"membership_status,omitempty"`
+	Backend          string `json:"backend,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Reasoning        string `json:"reasoning,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+	LaunchedAt       string `json:"launched_at,omitempty"`
+	CompletedAt      string `json:"completed_at,omitempty"`
 }
 
 type netrunnerSessionLink struct {
@@ -181,7 +180,6 @@ func explorerSessionFromSummary(summary NetrunnerSummary, link netrunnerSessionL
 		TaskPreview:      summary.TaskPreview,
 		Status:           summary.Status,
 		MembershipStatus: link.MembershipStatus,
-		WriteScope:       summary.WriteScope,
 		CreatedAt:        link.CreatedAt,
 		UpdatedAt:        link.UpdatedAt,
 		LaunchedAt:       link.LaunchedAt,
@@ -439,7 +437,6 @@ func (r *Repository) NetrunnerDetail(ctx context.Context, sessionID int) (Netrun
 		Backend:               summary.Backend,
 		Model:                 summary.Model,
 		Reasoning:             summary.Reasoning,
-		WriteScope:            summary.WriteScope,
 		ReportRaw:             reportRaw,
 		StructuredFinalReport: structuredReport,
 		AttachedDocs:          attachedDocs,
@@ -479,16 +476,11 @@ func (r *Repository) CreateTask(ctx context.Context, projectID int, input Create
 	if taskDescription == "" {
 		return CreateTaskResponse{}, fmt.Errorf("task_description is required")
 	}
-	declaredWriteScope, err := encodeStringList(input.DeclaredWriteScope)
-	if err != nil {
-		return CreateTaskResponse{}, err
-	}
 	res, err := r.dbWrite.ExecContext(
 		ctx,
-		"INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (?, ?, 'pending', ?)",
+		"INSERT INTO session (project_id, task_description, status) VALUES (?, ?, 'pending')",
 		projectID,
 		taskDescription,
-		declaredWriteScope,
 	)
 	if err != nil {
 		return CreateTaskResponse{}, err
@@ -627,7 +619,6 @@ func (r *Repository) loadSessionSummaries(ctx context.Context, projectID int, st
 			COALESCE(NULLIF(TRIM(s.cli_backend), ''), 'codex') AS cli_backend,
 			COALESCE(s.cli_model, ''),
 			COALESCE(s.cli_reasoning, ''),
-			COALESCE(s.declared_write_scope, '["."]'),
 			COALESCE(s.repair_source_session_id, 0),
 			COALESCE(s.rework_count, 0),
 			COALESCE(s.forced_stop_count, 0),
@@ -702,7 +693,6 @@ func (r *Repository) loadSessionSummaries(ctx context.Context, projectID int, st
 	for rows.Next() {
 		var summary NetrunnerSummary
 		var taskDescription string
-		var declaredWriteScope string
 		var runningCount int
 		if err := rows.Scan(
 			&summary.ID,
@@ -713,7 +703,6 @@ func (r *Repository) loadSessionSummaries(ctx context.Context, projectID int, st
 			&summary.Backend,
 			&summary.Model,
 			&summary.Reasoning,
-			&declaredWriteScope,
 			&summary.RepairSourceSessionID,
 			&summary.ReworkCount,
 			&summary.ForcedStopCount,
@@ -725,7 +714,6 @@ func (r *Repository) loadSessionSummaries(ctx context.Context, projectID int, st
 		); err != nil {
 			return nil, nil, StatusCounts{}, err
 		}
-		summary.WriteScope = decodeStringList(declaredWriteScope)
 		summary.Headline = firstLineOrFallback(taskDescription, fmt.Sprintf("Session #%d", summary.LocalID))
 		summary.TaskPreview = preview(taskDescription, 220)
 		if summary.RepairSourceSessionID > 0 {

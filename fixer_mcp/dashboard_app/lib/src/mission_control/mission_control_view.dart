@@ -172,8 +172,8 @@ class _MissionControlWavesViewState extends State<MissionControlWavesView> {
         ),
         content: Text(
           l10n.isRussian
-              ? 'План #${plan.planId} создаст обычные pending-сессии и волну через управляемый Wave Engine. Только после подтверждения появятся worktree, зафиксированный base SHA и аренды scope.'
-              : 'Plan #${plan.planId} will create normal pending sessions and a wave through the governed Wave Engine. Worktrees, a resolved base SHA, and scope leases only begin after confirmation.',
+              ? 'План #${plan.planId} создаст обычные pending-сессии и волну через управляемый Wave Engine. Только после подтверждения появятся worktree и зафиксированный base SHA.'
+              : 'Plan #${plan.planId} will create normal pending sessions and a wave through the governed Wave Engine. Worktrees and a resolved base SHA only begin after confirmation.',
         ),
         actions: [
           TextButton(
@@ -755,7 +755,7 @@ class _PlannedWaveSummaryCard extends StatelessWidget {
                 title: 'PLANNED DEFINITION',
                 message: plan.isInitialized
                     ? 'Materialized as normal wave #${plan.initializedWaveId}; runtime ownership is shown on that wave.'
-                    : 'No sessions, worktrees, resolved base SHA, or scope leases exist yet.',
+                    : 'No sessions, worktrees, or resolved base SHA exist yet.',
                 compact: true,
               ),
             ],
@@ -807,8 +807,8 @@ class _PlannedWaveDetail extends StatelessWidget {
             ? 'PLANNED DEFINITION MATERIALIZED'
             : 'PLANNED, NOT INITIALIZED',
         message: plan.isInitialized
-            ? 'This definition created normal wave #${plan.initializedWaveId}. Runtime sessions, worktrees, base SHA, and leases belong to the normal wave record.'
-            : 'This is future work metadata only. It owns no Netrunner sessions, worktrees, resolved base SHA, or write-scope leases until governed Initialize succeeds.',
+            ? 'This definition created normal wave #${plan.initializedWaveId}. Runtime sessions, worktrees, and base SHA belong to the normal wave record.'
+            : 'This is future work metadata only. It owns no Netrunner sessions, worktrees, or resolved base SHA until governed Initialize succeeds.',
       ),
       const SizedBox(height: 14),
       _PlannedWaveEvidencePanel(plan: plan),
@@ -1010,10 +1010,6 @@ class _PlannedTaskRow extends StatelessWidget {
         ),
         Text(
           'Depends on: ${task.dependsOn.isEmpty ? 'none' : task.dependsOn.join(', ')}',
-          style: theme.textTheme.bodySmall,
-        ),
-        Text(
-          'Planned scope: ${task.declaredWriteScope.isEmpty ? 'not specified' : task.declaredWriteScope.join(', ')}',
           style: theme.textTheme.bodySmall,
         ),
       ],

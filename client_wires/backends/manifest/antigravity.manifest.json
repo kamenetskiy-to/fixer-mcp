@@ -15,8 +15,12 @@
       "Gemini 3.6 Flash (High)",
       "Gemini 3.1 Pro (Low)",
       "Gemini 3.1 Pro (High)",
-      "Claude Sonnet 4.6 (Thinking)",
-      "Claude Opus 4.6 (Thinking)"
+      "Claude Opus 5.5 (Low)",
+      "Claude Opus 5.5 (Medium)",
+      "Claude Opus 5.5 (High)",
+      "Claude Sonnet 5.5 (Low)",
+      "Claude Sonnet 5.5 (Medium)",
+      "Claude Sonnet 5.5 (High)"
     ],
     "default": "Gemini 3.7 Flash (Medium)",
     "internal_id_map": {
@@ -31,8 +35,12 @@
       "Gemini 3.6 Flash (High)": "Gemini 3.6 Flash (High)",
       "Gemini 3.1 Pro (Low)": "Gemini 3.1 Pro (Low)",
       "Gemini 3.1 Pro (High)": "Gemini 3.1 Pro (High)",
-      "Claude Sonnet 4.6 (Thinking)": "Claude Sonnet 4.6 (Thinking)",
-      "Claude Opus 4.6 (Thinking)": "Claude Opus 4.6 (Thinking)"
+      "Claude Opus 5.5 (Low)": "Claude Opus 5.5 (Low)",
+      "Claude Opus 5.5 (Medium)": "Claude Opus 5.5 (Medium)",
+      "Claude Opus 5.5 (High)": "Claude Opus 5.5 (High)",
+      "Claude Sonnet 5.5 (Low)": "Claude Sonnet 5.5 (Low)",
+      "Claude Sonnet 5.5 (Medium)": "Claude Sonnet 5.5 (Medium)",
+      "Claude Sonnet 5.5 (High)": "Claude Sonnet 5.5 (High)"
     },
     "byok": false,
     "auth": "subscription"
@@ -45,7 +53,7 @@
     ],
     "default": "high",
     "pass_mechanism": "none",
-    "headless_auto_approve_justification": "Antigravity encodes reasoning in the model display-name suffix (Low, Medium, High, Thinking). There is no separate --effort or --reasoning flag."
+    "headless_auto_approve_justification": "Antigravity encodes reasoning in the model display-name suffix (Low, Medium, High). The launcher selects effort through the concrete model variant and passes no separate effort flag."
   },
   "skills": {
     "inject_dir": ".agents/skills",

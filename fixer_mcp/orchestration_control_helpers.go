@@ -13,7 +13,6 @@ type sessionLifecycleState struct {
 	CliBackend            string
 	CliModel              string
 	CliReasoning          string
-	DeclaredWriteScope    []string
 	RepairSourceSessionID int
 	ReworkCount           int
 	ForcedStopCount       int

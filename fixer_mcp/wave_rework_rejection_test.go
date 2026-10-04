@@ -140,12 +140,6 @@ func TestManualWaveRejectedReviewClosesWithoutAttesting(t *testing.T) {
 	if !strings.Contains(closed.Wave.FailureReason, "rejected review") {
 		t.Fatalf("a rejected close must be labelled as such, got %q", closed.Wave.FailureReason)
 	}
-	var activeLeases int
-	if err := testDB.QueryRow(
-		"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND active = 1", created.WaveId,
-	).Scan(&activeLeases); err != nil || activeLeases != 0 {
-		t.Fatalf("a rejected close must release scope leases: count=%d err=%v", activeLeases, err)
-	}
 	// Nothing may read as accepted: the rejected session stays unaccepted.
 	var status string
 	if err := testDB.QueryRow("SELECT status FROM session WHERE id = ?", globalWorkerID).Scan(&status); err != nil {
@@ -209,7 +203,7 @@ func TestManualWaveReworkRequeuedWorkersSurviveWaitReconcileAndRelaunch(t *testi
 	repoDir := setupCleanGitRepo(t)
 	testDB := setupParallelWaveTestDB(t, repoDir)
 	defer testDB.Close()
-	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task D', 'pending', '["docs/c"]')`); err != nil {
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task D', 'pending')`); err != nil {
 		t.Fatalf("seed third session: %v", err)
 	}
 	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1

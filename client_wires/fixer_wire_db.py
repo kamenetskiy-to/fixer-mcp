@@ -753,8 +753,12 @@ def _normalize_backend_model(descriptor: Any, model: str | None) -> str:
     if descriptor.name == "antigravity":
         candidate = normalize_antigravity_model_alias(candidate)
     if candidate not in descriptor.model_options:
-        if descriptor.name == "antigravity" and candidate in {"Claude Sonnet 4.6", "Claude Opus 4.6"}:
-            return candidate
+        if descriptor.name == "antigravity" and "claude" in candidate.lower() and "4.6" in candidate:
+            raise RuntimeError(
+                f"Unsupported model {candidate!r} (requested {model!r}) for backend {descriptor.name!r}: "
+                "retired Claude 4.6 (Thinking) pick. Select a current Claude 5.5 variant "
+                "(Claude Opus 5.5 / Claude Sonnet 5.5 with reasoning low, medium or high)."
+            )
         supported = ", ".join(descriptor.model_options)
         raise RuntimeError(
             f"Unsupported model {candidate!r} for backend {descriptor.name!r}. Supported models: {supported}"
@@ -768,8 +772,6 @@ def _normalize_backend_reasoning(descriptor: Any, reasoning: str | None, model: 
         candidate = "high"
     if descriptor.name == "antigravity":
         candidate = candidate.lower()
-        if candidate == "thinking":
-            candidate = "high"
     if descriptor.name == "pi":
         # Pi's reasoning surface is per model (`thinkingLevelMap`), not per backend.
         # A stored or selected level the model does not declare makes the adapter

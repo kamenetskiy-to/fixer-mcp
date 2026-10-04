@@ -178,7 +178,6 @@ type NetrunnerSummary struct {
 	Backend               string             `json:"backend"`
 	Model                 string             `json:"model,omitempty"`
 	Reasoning             string             `json:"reasoning,omitempty"`
-	WriteScope            []string           `json:"write_scope"`
 	AttachedDocCount      int                `json:"attached_doc_count"`
 	MCPCount              int                `json:"mcp_count"`
 	ProposalCount         int                `json:"proposal_count"`
@@ -284,7 +283,6 @@ type MissionControlPlannedWaveTask struct {
 	Key                   string   `json:"key"`
 	Position              int      `json:"position"`
 	TaskDescription       string   `json:"task_description"`
-	DeclaredWriteScope    []string `json:"declared_write_scope"`
 	DependsOn             []string `json:"depends_on"`
 	Backend               string   `json:"backend,omitempty"`
 	Model                 string   `json:"model,omitempty"`
@@ -432,7 +430,6 @@ type SessionDetail struct {
 	Backend               string                `json:"backend"`
 	Model                 string                `json:"model,omitempty"`
 	Reasoning             string                `json:"reasoning,omitempty"`
-	WriteScope            []string              `json:"write_scope"`
 	ReportRaw             string                `json:"report_raw"`
 	StructuredFinalReport *FinalReport          `json:"structured_final_report,omitempty"`
 	AttachedDocs          []AttachedDoc         `json:"attached_docs"`
@@ -454,8 +451,7 @@ type NetrunnerDetailResponse struct {
 }
 
 type CreateTaskInput struct {
-	TaskDescription    string   `json:"task_description"`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty"`
+	TaskDescription string `json:"task_description"`
 }
 
 type CreateTaskResponse struct {

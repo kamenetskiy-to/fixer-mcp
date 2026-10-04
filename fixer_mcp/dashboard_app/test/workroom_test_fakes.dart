@@ -145,7 +145,6 @@ class FakeProjectWorkroomRepository implements ProjectWorkroomRepository {
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,
@@ -162,7 +161,6 @@ class FakeProjectWorkroomRepository implements ProjectWorkroomRepository {
         'requested_lane': requestedLane,
         'requested_model': requestedModel,
         'requested_reasoning': requestedReasoning,
-        'declared_write_scope': declaredWriteScope,
         'issuer': 'architect',
         'created_at': '2026-07-30T12:01:00Z',
         'updated_at': '2026-07-30T12:01:00Z',
@@ -304,7 +302,6 @@ ProjectWorkroomSnapshot workroomFixture({int projectId = 1}) {
       operationalState: 'awaiting_review',
       selectedLane: 'codex',
       queueDepth: 0,
-      activeLeaseSummary: 'fixer_mcp/dashboard_app',
       lanes: [
         HandsProviderLane(
           provider: 'codex',
@@ -336,7 +333,6 @@ ProjectWorkroomSnapshot workroomFixture({int projectId = 1}) {
           stateReasonCode: '',
           stateReasonText: '',
           requestedLane: 'codex',
-          declaredWriteScope: ['fixer_mcp/dashboard_app'],
           issuer: 'architect',
           createdAt: '2026-07-30T11:00:00Z',
           updatedAt: '2026-07-30T12:00:00Z',

@@ -244,7 +244,6 @@ class DashboardRuntimeEndpoint extends ClientProtectedEndpoint {
         principal,
         {
           'instruction_text': request.instructionText,
-          'declared_write_scope': request.declaredWriteScope,
           'requested_lane': request.requestedLane,
           'idempotency_key': request.idempotencyKey,
         },

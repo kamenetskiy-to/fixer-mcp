@@ -841,7 +841,6 @@ class NetrunnerSummaryRecord {
     required this.backend,
     required this.model,
     required this.reasoning,
-    required this.writeScope,
     required this.attachedDocCount,
     required this.mcpCount,
     required this.proposalCount,
@@ -862,7 +861,6 @@ class NetrunnerSummaryRecord {
   final String backend;
   final String model;
   final String reasoning;
-  final List<String> writeScope;
   final int attachedDocCount;
   final int mcpCount;
   final int proposalCount;
@@ -884,7 +882,6 @@ class NetrunnerSummaryRecord {
       backend: _asString(json['backend']),
       model: _asString(json['model']),
       reasoning: _asString(json['reasoning']),
-      writeScope: _asStringList(json['write_scope']),
       attachedDocCount: _asInt(json['attached_doc_count']),
       mcpCount: _asInt(json['mcp_count']),
       proposalCount: _asInt(json['proposal_count']),
@@ -908,7 +905,6 @@ class SessionDetailRecord {
     required this.backend,
     required this.model,
     required this.reasoning,
-    required this.writeScope,
     required this.reportRaw,
     required this.structuredFinalReport,
     required this.attachedDocs,
@@ -933,7 +929,6 @@ class SessionDetailRecord {
   final String backend;
   final String model;
   final String reasoning;
-  final List<String> writeScope;
   final String reportRaw;
   final FinalReportRecord? structuredFinalReport;
   final List<AttachedDocRecord> attachedDocs;
@@ -959,7 +954,6 @@ class SessionDetailRecord {
       backend: _asString(json['backend']),
       model: _asString(json['model']),
       reasoning: _asString(json['reasoning']),
-      writeScope: _asStringList(json['write_scope']),
       reportRaw: _asString(json['report_raw']),
       structuredFinalReport:
           json['structured_final_report'] is Map<String, dynamic>

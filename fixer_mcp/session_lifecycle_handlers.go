@@ -125,9 +125,8 @@ func CheckoutTask(ctx context.Context, req *mcp.CallToolRequest, input CheckoutT
 }
 
 type CreateTaskInput struct {
-	TaskDescription    string   `json:"task_description" jsonschema:"Description of the task to be created"`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional declared project-relative write scope for the session. Recorded as informational context only and never enforced."`
-	EpicDocId          int      `json:"epic_doc_id,omitempty" jsonschema:"Optional project-scoped epic documentation ID to link to the session."`
+	TaskDescription string `json:"task_description" jsonschema:"Description of the task to be created"`
+	EpicDocId       int    `json:"epic_doc_id,omitempty" jsonschema:"Optional project-scoped epic documentation ID to link to the session."`
 }
 
 type CreateTaskOutput struct {
@@ -162,10 +161,6 @@ func CreateTask(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskI
 		return &mcp.CallToolResult{IsError: true}, CreateTaskOutput{}, fmt.Errorf("access denied: requires Fixer role")
 	}
 
-	declaredWriteScope, err := encodeDeclaredWriteScope(input.DeclaredWriteScope)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, CreateTaskOutput{}, err
-	}
 	epicDocID, err := resolveProjectScopedEpicDocID(input.EpicDocId, authorizedProjectId)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, CreateTaskOutput{}, err
@@ -177,10 +172,9 @@ func CreateTask(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskI
 	var res sql.Result
 	if hasEpicDocColumn {
 		res, err = db.Exec(
-			"INSERT INTO session (project_id, task_description, status, declared_write_scope, epic_doc_id, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
+			"INSERT INTO session (project_id, task_description, status, epic_doc_id, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
 			authorizedProjectId,
 			input.TaskDescription,
-			declaredWriteScope,
 			nullableEpicDocID(epicDocID),
 			defaultCliBackend,
 			defaultCliModel,
@@ -188,10 +182,9 @@ func CreateTask(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskI
 		)
 	} else {
 		res, err = db.Exec(
-			"INSERT INTO session (project_id, task_description, status, declared_write_scope, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+			"INSERT INTO session (project_id, task_description, status, cli_backend, cli_model, cli_reasoning) VALUES (?, ?, 'pending', ?, ?, ?)",
 			authorizedProjectId,
 			input.TaskDescription,
-			declaredWriteScope,
 			defaultCliBackend,
 			defaultCliModel,
 			defaultCliReasoning,
@@ -766,9 +759,8 @@ func SetSessionStatus(ctx context.Context, req *mcp.CallToolRequest, input SetSe
 }
 
 type ForkRepairSessionFromInput struct {
-	SessionId          int      `json:"session_id" jsonschema:"The project-scoped session ID to fork into a new repair session."`
-	Reason             string   `json:"reason,omitempty" jsonschema:"Optional concise provenance note explaining why the repair fork is being created."`
-	DeclaredWriteScope []string `json:"declared_write_scope,omitempty" jsonschema:"Optional replacement declared write scope. Defaults to the source session scope."`
+	SessionId int    `json:"session_id" jsonschema:"The project-scoped session ID to fork into a new repair session."`
+	Reason    string `json:"reason,omitempty" jsonschema:"Optional concise provenance note explaining why the repair fork is being created."`
 }
 
 type ForkRepairSessionFromOutput struct {
@@ -791,31 +783,18 @@ func ForkRepairSessionFrom(ctx context.Context, req *mcp.CallToolRequest, input 
 	}
 
 	var taskDescription string
-	var sourceWriteScope string
 	err = db.QueryRow(
-		`SELECT task_description, COALESCE(declared_write_scope, '')
+		`SELECT task_description
 		 FROM session
 		 WHERE id = ? AND project_id = ?`,
 		sourceSessionID,
 		authorizedProjectId,
-	).Scan(&taskDescription, &sourceWriteScope)
+	).Scan(&taskDescription)
 	if err == sql.ErrNoRows {
 		return &mcp.CallToolResult{IsError: true}, ForkRepairSessionFromOutput{}, fmt.Errorf("session not found in current project")
 	}
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, ForkRepairSessionFromOutput{}, fmt.Errorf("DB query error: %v", err)
-	}
-
-	writeScope := input.DeclaredWriteScope
-	if len(writeScope) == 0 {
-		writeScope, err = decodeDeclaredWriteScope(sourceWriteScope)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, ForkRepairSessionFromOutput{}, err
-		}
-	}
-	encodedWriteScope, err := encodeDeclaredWriteScope(writeScope)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, ForkRepairSessionFromOutput{}, err
 	}
 
 	provenanceLines := []string{taskDescription, fmt.Sprintf("Repair fork source session: %d.", input.SessionId)}
@@ -837,15 +816,13 @@ func ForkRepairSessionFrom(ctx context.Context, req *mcp.CallToolRequest, input 
 			project_id,
 			task_description,
 			status,
-			declared_write_scope,
 			repair_source_session_id,
 			cli_backend,
 			cli_model,
 			cli_reasoning
-		) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
 		authorizedProjectId,
 		newTaskDescription,
-		encodedWriteScope,
 		sourceSessionID,
 		defaultCliBackend,
 		defaultCliModel,
@@ -906,6 +883,27 @@ type CleanupClaimCheck struct {
 	Matches     bool   `json:"matches"`
 }
 
+// normalizeReportClaimPath keeps final-report cleanup claims as plain
+// project-relative paths: this is filesystem claim verification, never a
+// runtime write allowlist.
+func normalizeReportClaimPath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("cleanup claim paths must be non-empty project-relative paths")
+	}
+	if filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("cleanup claim paths must be project-relative paths: %q", raw)
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(trimmed))
+	if cleaned == "." {
+		return cleaned, nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("cleanup claim paths must stay within the project root: %q", raw)
+	}
+	return strings.TrimPrefix(cleaned, "./"), nil
+}
+
 type VerifySessionCleanupClaimsInput struct {
 	SessionId int `json:"session_id" jsonschema:"The project-scoped session ID whose cleanup claims should be checked against disk state."`
 }
@@ -955,7 +953,7 @@ func VerifySessionCleanupClaims(ctx context.Context, req *mcp.CallToolRequest, i
 	allMatched := true
 
 	checkPath := func(path string, expectation string) error {
-		normalized, err := normalizeWriteScopePath(path)
+		normalized, err := normalizeReportClaimPath(path)
 		if err != nil {
 			return err
 		}
@@ -1003,19 +1001,18 @@ type GetSessionInput struct {
 }
 
 type SessionDetails struct {
-	Id                    int      `json:"id"`
-	ProjectId             int      `json:"project_id"`
-	TaskDescription       string   `json:"task_description"`
-	Status                string   `json:"status"`
-	Report                string   `json:"report"`
-	CliBackend            string   `json:"cli_backend"`
-	CliModel              string   `json:"cli_model,omitempty"`
-	CliReasoning          string   `json:"cli_reasoning,omitempty"`
-	DeclaredWriteScope    []string `json:"declared_write_scope"`
-	EpicDocId             int      `json:"epic_doc_id,omitempty"`
-	RepairSourceSessionId int      `json:"repair_source_session_id,omitempty"`
-	ReworkCount           int      `json:"rework_count"`
-	ForcedStopCount       int      `json:"forced_stop_count"`
+	Id                    int    `json:"id"`
+	ProjectId             int    `json:"project_id"`
+	TaskDescription       string `json:"task_description"`
+	Status                string `json:"status"`
+	Report                string `json:"report"`
+	CliBackend            string `json:"cli_backend"`
+	CliModel              string `json:"cli_model,omitempty"`
+	CliReasoning          string `json:"cli_reasoning,omitempty"`
+	EpicDocId             int    `json:"epic_doc_id,omitempty"`
+	RepairSourceSessionId int    `json:"repair_source_session_id,omitempty"`
+	ReworkCount           int    `json:"rework_count"`
+	ForcedStopCount       int    `json:"forced_stop_count"`
 }
 
 type GetSessionOutput struct {
@@ -1040,7 +1037,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 	}
 
 	var session SessionDetails
-	var declaredWriteScope string
 	epicDocColumn := ""
 	scanArgs := []any{
 		&session.Id,
@@ -1051,7 +1047,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 		&session.CliBackend,
 		&session.CliModel,
 		&session.CliReasoning,
-		&declaredWriteScope,
 	}
 	if dbTableHasColumn("session", "epic_doc_id") {
 		epicDocColumn = "COALESCE(epic_doc_id, 0),"
@@ -1071,7 +1066,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 		        COALESCE(NULLIF(TRIM(cli_backend), ''), ?),
 		        COALESCE(cli_model, ''),
 		        COALESCE(cli_reasoning, ''),
-		        COALESCE(declared_write_scope, ''),
 		        `+epicDocColumn+`
 		        COALESCE(repair_source_session_id, 0),
 		        COALESCE(rework_count, 0),
@@ -1086,10 +1080,6 @@ func GetSession(ctx context.Context, req *mcp.CallToolRequest, input GetSessionI
 	}
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, GetSessionOutput{}, fmt.Errorf("DB query error: %v", err)
-	}
-	session.DeclaredWriteScope, err = decodeDeclaredWriteScope(declaredWriteScope)
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, GetSessionOutput{}, fmt.Errorf("DB decode error: %v", err)
 	}
 
 	if !canAccessSession(session.ProjectId) {

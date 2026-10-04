@@ -96,11 +96,12 @@ func TestRuntimeHelperClustersLiveOutsideMain(t *testing.T) {
 			},
 		},
 		{
-			file: "write_scope_helpers.go",
+			file: "scope_retirement_migration.go",
 			symbols: []string{
-				"func normalizeWriteScopePath(",
-				"func normalizeDeclaredWriteScope(",
-				"func writeScopesOverlap(",
+				"func migrateDeclaredWriteScopeRetirement(",
+				"func archiveAndDropScopeColumn(",
+				"func archiveAndDropHandsInstructionScopeColumn(",
+				"func archiveAndDropScopeLeaseTable(",
 			},
 		},
 		{

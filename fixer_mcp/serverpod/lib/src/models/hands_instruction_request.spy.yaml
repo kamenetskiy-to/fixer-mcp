@@ -3,6 +3,5 @@ immutable: true
 fields:
   projectId: int
   instructionText: String
-  declaredWriteScope: List<String>
   requestedLane: String
   idempotencyKey: String

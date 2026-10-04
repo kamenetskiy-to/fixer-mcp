@@ -102,7 +102,6 @@ class HandsTab extends StatefulWidget {
 class _HandsTabState extends State<HandsTab> {
   final _messageController = TextEditingController();
   final _instructionController = TextEditingController();
-  final _scopeController = TextEditingController();
   bool _submitting = false;
   bool _laneChanging = false;
   String _instructionAction = '';
@@ -135,7 +134,6 @@ class _HandsTabState extends State<HandsTab> {
     _turnPollTimer?.cancel();
     _messageController.dispose();
     _instructionController.dispose();
-    _scopeController.dispose();
     super.dispose();
   }
 
@@ -271,7 +269,6 @@ class _HandsTabState extends State<HandsTab> {
                 const Divider(height: 1),
                 _HandsComposer(
                   instructionController: _instructionController,
-                  scopeController: _scopeController,
                   selectedLane: hands.selectedLane,
                   lanes: lanes,
                   submitting: _submitting,
@@ -420,50 +417,16 @@ class _HandsTabState extends State<HandsTab> {
     final l10n = AppLocalizations.of(context);
     final instruction = _instructionController.text.trim();
     if (instruction.isEmpty || _submitting) return;
-    final scope = _scopeController.text
-        .split('\n')
-        .map((path) => path.trim())
-        .where((path) => path.isNotEmpty)
-        .toList(growable: false);
-    final invalidPath = scope.where(
-      (path) =>
-          path.startsWith('/') ||
-          path == '..' ||
-          path.startsWith('../') ||
-          path.contains('/../'),
-    );
-    if (invalidPath.isNotEmpty) {
-      _showNotice(
-        l10n.isRussian
-            ? 'Область записи должна содержать только пути внутри проекта.'
-            : 'Write scope must contain project-relative paths only.',
-      );
-      return;
-    }
-    if (scope.isNotEmpty) {
-      final confirmed = await _confirm(
-        title: l10n.governedAction,
-        message: l10n.isRussian
-            ? 'Это поручение запрашивает запись в репозиторий. '
-                  'Продолжить с обязательной проверкой результата?'
-            : 'This instruction requests repository writes. '
-                  'Continue with governed result review?',
-        confirmLabel: l10n.continueAction,
-      );
-      if (!confirmed || !mounted) return;
-    }
     setState(() => _submitting = true);
     try {
       await widget.store.submitHandsInstruction(
         instructionText: instruction,
-        declaredWriteScope: scope,
         requestedLane: selection.provider,
         requestedModel: selection.model,
         requestedReasoning: selection.reasoning,
       );
       if (!mounted) return;
       _instructionController.clear();
-      _scopeController.clear();
       _showNotice(l10n.handsSubmitted);
     } on Object catch (error) {
       _showNotice(error.toString());
@@ -759,13 +722,6 @@ class _HandsActorHeader extends StatelessWidget {
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (hands.activeLeaseSummary.isNotEmpty)
-                    Text(
-                      '${l10n.handsLease}: ${hands.activeLeaseSummary}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
                 ],
               ),
             ),
@@ -807,7 +763,7 @@ class _HandsActorHeader extends StatelessWidget {
   String _stateLabel(AppLocalizations l10n, String state) {
     return switch (state) {
       'running' => l10n.handsRunning,
-      'queued' || 'waiting_for_lease' => l10n.handsBusy,
+      'queued' => l10n.handsBusy,
       'awaiting_review' => l10n.handsAwaitingReview,
       'failed' || 'error' || 'abandoned' => l10n.handsError,
       _ => l10n.handsIdle,
@@ -942,14 +898,6 @@ class _HandsInstructionDetail extends StatelessWidget {
         ),
         const SizedBox(height: 14),
         SelectableText(value.instructionText),
-        if (value.declaredWriteScope.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Text(
-            l10n.handsWriteScope,
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          SelectableText(value.declaredWriteScope.join('\n')),
-        ],
         if (value.stateReasonText.isNotEmpty) ...[
           const SizedBox(height: 12),
           _DetailCallout(
@@ -1055,7 +1003,6 @@ class _HandsInstructionDetail extends StatelessWidget {
 class _HandsComposer extends StatefulWidget {
   const _HandsComposer({
     required this.instructionController,
-    required this.scopeController,
     required this.selectedLane,
     required this.lanes,
     required this.submitting,
@@ -1065,7 +1012,6 @@ class _HandsComposer extends StatefulWidget {
   });
 
   final TextEditingController instructionController;
-  final TextEditingController scopeController;
   final String selectedLane;
   final List<HandsProviderLane> lanes;
   final bool submitting;
@@ -1203,21 +1149,6 @@ class _HandsComposerState extends State<_HandsComposer> {
                       });
                     },
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('hands-write-scope'),
-                      controller: widget.scopeController,
-                      minLines: 1,
-                      maxLines: 3,
-                      style: const TextStyle(fontFamily: 'monospace'),
-                      decoration: InputDecoration(
-                        labelText: l10n.handsWriteScope,
-                        hintText: l10n.handsWriteScopeHint,
-                        isDense: true,
-                      ),
-                    ),
-                  ),
                 ],
               ),
           ],
@@ -1353,7 +1284,6 @@ IconData _instructionIcon(String state) {
     'running' || 'starting' => Icons.play_circle_outline,
     'awaiting_review' => Icons.rate_review_outlined,
     'failed' || 'abandoned' || 'unsupported' => Icons.error_outline,
-    'waiting_for_lease' => Icons.lock_clock_outlined,
     _ => Icons.schedule_outlined,
   };
 }

@@ -108,6 +108,106 @@ void main() {
     expect(find.text('New droid Fixer'), findsOneWidget);
   });
 
+  test('Antigravity menu advertises Claude 5.5 with explicit efforts only', () {
+    final antigravity = supportedFixerProvidersByBackend['antigravity']!;
+
+    expect(antigravity.models, [
+      'Gemini 3.6 Flash',
+      'Gemini 3.1 Pro',
+      'Claude Opus 5.5',
+      'Claude Sonnet 5.5',
+    ]);
+    expect(antigravity.defaultModel, 'Gemini 3.6 Flash');
+    expect(
+      antigravity.reasoningOptions,
+      containsAll(['low', 'medium', 'high']),
+    );
+    expect(antigravity.reasoningOptions, isNot(contains('thinking')));
+    expect(antigravity.models.contains(antigravity.defaultModel), isTrue);
+    expect(
+      antigravity.reasoningOptions.contains(antigravity.defaultReasoning),
+      isTrue,
+    );
+    for (final provider in supportedFixerProviders) {
+      expect(
+        provider.models.where(
+          (model) => model.contains('4.6') || model.contains('Thinking'),
+        ),
+        isEmpty,
+        reason: '${provider.backend} still advertises a retired Claude 4.6 id',
+      );
+    }
+  });
+
+  for (final (model, effort) in const [
+    ('Claude Opus 5.5', 'high'),
+    ('Claude Sonnet 5.5', 'low'),
+  ]) {
+    testWidgets('creates an Antigravity Fixer chat on $model $effort', (
+      tester,
+    ) async {
+      final service = _FakeFixerChatService([]);
+      await tester.pumpWidget(_testApp(service));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('create-fixer-chat')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('fixer-provider-select')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Google Antigravity CLI').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(model).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(effort).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('launch-fixer-chat')));
+      await tester.pumpAndSettle();
+
+      final request = service.launchedRequest!;
+      expect(request.toJson(), {
+        'backend': 'antigravity',
+        'model': model,
+        'reasoning': effort,
+        'cwd': cwd,
+      });
+      expect(find.text('New antigravity Fixer'), findsOneWidget);
+    });
+  }
+
+  test('persisted Antigravity Claude 5.5 thread metadata round-trips', () {
+    final record = FixerThreadRecord.fromJson({
+      'external_id': 'agy-55',
+      'headline': 'Claude 5.5 Fixer',
+      'status': 'history',
+      'backend': 'antigravity',
+      'model': 'Claude Opus 5.5',
+      'reasoning': 'medium',
+      'cwd': cwd,
+      'last_activity_at': '2026-10-04T08:00:00Z',
+      'transcript_available': true,
+    });
+    final provider = supportedFixerProvidersByBackend[record.backend]!;
+
+    expect(record.model, 'Claude Opus 5.5');
+    expect(record.reasoning, 'medium');
+    expect(provider.models, contains(record.model));
+    expect(provider.reasoningOptions, contains(record.reasoning));
+    expect(
+      FixerChatLaunchRequest(
+        backend: record.backend,
+        model: record.model,
+        reasoning: record.reasoning,
+        cwd: record.cwd,
+      ).toJson(),
+      {
+        'backend': 'antigravity',
+        'model': 'Claude Opus 5.5',
+        'reasoning': 'medium',
+        'cwd': cwd,
+      },
+    );
+  });
+
   test('parses repository thread metadata without dropping cwd', () {
     final record = FixerThreadRecord.fromJson({
       'external_id': 'claude-1',

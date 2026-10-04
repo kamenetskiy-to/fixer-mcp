@@ -10,8 +10,8 @@
 // ignore_for_file: invalid_use_of_internal_member
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
+
 import 'package:serverpod/serverpod.dart' as _i1;
-import 'package:fixer_dashboard_server/src/generated/protocol.dart' as _i2;
 
 /// Durable mailbox item owned by the permanent Hands actor.
 @_i1.immutable
@@ -21,7 +21,6 @@ abstract class WorkroomHandsInstruction
     required this.instructionId,
     required this.ordinal,
     required this.instructionText,
-    required this.declaredWriteScope,
     required this.requestedLane,
     required this.riskClass,
     required this.reviewPolicy,
@@ -38,7 +37,6 @@ abstract class WorkroomHandsInstruction
     required String instructionId,
     required int ordinal,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String riskClass,
     required String reviewPolicy,
@@ -58,9 +56,6 @@ abstract class WorkroomHandsInstruction
       instructionId: jsonSerialization['id'] as String,
       ordinal: jsonSerialization['ordinal'] as int,
       instructionText: jsonSerialization['instruction_text'] as String,
-      declaredWriteScope: _i2.Protocol().deserialize<List<String>>(
-        jsonSerialization['declared_write_scope'],
-      ),
       requestedLane: jsonSerialization['requested_lane'] as String,
       riskClass: jsonSerialization['risk_class'] as String,
       reviewPolicy: jsonSerialization['review_policy'] as String,
@@ -79,8 +74,6 @@ abstract class WorkroomHandsInstruction
   final int ordinal;
 
   final String instructionText;
-
-  final List<String> declaredWriteScope;
 
   final String requestedLane;
 
@@ -109,7 +102,6 @@ abstract class WorkroomHandsInstruction
     String? instructionId,
     int? ordinal,
     String? instructionText,
-    List<String>? declaredWriteScope,
     String? requestedLane,
     String? riskClass,
     String? reviewPolicy,
@@ -144,10 +136,6 @@ abstract class WorkroomHandsInstruction
                   instructionText,
                 ) ||
                 other.instructionText == instructionText) &&
-            const _i1.DeepCollectionEquality().equals(
-              other.declaredWriteScope,
-              declaredWriteScope,
-            ) &&
             (identical(
                   other.requestedLane,
                   requestedLane,
@@ -207,7 +195,6 @@ abstract class WorkroomHandsInstruction
       instructionId,
       ordinal,
       instructionText,
-      const _i1.DeepCollectionEquality().hash(declaredWriteScope),
       requestedLane,
       riskClass,
       reviewPolicy,
@@ -228,7 +215,6 @@ abstract class WorkroomHandsInstruction
       'id': instructionId,
       'ordinal': ordinal,
       'instruction_text': instructionText,
-      'declared_write_scope': declaredWriteScope.toJson(),
       'requested_lane': requestedLane,
       'risk_class': riskClass,
       'review_policy': reviewPolicy,
@@ -249,7 +235,6 @@ abstract class WorkroomHandsInstruction
       'id': instructionId,
       'ordinal': ordinal,
       'instruction_text': instructionText,
-      'declared_write_scope': declaredWriteScope.toJson(),
       'requested_lane': requestedLane,
       'risk_class': riskClass,
       'review_policy': reviewPolicy,
@@ -276,7 +261,6 @@ class _WorkroomHandsInstructionImpl extends WorkroomHandsInstruction {
     required String instructionId,
     required int ordinal,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String riskClass,
     required String reviewPolicy,
@@ -291,7 +275,6 @@ class _WorkroomHandsInstructionImpl extends WorkroomHandsInstruction {
          instructionId: instructionId,
          ordinal: ordinal,
          instructionText: instructionText,
-         declaredWriteScope: declaredWriteScope,
          requestedLane: requestedLane,
          riskClass: riskClass,
          reviewPolicy: reviewPolicy,
@@ -312,7 +295,6 @@ class _WorkroomHandsInstructionImpl extends WorkroomHandsInstruction {
     String? instructionId,
     int? ordinal,
     String? instructionText,
-    List<String>? declaredWriteScope,
     String? requestedLane,
     String? riskClass,
     String? reviewPolicy,
@@ -328,9 +310,6 @@ class _WorkroomHandsInstructionImpl extends WorkroomHandsInstruction {
       instructionId: instructionId ?? this.instructionId,
       ordinal: ordinal ?? this.ordinal,
       instructionText: instructionText ?? this.instructionText,
-      declaredWriteScope:
-          declaredWriteScope ??
-          this.declaredWriteScope.map((e0) => e0).toList(),
       requestedLane: requestedLane ?? this.requestedLane,
       riskClass: riskClass ?? this.riskClass,
       reviewPolicy: reviewPolicy ?? this.reviewPolicy,

@@ -76,7 +76,6 @@ void main() {
     final handsReceipt = await repository.submitHandsInstruction(
       projectId: 1,
       instructionText: 'Audit reconnect.',
-      declaredWriteScope: const ['fixer_mcp/dashboard_app'],
       requestedLane: 'codex',
       requestedModel: 'gpt-5.5',
       requestedReasoning: 'high',
@@ -95,9 +94,11 @@ void main() {
     expect(requests[1].body['surfaceType'], 'wave.list');
     expect(requests[1].body['surfaceVersion'], 1);
     expect(jsonDecode(requests[1].body['argumentsJson'] as String), isEmpty);
-    expect((requests[2].body['request'] as Map)['declared_write_scope'], [
-      'fixer_mcp/dashboard_app',
-    ]);
+    final handsRequest = requests[2].body['request'] as Map;
+    expect(handsRequest.keys, isNot(contains('declared_write_scope')));
+    expect(handsRequest.keys, isNot(contains('declaredWriteScope')));
+    expect(handsRequest.keys, isNot(contains('write_scope')));
+    expect(handsRequest['instruction_text'], 'Audit reconnect.');
     expect((requests[2].body['request'] as Map)['requested_model'], 'gpt-5.5');
     expect((requests[2].body['request'] as Map)['requested_reasoning'], 'high');
     expect(requests.map((request) => request.authorization).toSet(), {

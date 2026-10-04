@@ -74,10 +74,7 @@ func shouldRecommendRepairFork(reworkCount, forcedStopCount, repairSourceSession
 }
 
 func fetchSessionLifecycleState(sessionID int, projectID int) (sessionLifecycleState, error) {
-	var (
-		state      sessionLifecycleState
-		writeScope string
-	)
+	var state sessionLifecycleState
 	err := db.QueryRow(
 		`SELECT id,
 		        status,
@@ -85,7 +82,6 @@ func fetchSessionLifecycleState(sessionID int, projectID int) (sessionLifecycleS
 		        COALESCE(NULLIF(TRIM(cli_backend), ''), ?),
 		        COALESCE(cli_model, ''),
 		        COALESCE(cli_reasoning, ''),
-		        COALESCE(declared_write_scope, ''),
 		        COALESCE(repair_source_session_id, 0),
 		        COALESCE(rework_count, 0),
 		        COALESCE(forced_stop_count, 0)
@@ -101,15 +97,10 @@ func fetchSessionLifecycleState(sessionID int, projectID int) (sessionLifecycleS
 		&state.CliBackend,
 		&state.CliModel,
 		&state.CliReasoning,
-		&writeScope,
 		&state.RepairSourceSessionID,
 		&state.ReworkCount,
 		&state.ForcedStopCount,
 	)
-	if err != nil {
-		return sessionLifecycleState{}, err
-	}
-	state.DeclaredWriteScope, err = decodeDeclaredWriteScope(writeScope)
 	if err != nil {
 		return sessionLifecycleState{}, err
 	}

@@ -34,7 +34,6 @@ func setupWakeFixerAutonomousTestDB(t *testing.T, projectCWD string) *sql.DB {
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
 				cli_model TEXT NOT NULL DEFAULT '',
 				cli_reasoning TEXT NOT NULL DEFAULT '',
-				declared_write_scope TEXT NOT NULL DEFAULT '["."]',
 				parallel_wave_id TEXT NOT NULL DEFAULT '',
 				repair_source_session_id INTEGER,
 				rework_count INTEGER NOT NULL DEFAULT 0,

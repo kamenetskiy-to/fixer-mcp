@@ -84,9 +84,9 @@ explicit envelope.
 4. Load attached docs only with `get_attached_project_docs`.
 5. Read assigned MCP servers when relevant.
 6. If execution is not explicitly approved, ask for `Go`.
-7. Implement the task within scope. Log meaningful milestones with `log_type="progress"`.
+7. Implement the assigned task. Log meaningful milestones with `log_type="progress"`.
 8. Create, update, or remove relevant automated tests.
-9. Fix older broken tests in scope when they block delivery.
+9. Fix older broken relevant tests when they block delivery.
 10. If blocked, log `blocked` when you cannot proceed, or `workaround` when you are actively trying a bypass.
 11. Stop after implementation/checks and report status unless finalization has
     been explicitly requested.
@@ -132,6 +132,12 @@ For routine out-of-band status updates, use `fixer_mcp.send_operator_telegram_no
   perform governed review only when the Architect explicitly requests that
   operation. They never launch or resume a Hands client/process.
 - In locked Netrunner mode, do not try to use Fixer review, task creation, or doc-admin tools.
+- Never use `pkill`, `killall`, or process-name matching for cleanup. Stop only an
+  exact PID recorded when you created that subprocess; otherwise leave it to
+  the Fixer and report the PID. Never stop another worker's MCP client.
+- Do not dump environment variables, authentication files, or process argument
+  lists. Diagnostics must select non-secret fields; redact credentials before
+  writing logs, reports, or tool output.
 - The public Project Hands path never asks the operator to select a session,
   model, or reasoning. Those are durable control-plane/lane concerns. MCP
   servers and attached project docs are picked by the Architect in the TUI at

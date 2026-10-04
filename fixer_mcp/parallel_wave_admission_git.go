@@ -56,36 +56,14 @@ const (
 )
 
 var parallelWaveBranchPattern = regexp.MustCompile(`^fixer/wave-[1-9][0-9]*/session-[1-9][0-9]*$`)
-var parallelWaveFoundationWriteScopePaths = []string{
-	"fixer_mcp/main.go",
-	"client_wires/fixer_wire.py",
-	"client_wires/fixer_autonomous.py",
-	"AGENTS.md",
-	".codex",
-	".mcp.json",
-	"mcp_config.json",
-	"fixer_mcp/mcp_config.json",
-	"fixer_mcp/fixer.db",
-	"fixer_mcp/fixer.db-shm",
-	"fixer_mcp/fixer.db-wal",
-	"fixer_mcp/fixer_genui.db",
-}
-
-var parallelWaveFoundationWriteScopePrefixes = []string{
-	".codex/",
-	"skills/",
-	".agents/plugins/",
-}
 
 type parallelWaveAdmissionWorker struct {
-	SessionID          int
-	DeclaredWriteScope []string
+	SessionID int
 }
 
 type parallelWaveSessionCandidate struct {
-	LocalSessionID     int
-	GlobalSessionID    int
-	DeclaredWriteScope []string
+	LocalSessionID  int
+	GlobalSessionID int
 }
 
 type gitCommandSpec struct {
@@ -93,56 +71,13 @@ type gitCommandSpec struct {
 	Args []string
 }
 
-func waveDeclaredWriteScopeFoundationMatch(entry string) (string, bool) {
-	normalized, err := normalizeWriteScopePath(entry)
-	if err != nil {
-		return "", false
-	}
-	for _, forbidden := range parallelWaveFoundationWriteScopePaths {
-		if writeScopePathsOverlap(normalized, forbidden) {
-			return forbidden, true
-		}
-	}
-	for _, forbiddenPrefix := range parallelWaveFoundationWriteScopePrefixes {
-		forbiddenRoot := strings.TrimSuffix(forbiddenPrefix, "/")
-		if normalized == forbiddenRoot || strings.HasPrefix(normalized, forbiddenPrefix) {
-			return forbiddenRoot, true
-		}
-	}
-	base := filepath.Base(normalized)
-	if strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") {
-		return base, true
-	}
-	return "", false
-}
-
-func containsParallelWaveFoundationWriteScope(scope []string) (string, bool) {
-	for _, entry := range scope {
-		if matched, ok := waveDeclaredWriteScopeFoundationMatch(entry); ok {
-			return matched, true
-		}
-	}
-	return "", false
-}
-
-// normalizeParallelWaveDeclaredWriteScope normalizes declared write scope
-// entries for storage and prompts. The declared_write_scope fence is removed:
-// admission never rejects a scope for being missing, broad, overlapping, or
-// outside any predeclared path list. Only path syntax (empty, absolute, or
-// project-root-escaping entries) is still normalized/validated here.
-func normalizeParallelWaveDeclaredWriteScope(raw []string) ([]string, error) {
-	return normalizeDeclaredWriteScope(raw)
-}
-
 func normalizeParallelWaveAdmissionWorkers(workers []parallelWaveAdmissionWorker) ([]parallelWaveAdmissionWorker, error) {
 	return normalizeParallelWaveAdmissionWorkersWithDependencies(workers, nil)
 }
 
 // normalizeParallelWaveAdmissionWorkersWithDependencies validates the session
-// ids that may run in a wave. Declared write scopes are informational only:
-// they never gate admission, so missing, broad, overlapping, or out-of-list
-// scopes are accepted unchanged. The dependencies parameter is retained for
-// caller compatibility and is no longer consulted for scope decisions.
+// ids that may run in a wave. The dependencies parameter is retained for
+// caller compatibility and is not consulted here.
 func normalizeParallelWaveAdmissionWorkersWithDependencies(workers []parallelWaveAdmissionWorker, dependencies []WaveDependency) ([]parallelWaveAdmissionWorker, error) {
 	if len(workers) < 1 {
 		return nil, fmt.Errorf("parallel wave admission requires at least one session")
@@ -158,13 +93,8 @@ func normalizeParallelWaveAdmissionWorkersWithDependencies(workers []parallelWav
 		}
 		seenSessions[worker.SessionID] = struct{}{}
 
-		normalizedScope, err := normalizeParallelWaveDeclaredWriteScope(worker.DeclaredWriteScope)
-		if err != nil {
-			return nil, fmt.Errorf("session %d: %w", worker.SessionID, err)
-		}
 		normalizedWorkers = append(normalizedWorkers, parallelWaveAdmissionWorker{
-			SessionID:          worker.SessionID,
-			DeclaredWriteScope: normalizedScope,
+			SessionID: worker.SessionID,
 		})
 	}
 	return normalizedWorkers, nil
@@ -487,17 +417,6 @@ func verifyParallelWaveGitBase(projectCWD string, baseRef string) (baseSHA strin
 	}
 	baseBranch, _ = runGitCommandSpec(branchSpec)
 	return baseSHA, baseBranch, nil
-}
-
-func declaredWriteScopeContainsPath(scope []string, path string) bool {
-	normalizedPath := filepath.ToSlash(filepath.Clean(path))
-	for _, scopeEntry := range scope {
-		normalizedScopeEntry := filepath.ToSlash(filepath.Clean(scopeEntry))
-		if writeScopePathsOverlap(normalizedPath, normalizedScopeEntry) {
-			return true
-		}
-	}
-	return false
 }
 
 func canonicalizePath(p string) string {

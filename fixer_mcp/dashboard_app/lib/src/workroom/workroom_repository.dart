@@ -44,7 +44,6 @@ abstract class ProjectWorkroomRepository {
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,
@@ -222,7 +221,6 @@ class ServerpodProjectWorkroomRepository implements ProjectWorkroomRepository {
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,
@@ -232,7 +230,6 @@ class ServerpodProjectWorkroomRepository implements ProjectWorkroomRepository {
       'request': {
         'project_id': projectId,
         'instruction_text': instructionText,
-        'declared_write_scope': declaredWriteScope,
         'requested_lane': requestedLane,
         'requested_model': requestedModel,
         'requested_reasoning': requestedReasoning,

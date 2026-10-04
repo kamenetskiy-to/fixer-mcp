@@ -7,62 +7,31 @@ import (
 	"testing"
 )
 
-func TestNormalizeParallelWaveAdmissionWorkersAllowsOverlappingScopes(t *testing.T) {
+func TestNormalizeParallelWaveAdmissionWorkersRequiresDistinctSessionIDs(t *testing.T) {
 	workers := []parallelWaveAdmissionWorker{
-		{SessionID: 1, DeclaredWriteScope: []string{"docs"}},
-		{SessionID: 2, DeclaredWriteScope: []string{"docs/generated"}},
+		{SessionID: 1},
+		{SessionID: 2},
 	}
 
 	normalized, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, nil)
 	if err != nil {
-		t.Fatalf("expected unrelated overlapping scopes to be admitted, got %v", err)
+		t.Fatalf("expected workers to be admitted without any scope declaration, got %v", err)
 	}
-	if len(normalized) != len(workers) || normalized[0].DeclaredWriteScope[0] != "docs" || normalized[1].DeclaredWriteScope[0] != "docs/generated" {
+	if len(normalized) != len(workers) || normalized[0].SessionID != 1 || normalized[1].SessionID != 2 {
 		t.Fatalf("unexpected normalized workers: %+v", normalized)
 	}
 
 	dependencies := []WaveDependency{{Child: 2, Parents: []int64{1}}}
 	if _, err := normalizeParallelWaveAdmissionWorkersWithDependencies(workers, dependencies); err != nil {
-		t.Fatalf("expected parent-child overlap to be allowed: %v", err)
+		t.Fatalf("expected parent-child workers to be admitted: %v", err)
 	}
 
-	transitiveWorkers := []parallelWaveAdmissionWorker{
-		{SessionID: 1, DeclaredWriteScope: []string{"docs"}},
-		{SessionID: 3, DeclaredWriteScope: []string{"docs/generated"}},
+	duplicateWorkers := []parallelWaveAdmissionWorker{
+		{SessionID: 1},
+		{SessionID: 1},
 	}
-	transitiveDependencies := []WaveDependency{
-		{Child: 2, Parents: []int64{1}},
-		{Child: 3, Parents: []int64{2}},
-	}
-	if _, err := normalizeParallelWaveAdmissionWorkersWithDependencies(transitiveWorkers, transitiveDependencies); err != nil {
-		t.Fatalf("expected transitive parent-child overlap to be allowed: %v", err)
-	}
-}
-
-func TestNormalizeParallelWaveDeclaredWriteScopeAllowsFormerlyFencedScopes(t *testing.T) {
-	for _, scope := range [][]string{
-		{"fixer_mcp/main.go"},
-		{"client_wires/fixer_autonomous.py"},
-		{".codex/netrunner_worktrees"},
-		{"artifacts/runtime.db"},
-		{"."},
-		{"docs/a", "docs/a/subtree"},
-	} {
-		if _, err := normalizeParallelWaveDeclaredWriteScope(scope); err != nil {
-			t.Fatalf("expected formerly fenced scope %v to be admitted, got %v", scope, err)
-		}
-	}
-
-	if _, err := normalizeParallelWaveDeclaredWriteScope([]string{"docs/runtime.dbx"}); err != nil {
-		t.Fatalf("unexpected rejection for non-database suffix: %v", err)
-	}
-
-	if _, err := normalizeParallelWaveDeclaredWriteScope(nil); err != nil {
-		t.Fatalf("missing scope must be admitted: %v", err)
-	}
-
-	if _, err := normalizeParallelWaveDeclaredWriteScope([]string{"/absolute/path"}); err == nil {
-		t.Fatal("expected path-syntax validation to still reject absolute entries")
+	if _, err := normalizeParallelWaveAdmissionWorkers(duplicateWorkers); err == nil {
+		t.Fatal("expected duplicate session ids to be rejected")
 	}
 }
 

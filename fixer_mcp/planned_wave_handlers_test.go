@@ -44,7 +44,6 @@ func setupPlannedWaveHandlerTest(t *testing.T, projectCWD string) *sql.DB {
 			task_key TEXT NOT NULL,
 			position INTEGER NOT NULL,
 			task_description TEXT NOT NULL,
-			declared_write_scope TEXT NOT NULL,
 			dependencies TEXT NOT NULL DEFAULT '[]',
 			cli_backend TEXT NOT NULL DEFAULT 'codex',
 			cli_model TEXT NOT NULL DEFAULT '',
@@ -90,23 +89,21 @@ func testPlannedWaveInput() CreatePlannedNetrunnerWaveInput {
 		Reason:         "future checklist work",
 		Tasks: []PlannedWaveTaskInput{
 			{
-				Key:                "backend",
-				TaskDescription:    "Implement the backend slice.",
-				DeclaredWriteScope: []string{"docs/planned/backend"},
-				Backend:            "codex",
-				Model:              "gpt-5.6-sol",
-				Reasoning:          "high",
-				McpServerNames:     []string{"sqlite"},
+				Key:             "backend",
+				TaskDescription: "Implement the backend slice.",
+				Backend:         "codex",
+				Model:           "gpt-5.6-sol",
+				Reasoning:       "high",
+				McpServerNames:  []string{"sqlite"},
 			},
 			{
-				Key:                "frontend",
-				TaskDescription:    "Implement the frontend slice.",
-				DeclaredWriteScope: []string{"docs/planned/frontend"},
-				DependsOn:          []string{"backend"},
-				Backend:            "codex",
-				Model:              "gpt-5.6-sol",
-				Reasoning:          "high",
-				McpServerNames:     []string{"sqlite"},
+				Key:             "frontend",
+				TaskDescription: "Implement the frontend slice.",
+				DependsOn:       []string{"backend"},
+				Backend:         "codex",
+				Model:           "gpt-5.6-sol",
+				Reasoning:       "high",
+				McpServerNames:  []string{"sqlite"},
 			},
 		},
 	}
@@ -127,7 +124,6 @@ func TestCreatePlannedNetrunnerWaveHasNoRuntimeSideEffectsAndIsIdempotent(t *tes
 	}
 	sessionsBefore := countRows("session")
 	wavesBefore := countRows("parallel_wave")
-	leasesBefore := countRows("parallel_wave_scope_lease")
 
 	callResult, created, err := CreatePlannedNetrunnerWave(context.Background(), nil, testPlannedWaveInput())
 	if err != nil || callResult != nil {
@@ -147,9 +143,6 @@ func TestCreatePlannedNetrunnerWaveHasNoRuntimeSideEffectsAndIsIdempotent(t *tes
 	}
 	if got := countRows("parallel_wave"); got != wavesBefore {
 		t.Fatalf("planned definition created a runtime wave: before=%d after=%d", wavesBefore, got)
-	}
-	if got := countRows("parallel_wave_scope_lease"); got != leasesBefore {
-		t.Fatalf("planned definition reserved write scopes: before=%d after=%d", leasesBefore, got)
 	}
 
 	_, replay, err := CreatePlannedNetrunnerWave(context.Background(), nil, testPlannedWaveInput())
@@ -216,13 +209,6 @@ func TestInitializePlannedNetrunnerWaveDelegatesToGovernedCreationAndIsIdempoten
 		if err := testDB.QueryRow("SELECT COUNT(*) FROM session_mcp_server WHERE session_id = ?", globalSessionID).Scan(&mcpCount); err != nil || mcpCount != 1 {
 			t.Fatalf("unexpected materialized MCP assignments for %s: count=%d err=%v", task.Key, mcpCount, err)
 		}
-	}
-	var leaseCount int
-	if err := testDB.QueryRow("SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND active = 1", initialized.WaveId).Scan(&leaseCount); err != nil {
-		t.Fatalf("count initialized leases: %v", err)
-	}
-	if leaseCount != 2 {
-		t.Fatalf("expected normal wave admission to reserve two scopes, got %d", leaseCount)
 	}
 	var dependencyCount int
 	if err := testDB.QueryRow("SELECT COUNT(*) FROM wave_worker_dependency WHERE wave_id = ?", initialized.WaveId).Scan(&dependencyCount); err != nil {

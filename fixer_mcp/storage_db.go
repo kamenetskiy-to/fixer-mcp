@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -96,7 +97,6 @@ func initDB() {
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
 				cli_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna',
 				cli_reasoning TEXT NOT NULL DEFAULT 'high',
-				declared_write_scope TEXT NOT NULL DEFAULT '["."]',
 				parallel_wave_id TEXT NOT NULL DEFAULT '',
 				epic_doc_id INTEGER,
 				repair_source_session_id INTEGER,
@@ -314,7 +314,6 @@ func initDB() {
 				project_id INTEGER NOT NULL,
 				session_id INTEGER NOT NULL,
 				status TEXT NOT NULL DEFAULT 'created',
-				declared_write_scope TEXT NOT NULL,
 				branch_name TEXT NOT NULL,
 				worktree_path TEXT NOT NULL,
 				base_sha TEXT NOT NULL,
@@ -346,19 +345,6 @@ func initDB() {
 			);
 			CREATE UNIQUE INDEX IF NOT EXISTS parallel_wave_worker_wave_session_unique_idx ON parallel_wave_worker(wave_id, session_id);
 			CREATE INDEX IF NOT EXISTS parallel_wave_worker_status_idx ON parallel_wave_worker(project_id, status);
-			CREATE TABLE IF NOT EXISTS parallel_wave_scope_lease (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				project_id INTEGER NOT NULL,
-				wave_id INTEGER NOT NULL,
-				scope_path TEXT NOT NULL,
-				active INTEGER NOT NULL DEFAULT 1,
-				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				released_at TEXT,
-				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
-				FOREIGN KEY(wave_id) REFERENCES parallel_wave(id) ON DELETE CASCADE ON UPDATE NO ACTION
-			);
-			CREATE UNIQUE INDEX IF NOT EXISTS parallel_wave_scope_lease_wave_scope_unique_idx ON parallel_wave_scope_lease(wave_id, scope_path);
-			CREATE INDEX IF NOT EXISTS parallel_wave_scope_lease_active_idx ON parallel_wave_scope_lease(project_id, active, wave_id);
 			CREATE TABLE IF NOT EXISTS wave_worker_dependency (
 				wave_id INTEGER NOT NULL,
 				parent_session_id INTEGER NOT NULL,
@@ -403,7 +389,6 @@ func initDB() {
 				task_key TEXT NOT NULL,
 				position INTEGER NOT NULL,
 				task_description TEXT NOT NULL,
-				declared_write_scope TEXT NOT NULL,
 				dependencies TEXT NOT NULL DEFAULT '[]',
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
 				cli_model TEXT NOT NULL DEFAULT '',
@@ -592,7 +577,6 @@ func initDB() {
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_backend TEXT NOT NULL DEFAULT 'codex';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_model TEXT NOT NULL DEFAULT 'gpt-5.6-luna';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN cli_reasoning TEXT NOT NULL DEFAULT 'high';`)
-	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN declared_write_scope TEXT NOT NULL DEFAULT '["."]';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN parallel_wave_id TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN epic_doc_id INTEGER REFERENCES project_doc(id) ON DELETE SET NULL ON UPDATE NO ACTION;`)
 	_, _ = db.Exec(`ALTER TABLE session ADD COLUMN repair_source_session_id INTEGER;`)
@@ -787,7 +771,6 @@ func initDB() {
 			project_id INTEGER NOT NULL,
 			session_id INTEGER NOT NULL,
 			status TEXT NOT NULL DEFAULT 'created',
-			declared_write_scope TEXT NOT NULL,
 			branch_name TEXT NOT NULL,
 			worktree_path TEXT NOT NULL,
 			base_sha TEXT NOT NULL,
@@ -820,21 +803,6 @@ func initDB() {
 	`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS parallel_wave_worker_wave_session_unique_idx ON parallel_wave_worker(wave_id, session_id);`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS parallel_wave_worker_status_idx ON parallel_wave_worker(project_id, status);`)
-	_, _ = db.Exec(`
-		CREATE TABLE IF NOT EXISTS parallel_wave_scope_lease (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			project_id INTEGER NOT NULL,
-			wave_id INTEGER NOT NULL,
-			scope_path TEXT NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			released_at TEXT,
-			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
-			FOREIGN KEY(wave_id) REFERENCES parallel_wave(id) ON DELETE CASCADE ON UPDATE NO ACTION
-		);
-	`)
-	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS parallel_wave_scope_lease_wave_scope_unique_idx ON parallel_wave_scope_lease(wave_id, scope_path);`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS parallel_wave_scope_lease_active_idx ON parallel_wave_scope_lease(project_id, active, wave_id);`)
 	_, _ = db.Exec(`
 			CREATE TABLE IF NOT EXISTS wave_worker_dependency (
 				wave_id INTEGER NOT NULL,
@@ -883,7 +851,6 @@ func initDB() {
 			task_key TEXT NOT NULL,
 			position INTEGER NOT NULL,
 			task_description TEXT NOT NULL,
-			declared_write_scope TEXT NOT NULL,
 			dependencies TEXT NOT NULL DEFAULT '[]',
 				cli_backend TEXT NOT NULL DEFAULT 'codex',
 			cli_model TEXT NOT NULL DEFAULT '',
@@ -1001,7 +968,6 @@ func initDB() {
 	_, _ = db.Exec(`UPDATE session SET cli_backend = 'codex' WHERE COALESCE(TRIM(cli_backend), '') = ''`)
 	_, _ = db.Exec(`UPDATE session SET cli_model = '' WHERE cli_model IS NULL`)
 	_, _ = db.Exec(`UPDATE session SET cli_reasoning = '' WHERE cli_reasoning IS NULL`)
-	_, _ = db.Exec(`UPDATE session SET declared_write_scope = ? WHERE COALESCE(TRIM(declared_write_scope), '') = ''`, defaultDeclaredWriteScope)
 	_, _ = db.Exec(`UPDATE session SET parallel_wave_id = '' WHERE parallel_wave_id IS NULL`)
 	_, _ = db.Exec(`UPDATE session SET rework_count = 0 WHERE rework_count IS NULL`)
 	_, _ = db.Exec(`UPDATE session SET forced_stop_count = 0 WHERE forced_stop_count IS NULL`)
@@ -1094,6 +1060,29 @@ func initDB() {
 		log.Printf("role preprompt seed skipped: %v", err)
 	}
 }
+
+// projectHandsAfterProjectInsertTriggerDDL provisions the Hands identity for
+// every new project. The trigger body writes into project_hands, so any
+// rebuild of that table must drop the trigger first and recreate it after the
+// rebuild (see migrateHandsGrokProviderLane): a dangling body reference breaks
+// the ALTER TABLE RENAME with "no such table: main.project_hands".
+const projectHandsAfterProjectInsertTriggerDDL = `
+		CREATE TRIGGER IF NOT EXISTS project_hands_after_project_insert
+		AFTER INSERT ON project
+		BEGIN
+			INSERT OR IGNORE INTO project_hands (
+				project_id, actor_id, display_name, authority_state, default_lane,
+				next_instruction_ordinal, created_at, updated_at
+			) VALUES (
+				NEW.id,
+				lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+				substr(lower(hex(randomblob(2))), 2) || '-' ||
+				substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+				lower(hex(randomblob(6))),
+				'Руки', 'enabled', 'commandcode', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+			);
+		END;
+	`
 
 func initProjectWorkroomSchema() error {
 	_, err := db.Exec(`
@@ -1284,12 +1273,11 @@ func initProjectWorkroomSchema() error {
 			source_message_id TEXT NOT NULL DEFAULT '',
 			issuer_principal_id TEXT NOT NULL,
 			instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
-			declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
 			instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
 			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 			risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
 			review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
-			state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
+			state TEXT NOT NULL CHECK(state IN ('queued', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
 			state_reason_code TEXT,
 			state_reason_text TEXT,
 			compat_session_id INTEGER,
@@ -1344,8 +1332,6 @@ func initProjectWorkroomSchema() error {
 			process_start_identity TEXT,
 			binary_build_id TEXT,
 			binary_epoch INTEGER,
-			lease_set_id TEXT,
-			fencing_token INTEGER,
 			launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
 			result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
 			started_at TEXT,
@@ -1363,35 +1349,6 @@ func initProjectWorkroomSchema() error {
 		CREATE UNIQUE INDEX IF NOT EXISTS hands_generation_one_active_project_idx
 			ON hands_generation(project_id) WHERE status IN ('starting', 'running');
 
-		CREATE TABLE IF NOT EXISTS project_write_fence (
-			project_id INTEGER PRIMARY KEY,
-			next_token INTEGER NOT NULL DEFAULT 1 CHECK(next_token > 0),
-			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
-		);
-		CREATE TABLE IF NOT EXISTS project_write_lease (
-			id TEXT PRIMARY KEY,
-			project_id INTEGER NOT NULL,
-			lease_set_id TEXT NOT NULL,
-			owner_kind TEXT NOT NULL CHECK(owner_kind IN ('wave_worker', 'wave_reviewer', 'hands_instruction')),
-			owner_id TEXT NOT NULL,
-			scope_path TEXT NOT NULL,
-			fencing_token INTEGER NOT NULL CHECK(fencing_token > 0),
-			state TEXT NOT NULL CHECK(state IN ('active', 'released', 'revoked')),
-			process_id INTEGER,
-			process_start_identity TEXT,
-			binary_build_id TEXT NOT NULL,
-			binary_epoch INTEGER NOT NULL,
-			created_at TEXT NOT NULL,
-			heartbeat_at TEXT NOT NULL,
-			released_at TEXT,
-			release_reason TEXT,
-			FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
-		);
-		CREATE INDEX IF NOT EXISTS project_write_lease_active_scope_idx ON project_write_lease(project_id, state, scope_path);
-		CREATE INDEX IF NOT EXISTS project_write_lease_set_idx ON project_write_lease(lease_set_id);
-		CREATE UNIQUE INDEX IF NOT EXISTS project_write_lease_active_owner_scope_idx
-			ON project_write_lease(project_id, owner_kind, owner_id, scope_path) WHERE state = 'active';
 		CREATE TABLE IF NOT EXISTS workroom_audit_event (
 			id TEXT PRIMARY KEY,
 			project_id INTEGER NOT NULL,
@@ -1455,25 +1412,14 @@ func initProjectWorkroomSchema() error {
 		return err
 	}
 
-	_, err = db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS project_hands_after_project_insert
-		AFTER INSERT ON project
-		BEGIN
-			INSERT OR IGNORE INTO project_hands (
-				project_id, actor_id, display_name, authority_state, default_lane,
-				next_instruction_ordinal, created_at, updated_at
-			) VALUES (
-				NEW.id,
-				lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
-				substr(lower(hex(randomblob(2))), 2) || '-' ||
-				substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
-				lower(hex(randomblob(6))),
-				'Руки', 'enabled', 'commandcode', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-			);
-		END;
-	`)
+	_, err = db.Exec(projectHandsAfterProjectInsertTriggerDDL)
 	if err != nil {
 		return err
+	}
+	// Scope retirement runs before the Hands grok rebuild so legacy values are
+	// archived first and no migration recreates a scope column or lease table.
+	if err := migrateDeclaredWriteScopeRetirement(); err != nil {
+		return fmt.Errorf("declared write scope retirement: %w", err)
 	}
 	return migrateHandsGrokProviderLane()
 }
@@ -1482,7 +1428,11 @@ func initProjectWorkroomSchema() error {
 // on databases created before 'grok' became a registered lane. SQLite cannot
 // ALTER a CHECK constraint, so the three affected tables are rebuilt in place.
 // Fresh databases already carry the widened CHECKs and skip every rebuild.
-func migrateHandsGrokProviderLane() error {
+// The rebuild schemas keep the retired waiting state in the hands_instruction
+// state CHECK purely as dated historical enum compatibility: the rebuilt table
+// copies legacy rows verbatim and must never reject or rewrite them. Fresh
+// databases do not accept that state at all (see the initDB schema).
+func migrateHandsGrokProviderLane() (retErr error) {
 	rebuilds := map[string][]string{
 		"hands_generation": {
 			`CREATE TABLE hands_generation_grok_mig (
@@ -1499,8 +1449,6 @@ func migrateHandsGrokProviderLane() error {
 				process_start_identity TEXT,
 				binary_build_id TEXT,
 				binary_epoch INTEGER,
-				lease_set_id TEXT,
-				fencing_token INTEGER,
 				launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
 				result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
 				started_at TEXT,
@@ -1515,7 +1463,7 @@ func migrateHandsGrokProviderLane() error {
 				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
 				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
 			);`,
-			`INSERT INTO hands_generation_grok_mig SELECT instruction_id, generation, project_id, compat_session_id, provider, model, reasoning, status, external_session_id, process_id, process_start_identity, binary_build_id, binary_epoch, lease_set_id, fencing_token, launch_mode, result_envelope_json, started_at, heartbeat_at, ended_at, exit_code, stop_reason, created_at, updated_at FROM hands_generation;`,
+			`INSERT INTO hands_generation_grok_mig SELECT instruction_id, generation, project_id, compat_session_id, provider, model, reasoning, status, external_session_id, process_id, process_start_identity, binary_build_id, binary_epoch, launch_mode, result_envelope_json, started_at, heartbeat_at, ended_at, exit_code, stop_reason, created_at, updated_at FROM hands_generation;`,
 			`DROP TABLE hands_generation;`,
 			`ALTER TABLE hands_generation_grok_mig RENAME TO hands_generation;`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS hands_generation_one_active_project_idx ON hands_generation(project_id) WHERE status IN ('starting', 'running');`,
@@ -1531,7 +1479,6 @@ func migrateHandsGrokProviderLane() error {
 				source_message_id TEXT NOT NULL DEFAULT '',
 				issuer_principal_id TEXT NOT NULL,
 				instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
-				declared_write_scope_json TEXT NOT NULL CHECK(json_valid(declared_write_scope_json)),
 				instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
 				requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
 				risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
@@ -1550,12 +1497,16 @@ func migrateHandsGrokProviderLane() error {
 				FOREIGN KEY(project_id) REFERENCES project_hands(project_id) ON DELETE CASCADE ON UPDATE NO ACTION,
 				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
 			);`,
-			`INSERT INTO hands_instruction_grok_mig SELECT id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, source_message_id, issuer_principal_id, instruction_text, declared_write_scope_json, instruction_envelope_json, requested_lane, risk_class, review_policy, state, state_reason_code, state_reason_text, compat_session_id, idempotency_key, revision, created_at, updated_at, terminal_at FROM hands_instruction;`,
+			`INSERT INTO hands_instruction_grok_mig SELECT id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, source_message_id, issuer_principal_id, instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state, state_reason_code, state_reason_text, compat_session_id, idempotency_key, revision, created_at, updated_at, terminal_at FROM hands_instruction;`,
 			`DROP TABLE hands_instruction;`,
 			`ALTER TABLE hands_instruction_grok_mig RENAME TO hands_instruction;`,
 			`CREATE INDEX IF NOT EXISTS hands_instruction_project_state_idx ON hands_instruction(project_id, state, ordinal);`,
 		},
 		"project_hands": {
+			// The project_hands provisioning trigger writes into this table, so
+			// it must be dropped before the rebuild and recreated after it: a
+			// dangling body reference breaks the RENAME below.
+			`DROP TRIGGER IF EXISTS project_hands_after_project_insert`,
 			`CREATE TABLE project_hands_grok_mig (
 				project_id INTEGER PRIMARY KEY,
 				actor_id TEXT NOT NULL UNIQUE,
@@ -1570,6 +1521,7 @@ func migrateHandsGrokProviderLane() error {
 			`INSERT INTO project_hands_grok_mig SELECT project_id, actor_id, display_name, authority_state, default_lane, next_instruction_ordinal, created_at, updated_at FROM project_hands;`,
 			`DROP TABLE project_hands;`,
 			`ALTER TABLE project_hands_grok_mig RENAME TO project_hands;`,
+			projectHandsAfterProjectInsertTriggerDDL,
 		},
 	}
 
@@ -1578,10 +1530,22 @@ func migrateHandsGrokProviderLane() error {
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF;`); err != nil {
+	var originalFK int
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&originalFK); err != nil {
+		return fmt.Errorf("read PRAGMA foreign_keys before grok lane migration: %w", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
 		return err
 	}
-	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON;`)
+	defer func() {
+		restore := `PRAGMA foreign_keys = OFF`
+		if originalFK != 0 {
+			restore = `PRAGMA foreign_keys = ON`
+		}
+		if _, restoreErr := conn.ExecContext(context.Background(), restore); restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore PRAGMA foreign_keys to %d after grok lane migration: %w", originalFK, restoreErr))
+		}
+	}()
 
 	for _, table := range []string{"hands_generation", "hands_instruction", "project_hands"} {
 		tempTable := table + "_grok_mig"
@@ -1608,6 +1572,11 @@ func migrateHandsGrokProviderLane() error {
 			if _, err := conn.ExecContext(context.Background(), `ALTER TABLE `+tempTable+` RENAME TO `+table); err != nil {
 				return fmt.Errorf("recover %s from interrupted migration: %w", table, err)
 			}
+			if table == "project_hands" {
+				if _, err := conn.ExecContext(context.Background(), projectHandsAfterProjectInsertTriggerDDL); err != nil {
+					return fmt.Errorf("recreate project_hands trigger during recovery: %w", err)
+				}
+			}
 			continue
 		}
 		if tempTableSQL != "" {
@@ -1621,11 +1590,50 @@ func migrateHandsGrokProviderLane() error {
 		if tableSQL == "" || (strings.Contains(tableSQL, "'grok'") && strings.Contains(tableSQL, "'commandcode'")) {
 			continue
 		}
-		for _, stmt := range rebuilds[table] {
-			if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
-				return fmt.Errorf("migrate %s for grok lane: %w", table, err)
-			}
+		// Named indexes and triggers attached to the old table are recreated
+		// under their original names after the rebuild; builtin sqlite_autoindex
+		// entries are covered by the table definition itself.
+		namedDDL, ddlErr := collectNamedTableDDL(context.Background(), conn, table)
+		if ddlErr != nil {
+			return fmt.Errorf("collect named schema for %s during grok lane migration: %w", table, ddlErr)
 		}
+		if err := rebuildGrokLaneTable(context.Background(), conn, table, append(rebuilds[table], namedDDL...)); err != nil {
+			return fmt.Errorf("migrate %s for grok lane: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// rebuildGrokLaneTable executes one grok-lane table rebuild as a single
+// transaction and refuses to commit it if the rebuild introduces any foreign
+// key violation the database did not already carry before the rebuild.
+// Historical violations that predate the migration are tolerated because they
+// were not caused by it; a failed rebuild rolls back leaving the legacy table
+// in place.
+func rebuildGrokLaneTable(ctx context.Context, conn *sql.Conn, tableName string, statements []string) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin %s grok lane rebuild: %w", tableName, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	baselineViolations, err := foreignKeyViolationCounts(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("%s FK baseline: %w", tableName, err)
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	afterViolations, err := foreignKeyViolationCounts(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("%s FK comparison: %w", tableName, err)
+	}
+	if err := fkViolationRegressions(baselineViolations, afterViolations); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit %s grok lane rebuild: %w", tableName, err)
 	}
 	return nil
 }

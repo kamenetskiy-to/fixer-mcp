@@ -92,7 +92,7 @@ write a row such as "other Fixers" or a bare feedback id.
 
 After the table, give a short wave proposal:
 
-1. independent parallel slices with narrow, disjoint write scopes;
+1. independent parallel slices with narrow, disjoint file ownership;
 2. dependency-gated or sequential slices where files/contracts overlap;
 3. acceptance checks for each slice;
 4. unresolved risks and any slice that needs a stronger planning worker.

@@ -65,8 +65,8 @@ const supportedFixerProviders = <FixerProviderOption>[
     models: [
       'Gemini 3.6 Flash',
       'Gemini 3.1 Pro',
-      'Claude Sonnet 4.6 (Thinking)',
-      'Claude Opus 4.6 (Thinking)',
+      'Claude Opus 5.5',
+      'Claude Sonnet 5.5',
     ],
     reasoningOptions: ['default', 'low', 'medium', 'high'],
   ),

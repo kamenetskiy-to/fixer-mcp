@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,9 +110,12 @@ func TestInitDBProjectActivityOverviewSchemaIdempotent(t *testing.T) {
 			t.Fatalf("expected parallel_wave_worker.%s after repeated initDB, got %d", columnName, columnCount)
 		}
 	}
-	var leaseTableName string
-	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parallel_wave_scope_lease'").Scan(&leaseTableName); err != nil {
-		t.Fatalf("expected parallel_wave_scope_lease table after repeated initDB: %v", err)
+	var leaseTableName sql.NullString
+	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parallel_wave_scope_lease'").Scan(&leaseTableName); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("inspect retired parallel_wave_scope_lease table: %v", err)
+	}
+	if leaseTableName.Valid {
+		t.Fatalf("parallel_wave_scope_lease must stay retired after repeated initDB, found %q", leaseTableName.String)
 	}
 
 	var dependencyTableName string
@@ -270,7 +275,7 @@ func TestInitDBProvisionsProjectWorkroomSchemaIdempotently(t *testing.T) {
 		"project_ui_cursor", "project_ui_event", "command_dedup", "fixer_thread", "fixer_turn",
 		"genui_surface_instance", "genui_surface_revision", "genui_demand_example", "genui_surface_feedback", "genui_action_invocation",
 		"project_hands", "hands_instruction", "hands_instruction_event", "hands_generation",
-		"project_write_fence", "project_write_lease", "workroom_audit_event",
+		"workroom_audit_event",
 	} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&count); err != nil {
@@ -278,6 +283,15 @@ func TestInitDBProvisionsProjectWorkroomSchemaIdempotently(t *testing.T) {
 		}
 		if count != 1 {
 			t.Fatalf("expected one %s table, got %d", tableName, count)
+		}
+	}
+	for _, retiredTable := range []string{"project_write_fence", "project_write_lease", "parallel_wave_scope_lease"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, retiredTable).Scan(&count); err != nil {
+			t.Fatalf("inspect retired %s: %v", retiredTable, err)
+		}
+		if count != 0 {
+			t.Fatalf("retired lease table %s must not exist in the new schema, got %d", retiredTable, count)
 		}
 	}
 	for _, columnName := range []string{"session_kind", "created_at", "updated_at"} {
@@ -688,5 +702,300 @@ func TestInitDBParallelWaveIndexWaitsForBackcompatWorkerColumns(t *testing.T) {
 	}
 	if indexCount != 1 {
 		t.Fatalf("expected worker_process_parallel_wave_idx after initDB, got %d", indexCount)
+	}
+}
+
+// Pre-grok provider-lane schema: the three Hands tables exactly as a database
+// created before 'grok' became a registered lane carries them, so initDB must
+// widen the lane CHECK constraints through the grok lane rebuild. The fixture
+// intentionally carries no retired scope columns so the grok rebuild path is
+// exercised in isolation from the scope retirement.
+const preGrokHandsGenerationDDL = `CREATE TABLE hands_generation (
+	instruction_id TEXT NOT NULL,
+	generation INTEGER NOT NULL CHECK(generation > 0),
+	project_id INTEGER NOT NULL,
+	compat_session_id INTEGER,
+	provider TEXT NOT NULL CHECK(provider IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity')),
+	model TEXT NOT NULL,
+	reasoning TEXT NOT NULL,
+	status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
+	external_session_id TEXT,
+	process_id INTEGER,
+	process_start_identity TEXT,
+	binary_build_id TEXT,
+	binary_epoch INTEGER,
+	launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
+	result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
+	started_at TEXT,
+	heartbeat_at TEXT,
+	ended_at TEXT,
+	exit_code INTEGER,
+	stop_reason TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY(instruction_id, generation),
+	FOREIGN KEY(instruction_id) REFERENCES hands_instruction(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+	FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+	FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+)`
+
+const preGrokHandsInstructionDDL = `CREATE TABLE hands_instruction (
+	id TEXT PRIMARY KEY,
+	project_id INTEGER NOT NULL,
+	actor_id TEXT NOT NULL,
+	ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+	source_channel_kind TEXT NOT NULL,
+	source_channel_id TEXT NOT NULL,
+	source_message_id TEXT NOT NULL DEFAULT '',
+	issuer_principal_id TEXT NOT NULL,
+	instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
+	instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
+	requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity')),
+	risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
+	review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
+	state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
+	state_reason_code TEXT,
+	state_reason_text TEXT,
+	compat_session_id INTEGER,
+	idempotency_key TEXT NOT NULL,
+	revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	terminal_at TEXT,
+	UNIQUE(project_id, ordinal),
+	UNIQUE(project_id, source_channel_kind, source_channel_id, idempotency_key),
+	FOREIGN KEY(project_id) REFERENCES project_hands(project_id) ON DELETE CASCADE ON UPDATE NO ACTION,
+	FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+)`
+
+const preGrokProjectHandsDDL = `CREATE TABLE project_hands (
+	project_id INTEGER PRIMARY KEY,
+	actor_id TEXT NOT NULL UNIQUE,
+	display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
+	authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
+	default_lane TEXT NOT NULL DEFAULT 'commandcode' CHECK(default_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity')),
+	next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+)`
+
+func seedPreGrokHandsSchema(t *testing.T) {
+	t.Helper()
+	for _, statement := range []string{
+		`DROP TABLE hands_generation`,
+		`DROP TABLE hands_instruction`,
+		`DROP TABLE project_hands`,
+		preGrokProjectHandsDDL,
+		preGrokHandsInstructionDDL,
+		preGrokHandsGenerationDDL,
+		`CREATE INDEX hands_generation_one_active_project_idx ON hands_generation(project_id) WHERE status IN ('starting', 'running')`,
+		`INSERT OR IGNORE INTO project_hands (
+			project_id, actor_id, display_name, authority_state, default_lane,
+			next_instruction_ordinal, created_at, updated_at
+		) SELECT id, 'pre-grok-actor-' || id, 'Руки', 'enabled', 'codex', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM project`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed pre-grok Hands schema: %v: %v", statement, err)
+		}
+	}
+}
+
+func TestInitDBGrokLaneRebuildWidensLegacyHandsSchema(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	t.Setenv(fixerDBPathEnv, filepath.Join(t.TempDir(), "grok-lane-rebuild.db"))
+	initDB()
+	defer func() { _ = db.Close() }()
+	seedPreGrokHandsSchema(t)
+	for _, statement := range []string{
+		`INSERT INTO project (name, cwd, active) VALUES ('Grok lane', '/tmp/grok-lane', 1)`,
+		`INSERT INTO hands_instruction (
+			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, issuer_principal_id,
+			instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state,
+			idempotency_key, created_at, updated_at
+		) VALUES ('instr-grok', 1, 'actor-1', 1, 'telegram', 'channel-1', 'principal-1',
+			'Pre-grok historical instruction', '` + legacyEnvelopeSentinel + `', 'codex', 'repository_write', 'fixer_required', 'queued', 'grok-legacy-1',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`INSERT INTO hands_generation (instruction_id, generation, project_id, provider, model, reasoning, status)
+			VALUES ('instr-grok', 1, 1, 'codex', 'legacy-model', 'high', 'stopped')`,
+		`CREATE INDEX hands_instruction_issuer_idx ON hands_instruction(issuer_principal_id)`,
+		`CREATE TRIGGER hands_instruction_no_delete BEFORE DELETE ON hands_instruction BEGIN SELECT RAISE(ABORT, 'no-delete'); END`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed pre-grok fixture: %v: %v", statement, err)
+		}
+	}
+	initDB()
+	for _, name := range []string{
+		"hands_instruction_issuer_idx",
+		"hands_instruction_no_delete",
+		"hands_instruction_project_state_idx",
+		"hands_generation_one_active_project_idx",
+	} {
+		if count := countRows(t, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, name); count != 1 {
+			t.Fatalf("grok rebuild must preserve %s, found %d", name, count)
+		}
+	}
+	var text, envelope string
+	if err := db.QueryRow(`SELECT instruction_text, instruction_envelope_json FROM hands_instruction WHERE id = 'instr-grok'`).Scan(&text, &envelope); err != nil {
+		t.Fatalf("read pre-grok instruction: %v", err)
+	}
+	if text != "Pre-grok historical instruction" || envelope != legacyEnvelopeSentinel {
+		t.Fatalf("grok rebuild rewrote immutable history: text=%q envelope=%q", text, envelope)
+	}
+	var provider, model string
+	if err := db.QueryRow(`SELECT provider, model FROM hands_generation WHERE instruction_id = 'instr-grok'`).Scan(&provider, &model); err != nil {
+		t.Fatalf("read pre-grok generation: %v", err)
+	}
+	if provider != "codex" || model != "legacy-model" {
+		t.Fatalf("grok rebuild rewrote generation rows: provider=%q model=%q", provider, model)
+	}
+	for _, statement := range []string{
+		`INSERT INTO hands_instruction (
+			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, issuer_principal_id,
+			instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state,
+			idempotency_key, created_at, updated_at
+		) VALUES ('instr-grok-new', 1, 'actor-1', 2, 'telegram', 'channel-1', 'principal-1',
+			'Post-migration grok instruction', '{}', 'grok', 'repository_write', 'fixer_required', 'queued', 'grok-legacy-2',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`INSERT INTO hands_generation (instruction_id, generation, project_id, provider, model, reasoning, status)
+			VALUES ('instr-grok-new', 1, 1, 'grok', 'grok-model', 'high', 'planned')`,
+		`UPDATE project_hands SET default_lane = 'grok'`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("widened lane CHECK must accept grok (%s): %v", statement, err)
+		}
+	}
+	// The project_hands provisioning trigger must survive the rebuild: it
+	// writes into project_hands and is dropped/recreated around the rebuild.
+	if _, err := db.Exec(`INSERT INTO project (name, cwd, active) VALUES ('Post migration project', '/tmp/post-migration-project', 1)`); err != nil {
+		t.Fatalf("insert post-migration project: %v", err)
+	}
+	if provisioned := countRows(t,
+		`SELECT COUNT(*) FROM project_hands WHERE project_id = (SELECT id FROM project WHERE cwd = '/tmp/post-migration-project')`,
+	); provisioned != 1 {
+		t.Fatalf("project_hands provisioning trigger must survive the rebuild, provisioned %d", provisioned)
+	}
+	initDB()
+	if count := countRows(t, `SELECT COUNT(*) FROM hands_instruction`); count != 2 {
+		t.Fatalf("repeat migration changed instruction rows: %d", count)
+	}
+	if count := countRows(t, `SELECT COUNT(*) FROM hands_generation`); count != 2 {
+		t.Fatalf("repeat migration changed generation rows: %d", count)
+	}
+	if _, err := db.Exec(`DELETE FROM hands_instruction`); err == nil || !strings.Contains(err.Error(), "no-delete") {
+		t.Fatalf("preserved trigger must still guard deletes after repeat migration, got %v", err)
+	}
+}
+
+func TestInitDBGrokLaneRebuildToleratesHistoricalFKViolations(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	t.Setenv(fixerDBPathEnv, filepath.Join(t.TempDir(), "grok-historical-fk.db"))
+	initDB()
+	defer func() { _ = db.Close() }()
+	seedPreGrokHandsSchema(t)
+	for _, statement := range []string{
+		`INSERT INTO project (name, cwd, active) VALUES ('Grok historical FK', '/tmp/grok-historical-fk', 1)`,
+		`PRAGMA foreign_keys = OFF`,
+		`INSERT INTO hands_instruction (
+			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, issuer_principal_id,
+			instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state,
+			compat_session_id, idempotency_key, created_at, updated_at
+		) VALUES ('instr-grok-orphan', 1, 'actor-1', 1, 'telegram', 'channel-1', 'principal-1',
+			'Historical orphan instruction', '` + legacyEnvelopeSentinel + `', 'codex', 'repository_write', 'fixer_required', 'running',
+			9999, 'grok-orphan-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`PRAGMA foreign_keys = ON`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed historical FK fixture: %v: %v", statement, err)
+		}
+	}
+	// The migration must succeed despite the historical violation and must
+	// preserve the violating row verbatim: not fixed, not grown.
+	initDB()
+	if violations := countRows(t, `SELECT COUNT(*) FROM pragma_foreign_key_check`); violations != 1 {
+		t.Fatalf("historical violation must survive untouched, got %d", violations)
+	}
+	var text, state string
+	if err := db.QueryRow(`SELECT instruction_text, state FROM hands_instruction WHERE id = 'instr-grok-orphan'`).Scan(&text, &state); err != nil {
+		t.Fatalf("read historical instruction: %v", err)
+	}
+	if text != "Historical orphan instruction" || state != "running" {
+		t.Fatalf("grok rebuild rewrote historical row: text=%q state=%q", text, state)
+	}
+}
+
+func TestRebuildGrokLaneTableRejectsNewFKViolationsAndRollsBack(t *testing.T) {
+	originalDB := db
+	defer func() { db = originalDB }()
+	t.Setenv(fixerDBPathEnv, filepath.Join(t.TempDir(), "grok-fk-guard.db"))
+	initDB()
+	defer func() { _ = db.Close() }()
+	for _, statement := range []string{
+		`INSERT INTO project (name, cwd, active) VALUES ('Grok FK guard', '/tmp/grok-fk-guard', 1)`,
+		`INSERT INTO hands_instruction (
+			id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, issuer_principal_id,
+			instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state,
+			idempotency_key, created_at, updated_at
+		) VALUES ('instr-guard', 1, 'actor-1', 1, 'telegram', 'channel-1', 'principal-1',
+			'FK guard subject', '{}', 'codex', 'repository_write', 'fixer_required', 'queued', 'guard-1',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		`INSERT INTO hands_generation (instruction_id, generation, project_id, provider, model, reasoning, status)
+			VALUES ('instr-guard', 1, 1, 'codex', 'model', 'high', 'stopped')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed FK guard fixture: %v: %v", statement, err)
+		}
+	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		_ = conn.Close()
+		t.Fatalf("disable FK enforcement: %v", err)
+	}
+	// A rebuild that introduces a foreign key violation the database did not
+	// already carry must fail and roll back, leaving the legacy rows in place.
+	err = rebuildGrokLaneTable(ctx, conn, "hands_generation", []string{
+		`UPDATE hands_generation SET compat_session_id = 999999`,
+	})
+	if _, restoreErr := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); restoreErr != nil {
+		_ = conn.Close()
+		t.Fatalf("restore FK enforcement: %v", restoreErr)
+	}
+	closeErr := conn.Close()
+	if closeErr != nil {
+		t.Fatalf("release connection: %v", closeErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "foreign key violation") {
+		t.Fatalf("expected a rejected foreign key violation, got %v", err)
+	}
+	var compatSessionID sql.NullInt64
+	if err := db.QueryRow(`SELECT compat_session_id FROM hands_generation WHERE instruction_id = 'instr-guard'`).Scan(&compatSessionID); err != nil {
+		t.Fatalf("read rolled back generation: %v", err)
+	}
+	if compatSessionID.Valid {
+		t.Fatalf("failed rebuild must roll back, got compat_session_id=%d", compatSessionID.Int64)
+	}
+	if violations := countRows(t, `SELECT COUNT(*) FROM pragma_foreign_key_check`); violations != 0 {
+		t.Fatalf("rejected rebuild left violations behind: %d", violations)
+	}
+	// A rebuild that keeps the baseline intact must commit normally.
+	conn, err = db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reacquire connection: %v", err)
+	}
+	if err := rebuildGrokLaneTable(ctx, conn, "hands_generation", []string{
+		`UPDATE hands_generation SET reasoning = 'high'`,
+	}); err != nil {
+		_ = conn.Close()
+		t.Fatalf("benign rebuild must commit: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release connection: %v", err)
 	}
 }

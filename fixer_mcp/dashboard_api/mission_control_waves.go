@@ -155,7 +155,7 @@ func (r *Repository) loadMissionControlPlannedWaves(ctx context.Context, project
 	}
 	taskRows, err := r.db.QueryContext(ctx, `
 		SELECT task.id, task.planned_wave_id, task.task_key, task.position,
-		       task.task_description, task.declared_write_scope, task.dependencies,
+		       task.task_description, task.dependencies,
 		       COALESCE(NULLIF(TRIM(task.cli_backend), ''), 'codex'),
 		       COALESCE(task.cli_model, ''), COALESCE(task.cli_reasoning, ''),
 		       COALESCE(task.mcp_server_names, '[]'),
@@ -178,7 +178,6 @@ func (r *Repository) loadMissionControlPlannedWaves(ctx context.Context, project
 	for taskRows.Next() {
 		var task MissionControlPlannedWaveTask
 		var planID int
-		var scopePayload string
 		var dependenciesPayload string
 		var mcpServersPayload string
 		if err := taskRows.Scan(
@@ -187,7 +186,6 @@ func (r *Repository) loadMissionControlPlannedWaves(ctx context.Context, project
 			&task.Key,
 			&task.Position,
 			&task.TaskDescription,
-			&scopePayload,
 			&dependenciesPayload,
 			&task.Backend,
 			&task.Model,
@@ -197,9 +195,6 @@ func (r *Repository) loadMissionControlPlannedWaves(ctx context.Context, project
 			&task.LocalSessionID,
 		); err != nil {
 			return nil, err
-		}
-		if err := json.Unmarshal([]byte(scopePayload), &task.DeclaredWriteScope); err != nil {
-			return nil, fmt.Errorf("invalid planned task %d declared_write_scope: %w", task.TaskID, err)
 		}
 		if err := json.Unmarshal([]byte(dependenciesPayload), &task.DependsOn); err != nil {
 			return nil, fmt.Errorf("invalid planned task %d dependencies: %w", task.TaskID, err)

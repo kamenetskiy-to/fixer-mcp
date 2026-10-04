@@ -5,7 +5,6 @@ fields:
   instructionId: String, jsonKey=id
   ordinal: int
   instructionText: String, jsonKey=instruction_text
-  declaredWriteScope: List<String>, jsonKey=declared_write_scope
   requestedLane: String, jsonKey=requested_lane
   riskClass: String, jsonKey=risk_class
   reviewPolicy: String, jsonKey=review_policy

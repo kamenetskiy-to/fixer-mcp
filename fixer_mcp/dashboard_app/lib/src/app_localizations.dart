@@ -374,7 +374,6 @@ class AppLocalizations {
       : 'No instructions yet. Hands remains the same permanent channel.';
   String get handsQueue => isRussian ? 'Очередь' : 'Queue';
   String get handsLane => isRussian ? 'Линия провайдера' : 'Provider lane';
-  String get handsLease => isRussian ? 'Запись / lease' : 'Write lease';
   String get handsIdle => isRussian ? 'спит' : 'sleeping';
   String get handsRunning => isRussian ? 'работает' : 'running';
   String get handsBusy => isRussian ? 'занят' : 'busy';
@@ -386,13 +385,7 @@ class AppLocalizations {
   String get handsInstructionHint => isRussian
       ? 'Опишите один проверяемый результат…'
       : 'Describe one verifiable outcome…';
-  String get handsWriteScope =>
-      isRussian ? 'Область записи' : 'Declared write scope';
-  String get handsWriteScopeHint => isRussian
-      ? 'Пути относительно проекта, по одному в строке'
-      : 'Project-relative paths, one per line';
-  String get handsAdvanced =>
-      isRussian ? 'Провайдер и область записи' : 'Provider & write scope';
+  String get handsAdvanced => isRussian ? 'Провайдер' : 'Provider';
   String get handsSubmit => isRussian ? 'Поручить' : 'Submit instruction';
   String get handsSubmitted => isRussian
       ? 'Поручение сохранено в постоянной почте.'

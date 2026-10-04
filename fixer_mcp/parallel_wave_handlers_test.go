@@ -131,7 +131,6 @@ func setupParallelWaveTestDB(t *testing.T, projectCWD string) *sql.DB {
 			project_id INTEGER NOT NULL,
 			session_id INTEGER NOT NULL,
 			status TEXT NOT NULL DEFAULT 'created',
-			declared_write_scope TEXT NOT NULL,
 			branch_name TEXT NOT NULL,
 			worktree_path TEXT NOT NULL,
 			base_sha TEXT NOT NULL,
@@ -168,18 +167,7 @@ func setupParallelWaveTestDB(t *testing.T, projectCWD string) *sql.DB {
 			CREATE UNIQUE INDEX wave_worker_dependency_unique_idx ON wave_worker_dependency(wave_id, parent_session_id, child_session_id);
 			CREATE UNIQUE INDEX parallel_wave_worker_wave_session_unique_idx ON parallel_wave_worker(wave_id, session_id);
 		CREATE INDEX parallel_wave_worker_status_idx ON parallel_wave_worker(project_id, status);
-		CREATE TABLE parallel_wave_scope_lease (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			project_id INTEGER NOT NULL,
-			wave_id INTEGER NOT NULL,
-			scope_path TEXT NOT NULL,
-			active INTEGER NOT NULL DEFAULT 1,
-			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			released_at TEXT
-		);
-		CREATE UNIQUE INDEX parallel_wave_scope_lease_wave_scope_unique_idx ON parallel_wave_scope_lease(wave_id, scope_path);
-		CREATE INDEX parallel_wave_scope_lease_active_idx ON parallel_wave_scope_lease(project_id, active, wave_id);
-		CREATE TABLE mcp_binary_state (
+			CREATE TABLE mcp_binary_state (
 			project_id INTEGER PRIMARY KEY,
 			running_build_epoch INTEGER NOT NULL DEFAULT 0,
 			required_build_epoch INTEGER NOT NULL DEFAULT 0,
@@ -195,8 +183,7 @@ func setupParallelWaveTestDB(t *testing.T, projectCWD string) *sql.DB {
 		ALTER TABLE worker_process ADD COLUMN parallel_wave_id INTEGER;
 		ALTER TABLE worker_process ADD COLUMN parallel_wave_worker_id INTEGER;
 		UPDATE project SET cwd = ? WHERE id = 1;
-		UPDATE session SET declared_write_scope = '["docs/a"]' WHERE id = 1;
-		INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task C', 'pending', '["docs/b"]');
+		INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task C', 'pending');
 	`, normalizedProjectCWD)
 	if err != nil {
 		_ = testDB.Close()
@@ -236,10 +223,10 @@ func setupCleanGitRepoAt(t *testing.T, repoDir string) {
 }
 
 func TestNormalizeParallelWaveAdmissionWorkers(t *testing.T) {
-	t.Run("accepts disjoint normalized worker scopes", func(t *testing.T) {
+	t.Run("admits distinct sessions", func(t *testing.T) {
 		workers, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
-			{SessionID: 7, DeclaredWriteScope: []string{"docs/research"}},
-			{SessionID: 8, DeclaredWriteScope: []string{"fixer_mcp/wave_helpers_test.go"}},
+			{SessionID: 7},
+			{SessionID: 8},
 		})
 		if err != nil {
 			t.Fatalf("normalize wave workers failed: %v", err)
@@ -247,37 +234,28 @@ func TestNormalizeParallelWaveAdmissionWorkers(t *testing.T) {
 		if len(workers) != 2 {
 			t.Fatalf("expected two workers, got %+v", workers)
 		}
-		if workers[0].DeclaredWriteScope[0] != "docs/research" || workers[1].DeclaredWriteScope[0] != "fixer_mcp/wave_helpers_test.go" {
+		if workers[0].SessionID != 7 || workers[1].SessionID != 8 {
 			t.Fatalf("unexpected normalized workers: %+v", workers)
 		}
 	})
 
 	t.Run("rejects duplicate sessions", func(t *testing.T) {
 		if _, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
-			{SessionID: 7, DeclaredWriteScope: []string{"docs/a"}},
-			{SessionID: 7, DeclaredWriteScope: []string{"docs/b"}},
+			{SessionID: 7},
+			{SessionID: 7},
 		}); err == nil || !strings.Contains(err.Error(), "duplicated") {
 			t.Fatalf("expected duplicate session rejection, got %v", err)
 		}
 	})
 
-	t.Run("admits overlapping missing and out-of-list scopes", func(t *testing.T) {
-		workers, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
-			{SessionID: 7, DeclaredWriteScope: []string{"docs"}},
-			{SessionID: 8, DeclaredWriteScope: []string{"docs/research"}},
-			{SessionID: 9, DeclaredWriteScope: nil},
-			{SessionID: 10, DeclaredWriteScope: []string{"."}},
-			{SessionID: 11, DeclaredWriteScope: []string{"fixer_mcp/main.go"}},
-		})
-		if err != nil {
-			t.Fatalf("expected overlapping/missing/broad/out-of-list scopes to be admitted, got %v", err)
-		}
-		if len(workers) != 5 {
-			t.Fatalf("expected five workers, got %+v", workers)
+	t.Run("rejects non-positive session ids", func(t *testing.T) {
+		if _, err := normalizeParallelWaveAdmissionWorkers([]parallelWaveAdmissionWorker{
+			{SessionID: 0},
+		}); err == nil {
+			t.Fatal("expected non-positive session id rejection")
 		}
 	})
 }
-
 func TestParallelWaveWaitTimeoutSeconds(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -756,7 +734,7 @@ func TestCreateNetrunnerWavePersistsDependenciesAndRejectsInvalidDependencies(t 
 	}
 }
 
-func TestCreateNetrunnerWaveAllowsOverlappingParentChildScopes(t *testing.T) {
+func TestCreateNetrunnerWaveAdmitsParentChildWorkersWithoutScopes(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -769,9 +747,6 @@ func TestCreateNetrunnerWaveAllowsOverlappingParentChildScopes(t *testing.T) {
 	repoDir := setupCleanGitRepo(t)
 	testDB := setupParallelWaveTestDB(t, repoDir)
 	defer func() { _ = testDB.Close() }()
-	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = ? WHERE id IN (1, 3)", `["docs/shared"]`); err != nil {
-		t.Fatalf("seed overlapping parent-child scopes: %v", err)
-	}
 	db = testDB
 	authorizedRole = "fixer"
 	authorizedProjectId = 1
@@ -782,14 +757,14 @@ func TestCreateNetrunnerWaveAllowsOverlappingParentChildScopes(t *testing.T) {
 		BaseRef:      "HEAD",
 	})
 	if err != nil {
-		t.Fatalf("expected overlapping parent-child scopes to be admitted: %v", err)
+		t.Fatalf("expected parent-child workers to be admitted without scope declarations: %v", err)
 	}
 	if callResult != nil || len(created.Workers) != 2 {
 		t.Fatalf("unexpected create output: result=%+v wave=%+v", callResult, created)
 	}
 }
 
-func TestCreateNetrunnerWaveAllowsMissingBroadAndOutOfListScopes(t *testing.T) {
+func TestCreateNetrunnerWaveAdmitsSessionsWithoutScopeDeclarations(t *testing.T) {
 	originalDB := db
 	originalRole := authorizedRole
 	originalProjectID := authorizedProjectId
@@ -802,14 +777,14 @@ func TestCreateNetrunnerWaveAllowsMissingBroadAndOutOfListScopes(t *testing.T) {
 	repoDir := setupCleanGitRepo(t)
 	testDB := setupParallelWaveTestDB(t, repoDir)
 	defer func() { _ = testDB.Close() }()
-	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Missing scope', 'pending', '')`); err != nil {
-		t.Fatalf("seed missing-scope session: %v", err)
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Missing scope', 'pending')`); err != nil {
+		t.Fatalf("seed extra session: %v", err)
 	}
-	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Broad scope', 'pending', '["."]')`); err != nil {
-		t.Fatalf("seed broad-scope session: %v", err)
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Broad scope', 'pending')`); err != nil {
+		t.Fatalf("seed second extra session: %v", err)
 	}
-	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Out-of-list scope', 'pending', '["fixer_mcp/main.go"]')`); err != nil {
-		t.Fatalf("seed out-of-list-scope session: %v", err)
+	if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Out-of-list scope', 'pending')`); err != nil {
+		t.Fatalf("seed third extra session: %v", err)
 	}
 	db = testDB
 	authorizedRole = "fixer"
@@ -820,7 +795,7 @@ func TestCreateNetrunnerWaveAllowsMissingBroadAndOutOfListScopes(t *testing.T) {
 		BaseRef:    "HEAD",
 	})
 	if err != nil {
-		t.Fatalf("wave admission must not fail for missing/broad/out-of-list scopes: %v", err)
+		t.Fatalf("wave admission must not fail without scope declarations: %v", err)
 	}
 	if callResult != nil || len(created.Workers) != 4 {
 		t.Fatalf("unexpected create output: result=%+v wave=%+v", callResult, created)
@@ -1235,12 +1210,6 @@ func TestWaitNetrunnerWaveMergesCompletedParentBranchIntoChildWorktree(t *testin
 	if err != nil {
 		t.Fatalf("map parent session: %v", err)
 	}
-	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET declared_write_scope = '[\".\"]' WHERE wave_id = ? AND session_id = ?", created.WaveId, globalParentID); err != nil {
-		t.Fatalf("update worker write scope: %v", err)
-	}
-	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = '[\".\"]' WHERE id = ?", globalParentID); err != nil {
-		t.Fatalf("update parent write scope: %v", err)
-	}
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'parent ready' WHERE id = ?", globalParentID); err != nil {
 		t.Fatalf("mark parent review: %v", err)
 	}
@@ -1310,12 +1279,6 @@ func TestWaitNetrunnerWaveRejectsUncommittedParentHandoff(t *testing.T) {
 	globalParentID, err := globalSessionIDFromProjectScoped(1, 1)
 	if err != nil {
 		t.Fatalf("map parent session: %v", err)
-	}
-	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET declared_write_scope = '[\".\"]' WHERE wave_id = ? AND session_id = ?", created.WaveId, globalParentID); err != nil {
-		t.Fatalf("update worker write scope: %v", err)
-	}
-	if _, err := testDB.Exec("UPDATE session SET declared_write_scope = '[\".\"]' WHERE id = ?", globalParentID); err != nil {
-		t.Fatalf("update parent write scope: %v", err)
 	}
 	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = 'parent ready' WHERE id = ?", globalParentID); err != nil {
 		t.Fatalf("mark parent review: %v", err)
@@ -1965,7 +1928,7 @@ func TestWaitNetrunnerWaveRequiresAllParentsBeforeDeferredLaunch(t *testing.T) {
 	db = testDB
 	authorizedRole = "fixer"
 	authorizedProjectId = 1
-	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task D', 'pending', '[\"docs/d\"]')"); err != nil {
+	if _, err := testDB.Exec("INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task D', 'pending')"); err != nil {
 		t.Fatalf("seed second dependency child session: %v", err)
 	}
 
@@ -3252,7 +3215,6 @@ func TestParallelWaveHandlersLiveOutsideMain(t *testing.T) {
 		"parallel_wave_admission_git.go": {
 			"const (\n\tparallelWaveStatusCreated",
 			"var parallelWaveBranchPattern",
-			"var parallelWaveFoundationWriteScopePaths",
 			"type parallelWaveAdmissionWorker",
 			"type parallelWaveSessionCandidate",
 			"type gitCommandSpec",
@@ -3427,7 +3389,7 @@ func TestLaunchNetrunnerWaveAbandonsFailedAndUnlaunchedWorkers(t *testing.T) {
 	authorizedProjectId = 1
 
 	if _, err := testDB.Exec(
-		"INSERT INTO session (project_id, task_description, status, declared_write_scope) VALUES (1, 'Task D', 'pending', '[\"docs/c\"]')",
+		"INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task D', 'pending')",
 	); err != nil {
 		t.Fatalf("seed third worker session: %v", err)
 	}
@@ -3494,27 +3456,6 @@ func TestLaunchNetrunnerWaveAbandonsFailedAndUnlaunchedWorkers(t *testing.T) {
 		}
 	}
 
-	leaseActive := func(scopePath string) int {
-		t.Helper()
-		var count int
-		if err := testDB.QueryRow(
-			"SELECT COUNT(*) FROM parallel_wave_scope_lease WHERE wave_id = ? AND scope_path = ? AND active = 1",
-			created.WaveId,
-			scopePath,
-		).Scan(&count); err != nil {
-			t.Fatalf("query lease %q: %v", scopePath, err)
-		}
-		return count
-	}
-	if got := leaseActive("docs/a"); got != 1 {
-		t.Fatalf("expected launched worker lease held, got %d", got)
-	}
-	if got := leaseActive("docs/b"); got != 0 {
-		t.Fatalf("expected failed worker lease released, got %d", got)
-	}
-	if got := leaseActive("docs/c"); got != 0 {
-		t.Fatalf("expected abandoned worker lease released, got %d", got)
-	}
 }
 
 func TestCleanupNetrunnerWaveReconcilesStaleCompletedWorker(t *testing.T) {

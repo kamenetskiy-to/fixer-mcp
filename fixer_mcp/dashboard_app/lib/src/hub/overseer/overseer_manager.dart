@@ -407,6 +407,7 @@ class _CreateOverseerDialogState extends State<_CreateOverseerDialog> {
                     child: DropdownButtonFormField<String>(
                       key: ValueKey('overseer-model-${_backend.id}'),
                       initialValue: _model,
+                      isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Model'),
                       items: _backend.models
                           .map(

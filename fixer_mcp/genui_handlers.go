@@ -74,7 +74,6 @@ var registeredProjectUIEventKinds = map[string]struct{}{
 	"hands.instruction.changed":        {},
 	"hands.instruction.event_appended": {},
 	"hands.generation.changed":         {},
-	"lease.changed":                    {},
 	"planned_wave.changed":             {},
 	"wave.changed":                     {},
 	"session.changed":                  {},

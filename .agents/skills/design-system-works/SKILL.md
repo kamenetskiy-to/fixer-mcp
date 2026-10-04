@@ -49,7 +49,7 @@ Dispatch one Netrunner to create the design system and decompose screens.
 
 Recommended model: `codex` + `gpt-5.6-luna`.
 
-Write scope:
+Owned files:
 
 ```text
 design_works/<project>/
@@ -119,7 +119,7 @@ Each screenshot Netrunner receives:
 - public shadcn_ui visual references;
 - target form factor and required states.
 
-Write scope for each worker:
+Files owned by each worker:
 
 ```text
 design_works/<project>/screens/<screen>/

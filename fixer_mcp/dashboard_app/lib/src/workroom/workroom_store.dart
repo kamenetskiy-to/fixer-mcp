@@ -314,7 +314,6 @@ class ProjectWorkroomStore extends ChangeNotifier {
 
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,
@@ -322,7 +321,6 @@ class ProjectWorkroomStore extends ChangeNotifier {
     return repository.submitHandsInstruction(
       projectId: projectId,
       instructionText: instructionText,
-      declaredWriteScope: declaredWriteScope,
       requestedLane: requestedLane,
       requestedModel: requestedModel,
       requestedReasoning: requestedReasoning,
@@ -566,6 +564,10 @@ class ProjectWorkroomStore extends ChangeNotifier {
       return parsed;
     }
 
+    if (retiredProjectUiEventKinds.contains(event.kind)) {
+      return snapshot;
+    }
+
     switch (event.kind) {
       case 'fixer.thread.created':
       case 'fixer.thread.changed':
@@ -727,15 +729,6 @@ class ProjectWorkroomStore extends ChangeNotifier {
                 payload['operational_state']?.toString() ??
                 payload['state']?.toString() ??
                 snapshot.hands.operationalState,
-          ),
-        );
-      case 'lease.changed':
-        return snapshot.copyWith(
-          hands: snapshot.hands.copyWith(
-            activeLeaseSummary:
-                payload['lease_summary']?.toString() ??
-                payload['summary']?.toString() ??
-                snapshot.hands.activeLeaseSummary,
           ),
         );
       case 'project.changed':

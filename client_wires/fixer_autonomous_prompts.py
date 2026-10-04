@@ -74,7 +74,6 @@ def _build_wave_netrunner_prompt(
     wave_worker_id: int,
     branch_name: str,
     worker_cwd: Path,
-    declared_write_scope: list[str],
     positive_wave_int_fn: Callable[[str, int], int],
     validate_wave_branch_name_fn: Callable[[str], str],
     default_how_to_fn: Callable[[str], str],
@@ -82,7 +81,6 @@ def _build_wave_netrunner_prompt(
     normalized_wave_id = positive_wave_int_fn("wave_id", wave_id)
     normalized_wave_worker_id = positive_wave_int_fn("wave_worker_id", wave_worker_id)
     mcp_text = ", ".join(mcp_names) if mcp_names else "none"
-    scope_text = ", ".join(declared_write_scope) if declared_write_scope else "none"
     how_to_lines: list[str] = []
     for name in mcp_names:
         guidance = mcp_how_to.get(name, default_how_to_fn(name))
@@ -110,7 +108,6 @@ def _build_wave_netrunner_prompt(
         f"- wave_worker_id: `{normalized_wave_worker_id}`",
         f"- branch_name: `{validate_wave_branch_name_fn(branch_name)}`",
         f"- worker_cwd: `{worker_cwd}`",
-        f"- declared_write_scope (informational only; never enforced): {scope_text}",
         "Wave guardrails:",
         "- You are isolated in a Git worktree for this worker.",
         "- Do not merge, rebase, remove worktrees, or alter wave state.",

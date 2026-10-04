@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,7 +100,7 @@ func TestSubmitHandsInstructionCreatesInternalCompatibilityProjectionAndIsIdempo
 	if err != nil {
 		t.Fatalf("submit instruction: %v", err)
 	}
-	if first.State != "queued" || first.RiskClass != "read_only" || first.InstructionID == "" || first.Ordinal != 1 {
+	if first.State != "queued" || first.RiskClass != "repository_write" || first.InstructionID == "" || first.Ordinal != 1 {
 		t.Fatalf("unexpected receipt: %+v", first)
 	}
 	_, replay, err := SubmitHandsInstruction(ctx, nil, input)
@@ -311,14 +312,24 @@ func TestNetrunnerHandsStateIsRestrictedToItsCompatibilityInstruction(t *testing
 	}
 }
 
-func TestHandsReadOnlyCompatibilityLifecycleCompletesAtomically(t *testing.T) {
+func TestHandsCompatibilityLifecycleRequiresManualReview(t *testing.T) {
 	setupWorkroomHandlerTestDB(t)
 	ctx := context.Background()
+	gitProject := t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitProject, ".git"), 0o755); err != nil {
+		t.Fatalf("create git marker: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE project SET cwd = ? WHERE id = 1`, gitProject); err != nil {
+		t.Fatalf("set git project cwd: %v", err)
+	}
 	_, receipt, err := SubmitHandsInstruction(ctx, nil, SubmitHandsInstructionInput{
-		InstructionText: "Perform a read-only audit.", RequestedLane: "codex", IdempotencyKey: "read-lifecycle-1",
+		InstructionText: "Perform an audit.", RequestedLane: "codex", IdempotencyKey: "read-lifecycle-1",
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
+	}
+	if receipt.RiskClass != "repository_write" {
+		t.Fatalf("scope-free submissions must default to the manual review class, got %+v", receipt)
 	}
 	var globalSessionID int
 	if err := db.QueryRow(`SELECT compat_session_id FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&globalSessionID); err != nil {
@@ -357,17 +368,35 @@ func TestHandsReadOnlyCompatibilityLifecycleCompletesAtomically(t *testing.T) {
 		t.Fatalf("complete compatibility session: %v", err)
 	}
 	if err := db.QueryRow(`SELECT state FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&instructionState); err != nil {
+		t.Fatalf("read reviewed instruction: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status FROM session WHERE id = ?`, globalSessionID).Scan(&sessionState); err != nil {
+		t.Fatalf("read reviewed session: %v", err)
+	}
+	if instructionState != "awaiting_review" || sessionState != "review" {
+		t.Fatalf("scope-free work must await manual review: instruction=%s session=%s", instructionState, sessionState)
+	}
+	authorizedRole = "fixer"
+	_, accepted, err := ReviewHandsInstruction(ctx, nil, ReviewHandsInstructionInput{
+		InstructionID: receipt.InstructionID, Decision: "accept", ReviewNote: "Verified.", IdempotencyKey: "review-accept-1",
+	})
+	if err != nil {
+		t.Fatalf("accept instruction: %v", err)
+	}
+	if accepted.State != "completed" {
+		t.Fatalf("expected completed instruction after review, got %+v", accepted)
+	}
+	if err := db.QueryRow(`SELECT state FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&instructionState); err != nil {
 		t.Fatalf("read completed instruction: %v", err)
 	}
 	if err := db.QueryRow(`SELECT status FROM session WHERE id = ?`, globalSessionID).Scan(&sessionState); err != nil {
 		t.Fatalf("read completed session: %v", err)
 	}
 	if instructionState != "completed" || sessionState != "completed" {
-		t.Fatalf("read-only completion mismatch: instruction=%s session=%s", instructionState, sessionState)
+		t.Fatalf("reviewed completion mismatch: instruction=%s session=%s", instructionState, sessionState)
 	}
 }
-
-func TestHandsRepositoryWriteLeaseAndReviewLifecycle(t *testing.T) {
+func TestHandsBusyConflictAndReviewLifecycleWithoutScopes(t *testing.T) {
 	setupWorkroomHandlerTestDB(t)
 	ctx := context.Background()
 	gitProject := t.TempDir()
@@ -378,92 +407,110 @@ func TestHandsRepositoryWriteLeaseAndReviewLifecycle(t *testing.T) {
 		t.Fatalf("set git project cwd: %v", err)
 	}
 	_, receipt, err := SubmitHandsInstruction(ctx, nil, SubmitHandsInstructionInput{
-		InstructionText:    "Change the governed bridge and verify it.",
-		DeclaredWriteScope: []string{"fixer_mcp/dashboard_api"}, RequestedLane: "codex", IdempotencyKey: "write-lifecycle-1",
+		InstructionText: "Change the governed bridge and verify it.",
+		RequestedLane:   "codex", IdempotencyKey: "write-lifecycle-1",
 	})
 	if err != nil {
-		t.Fatalf("submit repository instruction: %v", err)
+		t.Fatalf("submit first instruction: %v", err)
 	}
 	if receipt.State != "queued" || receipt.RiskClass != "repository_write" {
-		t.Fatalf("unexpected repository receipt: %+v", receipt)
+		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
-	var globalSessionID int
+	_, second, err := SubmitHandsInstruction(ctx, nil, SubmitHandsInstructionInput{
+		InstructionText: "Follow-up instruction.",
+		RequestedLane:   "codex", IdempotencyKey: "write-lifecycle-2",
+	})
+	if err != nil {
+		t.Fatalf("submit second instruction: %v", err)
+	}
+	var globalSessionID, secondGlobalSessionID int
 	if err := db.QueryRow(`SELECT compat_session_id FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&globalSessionID); err != nil {
 		t.Fatalf("resolve compatibility session: %v", err)
+	}
+	if err := db.QueryRow(`SELECT compat_session_id FROM hands_instruction WHERE id = ?`, second.InstructionID).Scan(&secondGlobalSessionID); err != nil {
+		t.Fatalf("resolve second compatibility session: %v", err)
 	}
 	localSessionID, err := projectScopedSessionIDFromGlobal(globalSessionID, 1)
 	if err != nil {
 		t.Fatalf("map compatibility session: %v", err)
 	}
-	if _, err := db.Exec(`
-		INSERT INTO project_write_lease (
-			id, project_id, lease_set_id, owner_kind, owner_id, scope_path, fencing_token,
-			state, binary_build_id, binary_epoch, created_at, heartbeat_at
-		) VALUES ('conflict', 1, 'wave-set', 'wave_worker', 'worker-1', 'fixer_mcp', 1,
-		          'active', 'test-build', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
-		t.Fatalf("seed conflicting shared lease: %v", err)
-	}
-	authorizedRole = "netrunner"
-	if _, _, err := CheckoutTask(ctx, nil, CheckoutTaskInput{SessionId: localSessionID}); err == nil {
-		t.Fatal("expected checkout to wait for overlapping shared lease")
-	}
-	var state, sessionStatus string
-	if err := db.QueryRow(`SELECT state FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&state); err != nil {
-		t.Fatalf("read waiting state: %v", err)
-	}
-	if err := db.QueryRow(`SELECT status FROM session WHERE id = ?`, globalSessionID).Scan(&sessionStatus); err != nil {
-		t.Fatalf("read waiting session: %v", err)
-	}
-	if state != "waiting_for_lease" || sessionStatus != "pending" {
-		t.Fatalf("lease denial must preserve pending execution: instruction=%s session=%s", state, sessionStatus)
-	}
-	if _, err := db.Exec(`UPDATE project_write_lease SET state = 'released', released_at = CURRENT_TIMESTAMP WHERE id = 'conflict'`); err != nil {
-		t.Fatalf("release conflicting lease: %v", err)
+	secondLocalSessionID, err := projectScopedSessionIDFromGlobal(secondGlobalSessionID, 1)
+	if err != nil {
+		t.Fatalf("map second compatibility session: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO mcp_binary_state (project_id, running_build_epoch) VALUES (1, 42)`); err != nil {
 		t.Fatalf("seed current binary epoch: %v", err)
 	}
+	authorizedRole = "netrunner"
 	if _, _, err := CheckoutTask(ctx, nil, CheckoutTaskInput{SessionId: localSessionID}); err != nil {
-		t.Fatalf("retry checkout after release: %v", err)
+		t.Fatalf("checkout first instruction: %v", err)
 	}
-	var activeLeaseCount, generationBinaryEpoch, leaseBinaryEpoch int
-	var leaseSetID string
-	if err := db.QueryRow(`SELECT COUNT(*) FROM project_write_lease WHERE owner_id = ? AND state = 'active'`, receipt.InstructionID).Scan(&activeLeaseCount); err != nil {
-		t.Fatalf("count active Hands leases: %v", err)
+	var generationBinaryEpoch int
+	if err := db.QueryRow(`SELECT binary_epoch FROM hands_generation WHERE instruction_id = ? AND generation = 1`, receipt.InstructionID).Scan(&generationBinaryEpoch); err != nil {
+		t.Fatalf("read generation process metadata: %v", err)
 	}
-	if activeLeaseCount != 1 {
-		t.Fatalf("expected one active scoped Hands lease, got %d", activeLeaseCount)
+	if generationBinaryEpoch != 42 {
+		t.Fatalf("generation must preserve the current binary epoch, got %d", generationBinaryEpoch)
 	}
-	if err := db.QueryRow(`SELECT binary_epoch, lease_set_id FROM hands_generation WHERE instruction_id = ? AND generation = 1`, receipt.InstructionID).Scan(&generationBinaryEpoch, &leaseSetID); err != nil {
-		t.Fatalf("read generation fencing metadata: %v", err)
+	_, _, checkoutErr := CheckoutTask(ctx, nil, CheckoutTaskInput{SessionId: secondLocalSessionID})
+	if checkoutErr == nil {
+		t.Fatal("expected busy serialization to defer the second generation")
 	}
-	if err := db.QueryRow(`SELECT binary_epoch FROM project_write_lease WHERE lease_set_id = ? AND state = 'active'`, leaseSetID).Scan(&leaseBinaryEpoch); err != nil {
-		t.Fatalf("read lease binary epoch: %v", err)
+	if !strings.Contains(checkoutErr.Error(), "hands_instruction_busy") {
+		t.Fatalf("expected a plain busy denial, got %v", checkoutErr)
 	}
-	if generationBinaryEpoch != 42 || leaseBinaryEpoch != 42 {
-		t.Fatalf("generation and lease must preserve the current binary epoch: generation=%d lease=%d", generationBinaryEpoch, leaseBinaryEpoch)
+	var state, sessionStatus string
+	if err := db.QueryRow(`SELECT state FROM hands_instruction WHERE id = ?`, second.InstructionID).Scan(&state); err != nil {
+		t.Fatalf("read queued state: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status FROM session WHERE id = ?`, secondGlobalSessionID).Scan(&sessionStatus); err != nil {
+		t.Fatalf("read queued session: %v", err)
+	}
+	if state != "queued" || sessionStatus != "pending" {
+		t.Fatalf("busy denial must keep plain queued state: instruction=%s session=%s", state, sessionStatus)
+	}
+	if count := countRows(t, `SELECT COUNT(*) FROM hands_instruction WHERE id = ? AND state_reason_code IS NOT NULL`, second.InstructionID); count != 0 {
+		t.Fatal("busy denial must not write a lease-style state reason")
+	}
+	if count := countRows(t, `SELECT COUNT(*) FROM hands_instruction_event WHERE instruction_id = ? AND event_type = 'instruction.waiting_for_lease'`, second.InstructionID); count != 0 {
+		t.Fatal("busy denial must not emit retired waiting_for_lease events")
+	}
+	if count := countRows(t, `SELECT COUNT(*) FROM workroom_audit_event WHERE target_id = ? AND action_id = 'hands.instruction.start' AND decision = 'denied' AND outcome = 'busy'`, second.InstructionID); count != 1 {
+		t.Fatalf("busy denial must leave a durable audit record, got %d", count)
 	}
 	if _, err := db.Exec(`INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, ?, 'pending', 'Bridge contract remains current.')`, globalSessionID); err != nil {
 		t.Fatalf("seed doc proposal: %v", err)
 	}
 	if _, _, err := CompleteTask(ctx, nil, CompleteTaskInput{SessionId: localSessionID, FinalReport: structuredTestFinalReport}); err != nil {
-		t.Fatalf("complete repository generation: %v", err)
+		t.Fatalf("complete first generation: %v", err)
 	}
 	if err := db.QueryRow(`SELECT state FROM hands_instruction WHERE id = ?`, receipt.InstructionID).Scan(&state); err != nil {
 		t.Fatalf("read review state: %v", err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM project_write_lease WHERE owner_id = ? AND state = 'active'`, receipt.InstructionID).Scan(&activeLeaseCount); err != nil {
-		t.Fatalf("recount active leases: %v", err)
+	if state != "awaiting_review" {
+		t.Fatalf("report must enter manual review, got state=%s", state)
 	}
-	if state != "awaiting_review" || activeLeaseCount != 0 {
-		t.Fatalf("report must enter review and release execution leases: state=%s leases=%d", state, activeLeaseCount)
+	for _, retiredTable := range []string{"project_write_lease", "project_write_fence", "parallel_wave_scope_lease"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, retiredTable).Scan(&count); err != nil {
+			t.Fatalf("inspect retired %s: %v", retiredTable, err)
+		}
+		if count != 0 {
+			t.Fatalf("retired lease table %s must not exist, got %d", retiredTable, count)
+		}
 	}
-	var leaseEventCount, leaseRevisionCount int
-	if err := db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT aggregate_revision) FROM project_ui_event WHERE project_id = 1 AND aggregate_type = 'project_write_lease' AND aggregate_id = ?`, leaseSetID).Scan(&leaseEventCount, &leaseRevisionCount); err != nil {
-		t.Fatalf("inspect lease journal revisions: %v", err)
+	var leaseEventCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM project_ui_event WHERE project_id = 1 AND aggregate_type = 'project_write_lease'`).Scan(&leaseEventCount); err != nil {
+		t.Fatalf("inspect lease journal: %v", err)
 	}
-	if leaseEventCount != 2 || leaseRevisionCount != 2 {
-		t.Fatalf("lease acquire/release must use monotonic aggregate revisions: events=%d revisions=%d", leaseEventCount, leaseRevisionCount)
+	if leaseEventCount != 0 {
+		t.Fatalf("scope-free execution must not journal lease events, got %d", leaseEventCount)
+	}
+	if _, err := db.Exec(`INSERT INTO doc_proposal (project_id, session_id, status, proposed_content) VALUES (1, ?, 'pending', 'Second generation doc impact.')`, secondGlobalSessionID); err != nil {
+		t.Fatalf("seed second doc proposal: %v", err)
+	}
+	if _, _, err := CheckoutTask(ctx, nil, CheckoutTaskInput{SessionId: secondLocalSessionID}); err != nil {
+		t.Fatalf("retry checkout after first generation reported: %v", err)
 	}
 	authorizedRole = "fixer"
 	_, rework, err := ReviewHandsInstruction(ctx, nil, ReviewHandsInstructionInput{
@@ -482,7 +529,20 @@ func TestHandsRepositoryWriteLeaseAndReviewLifecycle(t *testing.T) {
 	if generationCount != 2 {
 		t.Fatalf("request changes must create generation two, got %d", generationCount)
 	}
-	// Drive generation two through the same compatibility projection and accept it.
+	authorizedRole = "netrunner"
+	if _, _, err := CompleteTask(ctx, nil, CompleteTaskInput{SessionId: secondLocalSessionID, FinalReport: structuredTestFinalReport}); err != nil {
+		t.Fatalf("complete second generation: %v", err)
+	}
+	authorizedRole = "fixer"
+	_, secondAccepted, err := ReviewHandsInstruction(ctx, nil, ReviewHandsInstructionInput{
+		InstructionID: second.InstructionID, Decision: "accept", ReviewNote: "Verified.", IdempotencyKey: "review-accept-2",
+	})
+	if err != nil {
+		t.Fatalf("accept second instruction: %v", err)
+	}
+	if secondAccepted.State != "completed" {
+		t.Fatalf("expected completed second instruction, got %+v", secondAccepted)
+	}
 	authorizedRole = "netrunner"
 	if _, _, err := CheckoutTask(ctx, nil, CheckoutTaskInput{SessionId: localSessionID}); err != nil {
 		t.Fatalf("checkout rework generation: %v", err)
@@ -492,7 +552,7 @@ func TestHandsRepositoryWriteLeaseAndReviewLifecycle(t *testing.T) {
 	}
 	authorizedRole = "fixer"
 	_, accepted, err := ReviewHandsInstruction(ctx, nil, ReviewHandsInstructionInput{
-		InstructionID: receipt.InstructionID, Decision: "accept", ReviewNote: "Verified.", IdempotencyKey: "review-accept-2",
+		InstructionID: receipt.InstructionID, Decision: "accept", ReviewNote: "Verified.", IdempotencyKey: "review-accept-3",
 	})
 	if err != nil {
 		t.Fatalf("accept instruction: %v", err)

@@ -53,6 +53,54 @@ void main() {
   );
 
   testWidgets(
+    'hands selector keeps a persisted Antigravity Claude 5.5 selection',
+    (tester) async {
+      final store = _selectorStore();
+      addTearDown(() async {
+        await store.stop();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: HandsTab(
+              store: store,
+              loadThreads: () async => const [
+                WorkroomFixerThread(
+                  id: 'hands-agy-opus-55',
+                  headline: 'Руки thread',
+                  provider: 'antigravity',
+                  state: 'history',
+                  createdAt: '2026-10-04T01:00:00Z',
+                  updatedAt: '2026-10-04T02:00:00Z',
+                  model: 'Claude Opus 5.5',
+                  reasoning: 'medium',
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final selector = tester.widget<ProviderModelReasoningSelector>(
+        find.byKey(const ValueKey('hands-provider-lane-selector')),
+      );
+      expect(selector.providers.single.id, 'antigravity');
+      expect(selector.providers.single.models, ['Claude Opus 5.5']);
+      expect(
+        selector.providers.single.reasoningOptions,
+        containsAll(['low', 'medium', 'high']),
+      );
+      expect(
+        selector.providers.single.reasoningOptions,
+        isNot(contains('thinking')),
+      );
+      expect(selector.selectedModel, 'Claude Opus 5.5');
+      expect(selector.selectedReasoning, 'medium');
+    },
+  );
+
+  testWidgets(
     'hands selector without a real thread still offers every registered lane',
     (tester) async {
       final store = _selectorStore();
@@ -76,6 +124,50 @@ void main() {
         containsAll(['codex', 'claude', 'kimi-code', 'antigravity']),
       );
       expect(selector.enabled, isTrue);
+    },
+  );
+
+  testWidgets(
+    'hands composer submits an instruction without a write-scope file list',
+    (tester) async {
+      final fixture = workroomFixture();
+      final repository = FakeProjectWorkroomRepository(snapshot: fixture);
+      final store = ProjectWorkroomStore(
+        projectId: fixture.project.id,
+        repository: repository,
+        cursorStore: MemoryProjectUiCursorStore(),
+        seedSnapshot: fixture,
+        reconnectDelay: (_) async {},
+      );
+      addTearDown(() async {
+        await store.stop();
+        await repository.close();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: HandsTab(store: store, loadThreads: () async => const []),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Mailbox & history'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('hands-write-scope')), findsNothing);
+      expect(find.text('Declared write scope'), findsNothing);
+      expect(find.textContaining('Write lease'), findsNothing);
+      expect(find.textContaining('Запись / lease'), findsNothing);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('hands-instruction-composer')),
+        'Audit the bridge.',
+      );
+      await tester.tap(find.byKey(const ValueKey('submit-hands-instruction')));
+      await tester.pumpAndSettle();
+
+      expect(repository.submittedInstructions, ['Audit the bridge.']);
     },
   );
 }
@@ -142,7 +234,6 @@ class _FakeSelectorRepository implements ProjectWorkroomRepository {
   Future<HandsInstructionReceipt> submitHandsInstruction({
     required int projectId,
     required String instructionText,
-    required List<String> declaredWriteScope,
     required String requestedLane,
     required String requestedModel,
     required String requestedReasoning,

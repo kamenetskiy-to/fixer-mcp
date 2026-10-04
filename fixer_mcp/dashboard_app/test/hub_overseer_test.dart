@@ -127,6 +127,66 @@ void main() {
     expect(find.text('Create prepared on codex'), findsOneWidget);
   });
 
+  test('Antigravity Overseer menu offers Claude 5.5 and no retired 4.6', () {
+    final antigravity = overseerBackendOptions.singleWhere(
+      (option) => option.id == 'antigravity',
+    );
+
+    expect(
+      antigravity.models,
+      containsAll([
+        'Gemini 3.5 Flash',
+        'Gemini 3.6 Flash',
+        'Gemini 3.1 Pro',
+        'Claude Opus 5.5',
+        'Claude Sonnet 5.5',
+      ]),
+    );
+    expect(antigravity.reasoningOptions, ['default', 'low', 'medium', 'high']);
+    for (final option in overseerBackendOptions) {
+      expect(
+        option.models.where(
+          (model) => model.startsWith('Claude') && model.contains('4.6'),
+        ),
+        isEmpty,
+      );
+      expect(option.reasoningOptions, isNot(contains('thinking')));
+    }
+  });
+
+  testWidgets('Create Overseer launches Antigravity Claude Sonnet 5.5 high', (
+    tester,
+  ) async {
+    final repository = _FakeOverseerRepository();
+    await tester.pumpWidget(_app(repository));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('create-overseer')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('overseer-cwd')),
+      '/workspace/agy-overseer',
+    );
+    await tester.tap(find.byKey(const Key('overseer-backend')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Antigravity').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('overseer-model-antigravity')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Claude Sonnet 5.5').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-create-overseer')));
+    await tester.pumpAndSettle();
+
+    expect(repository.created?.toJson(), {
+      'cwd': '/workspace/agy-overseer',
+      'backend': 'antigravity',
+      'model': 'Claude Sonnet 5.5',
+      'reasoning': 'high',
+    });
+    expect(find.text('Create prepared on antigravity'), findsOneWidget);
+  });
+
   testWidgets('shows explicit empty and error states', (tester) async {
     await tester.pumpWidget(_app(_FakeOverseerRepository()));
     await tester.pumpAndSettle();

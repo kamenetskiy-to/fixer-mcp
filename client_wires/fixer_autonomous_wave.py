@@ -195,7 +195,6 @@ def _build_wave_netrunner_launch_plan(
     local_session_id: int,
     wave_id: int,
     wave_worker_id: int,
-    declared_write_scope: list[str],
     fixer_session_id: str,
     assigned_mcp_names: list[str],
     mcp_how_to: dict[str, str],
@@ -295,7 +294,6 @@ def _build_wave_netrunner_launch_plan(
         wave_worker_id=normalized_wave_worker_id,
         branch_name=resolved_branch_name,
         worker_cwd=resolved_worker_cwd,
-        declared_write_scope=declared_write_scope,
     )
     prompt = fixer_wire._append_droid_mcp_tool_guidance(
         prompt,
