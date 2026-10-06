@@ -1,3 +1,0 @@
-interface:
-  display_name: "Bridge Overseer Fixer"
-  short_description: "Handle durable Overseer/Fixer bridge work"
