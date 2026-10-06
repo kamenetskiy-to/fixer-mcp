@@ -139,6 +139,25 @@ func TestPrepareSystem1ReaderAgentDirReusesRealConfigWithoutCopying(t *testing.T
 		t.Fatalf("models.json symlink must point at the real config file, got %q (err=%v)", target, err)
 	}
 
+	// When auth.json is present, it is also referenced via symlink.
+	authBody := `{"commandcode":{"apiKey":"fake-commandcode-token-value"}}`
+	if err := os.WriteFile(filepath.Join(source, "auth.json"), []byte(authBody), 0o644); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	runDirWithAuth := t.TempDir()
+	agentDirWithAuth, _, err := prepareSystem1ReaderAgentDir([]string{"HOME=/home/op", "PI_CODING_AGENT_DIR=" + source}, runDirWithAuth)
+	if err != nil {
+		t.Fatalf("prepare agent dir with auth: %v", err)
+	}
+	authInfo, err := os.Lstat(filepath.Join(agentDirWithAuth, "auth.json"))
+	if err != nil || authInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("auth.json must be referenced via symlink, got %v (err=%v)", authInfo, err)
+	}
+	authTarget, err := os.Readlink(filepath.Join(agentDirWithAuth, "auth.json"))
+	if err != nil || authTarget != filepath.Join(source, "auth.json") {
+		t.Fatalf("auth.json symlink must point at the real auth file, got %q (err=%v)", authTarget, err)
+	}
+
 	// Missing provider configuration is a distinct infrastructure condition.
 	emptySource := t.TempDir()
 	if _, _, err := prepareSystem1ReaderAgentDir([]string{"PI_CODING_AGENT_DIR=" + emptySource}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "provider configuration not found") {
@@ -302,6 +321,9 @@ func TestSystem1PiReaderSendsPromptOnStdinNotArgv(t *testing.T) {
 	originalExecCommand := execCommand
 	defer func() { execCommand = originalExecCommand }()
 
+	configDir := writeMockReaderConfig(t, "")
+	t.Setenv("PI_CODING_AGENT_DIR", configDir)
+
 	runDir := t.TempDir()
 	dumpPath := filepath.Join(runDir, "stdin-dump.txt")
 	streamPath := filepath.Join(runDir, "stream.jsonl")
@@ -380,6 +402,8 @@ func TestSystem1PiReaderLaunchIsHermeticAndPersistsSecretSafeMetadata(t *testing
 	}
 
 	injectedSecret := "sk-" + "live-secret-token-0123456789"
+	configDir := writeMockReaderConfig(t, "")
+	t.Setenv("PI_CODING_AGENT_DIR", configDir)
 	var gotCmd *exec.Cmd
 	execCommand = func(name string, arg ...string) *exec.Cmd {
 		header := fmt.Sprintf("%s: %s", "Authorization", "Bearer")
@@ -427,6 +451,12 @@ func TestSystem1PiReaderLaunchIsHermeticAndPersistsSecretSafeMetadata(t *testing
 	}
 	if envMap[system1ReaderEvidenceAllowlistEnv] == "" {
 		t.Fatal("the reader must receive its exact evidence allowlist")
+	}
+	for _, name := range []string{"models.json", "auth.json"} {
+		target, readlinkErr := os.Readlink(filepath.Join(envMap[system1ReaderAgentDirEnv], name))
+		if readlinkErr != nil || target != filepath.Join(configDir, name) {
+			t.Fatalf("%s in reader agent-config must symlink to real fixture: %v (target=%q)", name, readlinkErr, target)
+		}
 	}
 
 	// Durable run metadata exists, is secret-safe, and records the deny list.
@@ -494,6 +524,9 @@ func TestSystem1PiReaderTimeoutKillsOwnChildAndPersistsCoverageDiagnostics(t *te
 		system1ReaderExecTimeout = originalTimeout
 	}()
 	system1ReaderExecTimeout = 300 * time.Millisecond
+
+	configDir := writeMockReaderConfig(t, "")
+	t.Setenv("PI_CODING_AGENT_DIR", configDir)
 
 	projectCWD := t.TempDir()
 	execCommand = func(name string, arg ...string) *exec.Cmd {
@@ -650,11 +683,15 @@ func mustJSON(t *testing.T, value any) []byte {
 func writeMockReaderConfig(t *testing.T, mockURL string) string {
 	t.Helper()
 	dir := t.TempDir()
+	baseURL := "http://127.0.0.1:9/v1"
+	if strings.TrimSpace(mockURL) != "" {
+		baseURL = strings.TrimRight(mockURL, "/") + "/v1"
+	}
 	models := map[string]any{
 		"providers": map[string]any{
 			system1ReaderProvider: map[string]any{
 				"name":    "Mock CommandCode",
-				"baseUrl": mockURL + "/v1",
+				"baseUrl": baseURL,
 				"api":     "openai-completions",
 				"apiKey":  "mock-key-not-a-real-secret",
 				"models": []map[string]any{{
@@ -674,6 +711,10 @@ func writeMockReaderConfig(t *testing.T, mockURL string) string {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "models.json"), mustJSON(t, models), 0o644); err != nil {
 		t.Fatalf("write mock models.json: %v", err)
+	}
+	auth := map[string]any{}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), mustJSON(t, auth), 0o644); err != nil {
+		t.Fatalf("write mock auth.json: %v", err)
 	}
 	return dir
 }
