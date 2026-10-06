@@ -25,7 +25,7 @@ const (
 )
 
 var handsProviders = map[string]struct{}{
-	"codex": {}, "commandcode": {}, "claude": {}, "kimi-code": {}, "antigravity": {}, "grok": {},
+	"pi": {}, "codex": {}, "grok": {}, "antigravity": {},
 }
 
 var terminalHandsInstructionStates = map[string]struct{}{
@@ -243,7 +243,9 @@ const handsInstructionSelectColumns = `
 // class *agent* backend; it is simply not a Project Hands lane.
 func handsLanePersistable(provider string) bool {
 	switch provider {
-	case "codex", "commandcode", "claude", "kimi-code", "antigravity", "grok":
+	case "pi", "codex", "grok", "antigravity":
+		return true
+	case "commandcode", "claude", "kimi-code":
 		return true
 	default:
 		return false
@@ -251,12 +253,13 @@ func handsLanePersistable(provider string) bool {
 }
 
 func handsLaneNames() []string {
-	return []string{"codex", "commandcode", "claude", "kimi-code", "antigravity", "grok"}
+	return []string{"pi", "codex", "grok", "antigravity"}
 }
 
 func readHandsLanes() []HandsProviderLane {
-	lanes := make([]HandsProviderLane, 0, 7)
-	for _, provider := range []string{"commandcode", "codex", "claude", "kimi-code", "antigravity", "grok", "pi"} {
+	names := handsLaneNames()
+	lanes := make([]HandsProviderLane, 0, len(names))
+	for _, provider := range names {
 		if !handsLanePersistable(provider) {
 			continue
 		}

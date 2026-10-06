@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -30,12 +30,19 @@ func setupSystem1ReviewTest(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 	originalDB, originalRole, originalProjectID := db, authorizedRole, authorizedProjectId
 	originalReader, originalJudge := system1ReaderExec, system1JudgeExec
+	originalCommandcodeRoot, originalPiRoot := commandcodeSessionTranscriptRoot, piSessionTranscriptRoot
 	t.Cleanup(func() {
 		db, authorizedRole, authorizedProjectId = originalDB, originalRole, originalProjectID
 		system1ReaderExec, system1JudgeExec = originalReader, originalJudge
+		commandcodeSessionTranscriptRoot, piSessionTranscriptRoot = originalCommandcodeRoot, originalPiRoot
 	})
 
 	repoDir := setupCleanGitRepo(t)
+	// Transcript evidence is written to throwaway roots only: no test ever
+	// touches the operator's real session stores.
+	commandcodeRoot, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	commandcodeSessionTranscriptRoot = commandcodeRoot
+	piSessionTranscriptRoot = piRoot
 	testDB := setupParallelWaveTestDB(t, repoDir)
 	t.Cleanup(func() { _ = testDB.Close() })
 	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
@@ -88,6 +95,63 @@ func system1TestPacket() *System1CheckInput {
 	}
 }
 
+// stageSystem1WorkerTranscriptEvidence binds one staged worker to real
+// transcript evidence on disk: a persisted external session id plus an
+// original JSONL transcript under the throwaway commandcode store. Without
+// provenance the System1 gate must fail closed as infrastructure, so every
+// review-cycle test stages evidence explicitly.
+func stageSystem1WorkerTranscriptEvidence(t *testing.T, testDB *sql.DB, wave NetrunnerWaveSnapshot, localSessionID int, externalSessionID string, transcriptBody string) string {
+	t.Helper()
+	globalSessionID, err := globalSessionIDFromProjectScoped(localSessionID, wave.ProjectId)
+	if err != nil {
+		t.Fatalf("resolve global session id for evidence: %v", err)
+	}
+	if _, err := testDB.Exec(`
+		CREATE TABLE IF NOT EXISTS session_external_link (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id INTEGER NOT NULL,
+			backend TEXT NOT NULL,
+			external_session_id TEXT NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		t.Fatalf("ensure session_external_link: %v", err)
+	}
+	if _, err := testDB.Exec("UPDATE session SET cli_backend = 'commandcode' WHERE id = ?", globalSessionID); err != nil {
+		t.Fatalf("stage evidence backend: %v", err)
+	}
+	if _, err := testDB.Exec(
+		"INSERT OR REPLACE INTO session_external_link (session_id, backend, external_session_id) VALUES (?, 'commandcode', ?)",
+		globalSessionID,
+		externalSessionID,
+	); err != nil {
+		t.Fatalf("stage evidence external id: %v", err)
+	}
+	path := filepath.Join(
+		commandcodeSessionTranscriptRoot,
+		commandcodeProjectTranscriptDirName(wave.ProjectCwd),
+		externalSessionID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir evidence dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(transcriptBody), 0o644); err != nil {
+		t.Fatalf("write evidence transcript: %v", err)
+	}
+	return path
+}
+
+// system1TestTranscriptBody is a small sanitized transcript fixture: a real
+// session header shape plus a couple of messages, with no operator data.
+func system1TestTranscriptBody(externalSessionID string, projectCWD string) string {
+	return strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","version":3,"id":%q,"timestamp":"2026-10-05T12:00:00.000Z","cwd":%q}`, externalSessionID, projectCWD),
+		`{"type":"message","id":"m1","timestamp":"2026-10-05T12:00:01.000Z","message":{"role":"user","content":"implement and test"}}`,
+		`{"type":"message","id":"m2","timestamp":"2026-10-05T12:00:02.000Z","message":{"role":"assistant","content":"implemented; go test ./... passed"}}`,
+		"",
+	}, "\n")
+}
+
 func stageSystem1ReviewReadyWorker(t *testing.T, testDB *sql.DB, waveID int, localSessionID int) NetrunnerWaveSnapshot {
 	t.Helper()
 	globalSessionID, err := globalSessionIDFromProjectScoped(localSessionID, 1)
@@ -122,6 +186,15 @@ func stageSystem1ReviewReadyWorker(t *testing.T, testDB *sql.DB, waveID int, loc
 	if err != nil {
 		t.Fatalf("fetch staged wave: %v", err)
 	}
+	externalSessionID := fmt.Sprintf("sys1-transcript-%d", localSessionID)
+	stageSystem1WorkerTranscriptEvidence(
+		t,
+		testDB,
+		wave,
+		localSessionID,
+		externalSessionID,
+		system1TestTranscriptBody(externalSessionID, wave.ProjectCwd),
+	)
 	for _, worker := range wave.Workers {
 		if worker.SessionId == localSessionID {
 			return wave
@@ -134,8 +207,8 @@ func stageSystem1ReviewReadyWorker(t *testing.T, testDB *sql.DB, waveID int, loc
 func fakeSystem1Executor(t *testing.T, judgeOutput string, judgeErr error) *[]string {
 	t.Helper()
 	models := &[]string{}
-	system1ReaderExec = func(ctx context.Context, projectCWD string, model string, prompt string) (string, error) {
-		*models = append(*models, model)
+	system1ReaderExec = func(ctx context.Context, projectCWD string, run system1ReaderRun) (string, error) {
+		*models = append(*models, run.Model)
 		return "FACTUAL OVERVIEW: transcript read; commands and outcomes listed without quality judgment.", nil
 	}
 	system1JudgeExec = func(ctx context.Context, projectCWD string, payload string) (string, error) {
@@ -151,7 +224,7 @@ func fakeSystem1Executor(t *testing.T, judgeOutput string, judgeErr error) *[]st
 func fakeSystem1ReaderFailure(t *testing.T, readerErr error) *bool {
 	t.Helper()
 	judgeCalled := false
-	system1ReaderExec = func(ctx context.Context, projectCWD string, model string, prompt string) (string, error) {
+	system1ReaderExec = func(ctx context.Context, projectCWD string, run system1ReaderRun) (string, error) {
 		return "", readerErr
 	}
 	system1JudgeExec = func(ctx context.Context, projectCWD string, payload string) (string, error) {
@@ -1045,129 +1118,6 @@ func TestSystem1JevAnswerValidation(t *testing.T) {
 	})
 }
 
-func TestExtractSystem1ModelTextParsesCmdJSONL(t *testing.T) {
-	junk := strings.Repeat(`{"type":"event","event":{"type":"thinking_delta","delta":"intermediate reasoning that must never reach the judge"}}`+"\n", 200)
-	junk += strings.Repeat(`{"type":"event","event":{"type":"tool_completed","toolCallId":"call-1","title":"shell","output":"tool output that must never reach the judge"}}`+"\n", 200)
-
-	runEndLine := func(finalText string, stopReason string) string {
-		payload, _ := json.Marshal(map[string]any{
-			"type": "event",
-			"event": map[string]any{
-				"type": "run_end",
-				"result": map[string]any{
-					"finalText":          finalText,
-					"stopReason":         stopReason,
-					"turnCount":          2,
-					"usage":              map[string]any{"inputTokens": 10, "outputTokens": 20},
-					"systemPromptTokens": 5,
-				},
-			},
-		})
-		return string(payload)
-	}
-	resultLine := func(fields map[string]any) string {
-		fields["type"] = "result"
-		payload, _ := json.Marshal(fields)
-		return string(payload)
-	}
-	streamHeader := `{"type":"event","event":{"type":"run_start","sessionId":"00000000-0000-0000-0000-000000000000"}}` + "\n" +
-		`{"type":"event","event":{"type":"turn_start","turnNumber":1}}` + "\n" +
-		`{"type":"event","event":{"type":"message_start"}}` + "\n" +
-		`{"type":"event","event":{"type":"model_request_start","model":"xiaomi/mimo-v2.6-flash"}}` + "\n"
-
-	t.Run("terminal successful result.finalText wins", func(t *testing.T) {
-		raw := streamHeader + junk +
-			runEndLine("RUN END OVERVIEW", "end_turn") + "\n" +
-			resultLine(map[string]any{"subtype": "success", "stopReason": "end_turn", "durationMs": 1234, "finalText": "TERMINAL OVERVIEW"}) + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err != nil {
-			t.Fatalf("extract: %v", err)
-		}
-		if got != "TERMINAL OVERVIEW" {
-			t.Fatalf("terminal result.finalText must win, got %q", got)
-		}
-	})
-
-	t.Run("run_end.result.finalText is the fallback", func(t *testing.T) {
-		raw := streamHeader + junk + runEndLine("RUN END OVERVIEW", "end_turn") + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err != nil {
-			t.Fatalf("extract: %v", err)
-		}
-		if got != "RUN END OVERVIEW" {
-			t.Fatalf("run_end fallback: got %q", got)
-		}
-	})
-
-	t.Run("giant successful stream yields only the final overview", func(t *testing.T) {
-		raw := streamHeader + junk +
-			runEndLine("", "end_turn") + "\n" +
-			resultLine(map[string]any{"subtype": "success", "stopReason": "end_turn", "durationMs": 999, "finalText": "FINAL OVERVIEW"}) + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err != nil {
-			t.Fatalf("extract: %v", err)
-		}
-		if got != "FINAL OVERVIEW" {
-			t.Fatalf("the event stream must never leak to the judge, got %q", got)
-		}
-	})
-
-	t.Run("stream without a final overview fails closed", func(t *testing.T) {
-		raw := streamHeader + junk +
-			runEndLine("", "end_turn") + "\n" +
-			resultLine(map[string]any{"subtype": "success", "stopReason": "end_turn", "durationMs": 1, "finalText": ""}) + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err == nil {
-			t.Fatalf("a stream with no final overview must fail closed, got %q", got)
-		}
-		if got != "" {
-			t.Fatalf("fail closed must never return the event stream, got %q", got)
-		}
-	})
-
-	t.Run("unsuccessful result fails closed", func(t *testing.T) {
-		raw := streamHeader + junk +
-			resultLine(map[string]any{"subtype": "error", "durationMs": 1, "finalText": "", "error": "Error: provider exploded"}) + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err == nil || !strings.Contains(err.Error(), "unsuccessful") {
-			t.Fatalf("an unsuccessful result must fail closed with its reason, got %q err=%v", got, err)
-		}
-	})
-
-	t.Run("turn-limit truncation fails closed", func(t *testing.T) {
-		raw := streamHeader + junk +
-			runEndLine("PARTIAL ANSWER", "max_turns") + "\n" +
-			resultLine(map[string]any{"subtype": "max_turns", "stopReason": "max_turns", "durationMs": 1, "finalText": "PARTIAL ANSWER"}) + "\n"
-		got, err := extractSystem1ModelText(raw)
-		if err == nil || !strings.Contains(err.Error(), "turn limit") {
-			t.Fatalf("a truncated run must fail closed, got %q err=%v", got, err)
-		}
-
-		raw = streamHeader + junk + runEndLine("PARTIAL ANSWER", "max_turns") + "\n"
-		if got, err := extractSystem1ModelText(raw); err == nil || !strings.Contains(err.Error(), "turn limit") {
-			t.Fatalf("a truncated run_end fallback must fail closed, got %q err=%v", got, err)
-		}
-	})
-
-	t.Run("single-document and plain-text variants stay supported", func(t *testing.T) {
-		if got, err := extractSystem1ModelText(`{"result":"SINGLE DOC OVERVIEW"}`); err != nil || got != "SINGLE DOC OVERVIEW" {
-			t.Fatalf("single-document variant: %q %v", got, err)
-		}
-		if got, err := extractSystem1ModelText(`{"message":{"content":"MESSAGE OVERVIEW"}}`); err != nil || got != "MESSAGE OVERVIEW" {
-			t.Fatalf("message variant: %q %v", got, err)
-		}
-		if got, err := extractSystem1ModelText("plain text overview"); err != nil || got != "plain text overview" {
-			t.Fatalf("plain-text variant: %q %v", got, err)
-		}
-	})
-
-	t.Run("empty output fails closed", func(t *testing.T) {
-		if _, err := extractSystem1ModelText("   "); err == nil {
-			t.Fatal("empty reader output must fail closed")
-		}
-	})
-}
-
 func TestSystem1ArtifactsAndVerdictJSONRoundTrip(t *testing.T) {
 	verdictJSON := `{"contract_version":"system1-trial-0.1","check_id":"system1-w3-s9-c2","criteria":[{"id":"c1","probability":0.8,"evidence":["e"],"gap":""}],"overall_probability":0.8,"blocking":[],"verdict":"pass","summary":"ok"}`
 	verdict, err := parseSystem1JudgeOutput(verdictJSON, "system1-w3-s9-c2", system1TrialContractVersion)
@@ -1214,39 +1164,95 @@ func mustSystem1InfraArtifactPath(t *testing.T, projectCWD string, waveID int, l
 	return path
 }
 
-func TestSystem1ManagedReaderSendsPromptOnStdinNotArgv(t *testing.T) {
-	originalExecCommand := execCommand
-	defer func() { execCommand = originalExecCommand }()
+// TestSystem1MissingTranscriptProvenanceIsInfraFailed proves the fail-closed
+// gate: without provable transcript provenance the judge never runs and no
+// content verdict or budget is consumed.
+func TestSystem1MissingTranscriptProvenanceIsInfraFailed(t *testing.T) {
+	_, testDB := setupSystem1ReviewTest(t)
+	judgeCalled := fakeSystem1ReaderFailure(t, fmt.Errorf("judge must not run"))
 
-	prompt := strings.Repeat("factual transcript line with substantial content\n", 4000)
-	var gotName string
-	var gotArgs []string
-	execCommand = func(name string, arg ...string) *exec.Cmd {
-		gotName = name
-		gotArgs = append([]string{}, arg...)
-		return exec.Command("cat")
-	}
-
-	out, err := launchSystem1ManagedNetrunner(context.Background(), t.TempDir(), system1ReaderModel, prompt)
+	_, created, err := CreateNetrunnerWaveTool(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds:   []int{1},
+		System1Check: system1TestPacket(),
+	})
 	if err != nil {
-		t.Fatalf("managed reader launch failed: %v", err)
+		t.Fatalf("create wave: %v", err)
 	}
-	if gotName == "" {
-		t.Fatal("expected a reader binary to be resolved")
+	wave := stageSystem1ReviewReadyWorker(t, testDB, created.WaveId, 1)
+	// Remove the staged provenance to simulate the undetectable-transcript
+	// failure mode.
+	if _, err := testDB.Exec("DELETE FROM session_external_link"); err != nil {
+		t.Fatalf("drop provenance: %v", err)
 	}
-	foundPrint := false
-	for _, arg := range gotArgs {
-		if arg == "--print" {
-			foundPrint = true
-		}
-		if strings.Contains(arg, "factual transcript line") {
-			t.Fatalf("reader prompt must travel on stdin, never on argv where it can exceed ARG_MAX: %q", arg)
-		}
+
+	updated, outcome, err := processSystem1ReviewForWorker(context.Background(), wave.ProjectCwd, wave, wave.Workers[0])
+	if err != nil {
+		t.Fatalf("missing provenance must not fail the wait loop: %v", err)
 	}
-	if !foundPrint {
-		t.Fatalf("expected --print in reader argv without a prompt value, got %+v", gotArgs)
+	if outcome != system1OutcomeInfraFailed {
+		t.Fatalf("missing provenance must be an infrastructure failure, got %q", outcome)
 	}
-	if out != strings.TrimSpace(prompt) {
-		t.Fatalf("expected the full prompt to reach the reader on stdin, got %d of %d bytes", len(out), len(strings.TrimSpace(prompt)))
+	if *judgeCalled {
+		t.Fatal("the judge must never run without proven transcript evidence")
+	}
+	if updated.System1ChecksUsed != 0 {
+		t.Fatalf("infrastructure failure must not consume the content-check budget, got %+v", updated)
+	}
+	assertSystem1InfraFailureState(t, testDB, updated)
+
+	_, reviews, err := GetSystem1Reviews(context.Background(), nil, GetSystem1ReviewsInput{WaveId: created.WaveId})
+	if err != nil {
+		t.Fatalf("get_system1_reviews: %v", err)
+	}
+	if len(reviews.Checks) != 1 || !strings.Contains(reviews.Checks[0].Summary, "transcript provenance") {
+		t.Fatalf("expected a provenance diagnostic in the recorded row, got %+v", reviews.Checks)
+	}
+}
+
+// TestSystem1ContradictoryTranscriptProvenanceIsInfraFailed: a transcript whose
+// session header contradicts its filename identity must never reach the judge.
+func TestSystem1ContradictoryTranscriptProvenanceIsInfraFailed(t *testing.T) {
+	_, testDB := setupSystem1ReviewTest(t)
+	judgeCalled := fakeSystem1ReaderFailure(t, fmt.Errorf("judge must not run"))
+
+	_, created, err := CreateNetrunnerWaveTool(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds:   []int{1},
+		System1Check: system1TestPacket(),
+	})
+	if err != nil {
+		t.Fatalf("create wave: %v", err)
+	}
+	wave := stageSystem1ReviewReadyWorker(t, testDB, created.WaveId, 1)
+	externalSessionID := "sys1-transcript-1"
+	contradictory := "{\"type\":\"session\",\"id\":\"someone-else\",\"timestamp\":\"2026-10-05T12:00:00.000Z\",\"cwd\":\"/elsewhere\"}\n"
+	transcriptPath := filepath.Join(
+		commandcodeSessionTranscriptRoot,
+		commandcodeProjectTranscriptDirName(wave.ProjectCwd),
+		externalSessionID+".jsonl",
+	)
+	if err := os.WriteFile(transcriptPath, []byte(contradictory), 0o644); err != nil {
+		t.Fatalf("overwrite with contradictory evidence: %v", err)
+	}
+
+	updated, outcome, err := processSystem1ReviewForWorker(context.Background(), wave.ProjectCwd, wave, wave.Workers[0])
+	if err != nil {
+		t.Fatalf("contradictory provenance must not fail the wait loop: %v", err)
+	}
+	if outcome != system1OutcomeInfraFailed {
+		t.Fatalf("contradictory provenance must be an infrastructure failure, got %q", outcome)
+	}
+	if *judgeCalled {
+		t.Fatal("the judge must never run on contradictory provenance")
+	}
+	if updated.System1ChecksUsed != 0 {
+		t.Fatalf("infrastructure failure must not consume the content-check budget, got %+v", updated)
+	}
+
+	_, reviews, err := GetSystem1Reviews(context.Background(), nil, GetSystem1ReviewsInput{WaveId: created.WaveId})
+	if err != nil {
+		t.Fatalf("get_system1_reviews: %v", err)
+	}
+	if len(reviews.Checks) != 1 || !strings.Contains(reviews.Checks[0].Summary, "transcript coverage") {
+		t.Fatalf("expected a coverage diagnostic in the recorded row, got %+v", reviews.Checks)
 	}
 }

@@ -349,12 +349,13 @@
     },
     "grok": {
       "available": true,
-      "default_model": "grok-4.6",
-      "default_reasoning": "default",
+      "default_model": "grok-4.7",
+      "default_reasoning": "high",
       "description": "Native Grok Build CLI flow using the grok binary and project .grok/config.toml discovery.",
       "fresh_launch_supported": true,
       "label": "Grok Build",
       "model_options": [
+        "grok-4.7",
         "grok-4.6",
         "grok-4.5"
       ],
@@ -404,12 +405,13 @@
     },
     "pi": {
       "available": true,
-      "default_model": "deepseek-v4.1-flash",
+      "default_model": "mimo-v2.6-pro",
       "default_reasoning": "high",
       "description": "Pi coding agent CLI flow (pi) delegating MCP to the pi-mcp-adapter extension with an exclusive project-scoped --mcp-config file, and injecting Fixer role skills as explicit --skill paths.",
       "fresh_launch_supported": true,
       "label": "Pi",
       "model_options": [
+        "mimo-v2.6-pro",
         "deepseek-v4.1-flash",
         "deepseek-v4-flash",
         "deepseek-v4-flash-vision-exp",

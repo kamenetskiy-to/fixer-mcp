@@ -266,6 +266,16 @@ func decodeStructuredFinalReport(raw string) (SessionFinalReport, string, error)
 		}
 	}
 
+	if cleanupRaw, exists := payload["cleanup_claims"]; exists && len(cleanupRaw) > 0 && string(cleanupRaw) != "null" {
+		trimmedCleanup := strings.TrimSpace(string(cleanupRaw))
+		if strings.HasPrefix(trimmedCleanup, "[") {
+			return SessionFinalReport{}, "", fmt.Errorf("final_report.cleanup_claims must be an object with 'removed_paths' and 'expected_present_paths', got JSON array")
+		}
+		if !strings.HasPrefix(trimmedCleanup, "{") {
+			return SessionFinalReport{}, "", fmt.Errorf("final_report.cleanup_claims must be an object with 'removed_paths' and 'expected_present_paths'")
+		}
+	}
+
 	var report SessionFinalReport
 	if err := json.Unmarshal([]byte(trimmed), &report); err != nil {
 		return SessionFinalReport{}, "", fmt.Errorf("final_report schema decode failed: %v", err)
@@ -301,13 +311,26 @@ func preserveFinalReportForReview(raw string) (SessionFinalReport, string, error
 	if trimmed == "" {
 		return SessionFinalReport{}, "", fmt.Errorf("final_report is required and must be non-empty")
 	}
-	if report, normalized, err := decodeStructuredFinalReport(trimmed); err == nil {
-		return report, normalized, nil
+
+	// Distinguish structured envelope attempt vs legacy unstructured prose.
+	// If the submission is JSON and contains structured session report keys,
+	// enforce strict decode so that malformed envelopes or invalid cleanup_claims arrays
+	// are not falsely accepted as unstructured text.
+	var rawObj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &rawObj); err == nil && rawObj != nil {
+		hasStructuredKey := false
+		for _, key := range []string{"files_changed", "commands_run", "checks_run", "blockers", "cleanup_claims", "residual_risks"} {
+			if _, exists := rawObj[key]; exists {
+				hasStructuredKey = true
+				break
+			}
+		}
+		if hasStructuredKey {
+			return decodeStructuredFinalReport(trimmed)
+		}
 	}
-	// A worker's report is evidence for Fixer review, not a process-health
-	// signal. Keep human-readable submissions intact when they do not happen
-	// to use the structured envelope; Hands compatibility sessions take the
-	// strict path below and still require the protocol envelope.
+
+	// Plain human-readable/legacy submissions are preserved as raw evidence for review.
 	return SessionFinalReport{
 		FilesChanged:  []string{"(unstructured final report)"},
 		CommandsRun:   []string{"worker submission"},
@@ -371,50 +394,141 @@ func waveGovernanceOwnsSessionTransition(globalSessionID, projectID int, current
 	// rework_count) and must work while the wave runs; the engine requeues the
 	// worker so the wait loop relaunches it with the appended instructions
 	// (feedback 95, backlog 206-208).
-	if currentStatus == "review" && targetStatus == "pending" {
+	if (currentStatus == "review" || currentStatus == "completed") && targetStatus == "pending" {
 		return false, nil
 	}
 	return true, nil
 }
 
-// requeueWaveWorkerForRework hands a rejected or failed worker back to the
-// wave engine: the row enters retry_wait with a fresh attempt budget, which
-// the wait loop's retry machinery relaunches in the same worktree with the
-// session's rework instructions appended to the task. It accepts review_ready
-// and completed workers (rejected review) as well as failed workers (an
-// attempt that died on infrastructure) — without the failed case a worker
-// stays failed forever, since the one governed repair is single-use.
-//
-// The requeue is a single atomic UPDATE and must clear every stale signal of
-// the previous attempt: the worker_process_id linkage (its dead historical
-// process row is what made the wait/reconcile path finalize requeued workers
-// as failed "process exited" before the retry scheduler could relaunch them —
-// feedback 96/97), terminal_outcome, the failure diagnostics (failure_reason,
-// terminal_at), and the retry diagnostics (a fresh budget with no backoff
-// owed: retry_attempt_count=0 and an empty retry_next_eligible_at, which the
-// retry scheduler treats as immediately eligible).
+// requeueWaveWorkerForRework hands a rejected, completed, running, or failed
+// worker back to the wave engine: the row enters retry_wait with a fresh
+// attempt budget, which the wait loop's retry machinery relaunches in the same
+// worktree with the session's rework instructions appended to the task. It
+// clears any in-flight or historical process linkage (stopping active OS
+// processes), resets retry attempt counters, and refreshes the aggregate wave
+// state.
 func requeueWaveWorkerForRework(globalSessionID, projectID int) error {
-	_, err := db.Exec(
-		`UPDATE parallel_wave_worker
-		 SET status = ?,
-		     retry_attempt_count = 0,
-		     retry_cause = ?,
-		     retry_next_eligible_at = '',
-		     worker_process_id = NULL,
-		     terminal_outcome = '',
-		     failure_reason = '',
-		     terminal_at = NULL,
-		     updated_at = CURRENT_TIMESTAMP
-		 WHERE session_id = ? AND project_id = ? AND status IN (?, ?, ?)`,
-		parallelWaveWorkerStatusRetryWait,
-		"rework",
+	rows, err := db.Query(
+		`SELECT pw.id, pw.wave_id, pw.status, COALESCE(pw.worker_process_id, 0)
+		 FROM parallel_wave_worker pw
+		 LEFT JOIN parallel_wave w ON w.id = pw.wave_id AND w.project_id = pw.project_id
+		 WHERE pw.session_id = ? AND pw.project_id = ? AND COALESCE(w.phase, '') != ?
+		 ORDER BY pw.wave_id DESC`,
 		globalSessionID,
 		projectID,
-		parallelWaveWorkerStatusReviewReady,
-		parallelWaveWorkerStatusCompleted,
-		parallelWaveWorkerStatusFailed,
+		parallelWavePhaseCompleted,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type targetWorker struct {
+		id        int
+		waveID    int
+		status    string
+		processID int
+	}
+	var targets []targetWorker
+	for rows.Next() {
+		var tw targetWorker
+		if err := rows.Scan(&tw.id, &tw.waveID, &tw.status, &tw.processID); err != nil {
+			return err
+		}
+		targets = append(targets, tw)
+	}
+	if len(targets) == 0 {
+		fallbackRows, err := db.Query(
+			`SELECT id, wave_id, status, COALESCE(worker_process_id, 0)
+			 FROM parallel_wave_worker
+			 WHERE session_id = ? AND project_id = ?
+			 ORDER BY wave_id DESC`,
+			globalSessionID,
+			projectID,
+		)
+		if err != nil {
+			return err
+		}
+		defer fallbackRows.Close()
+		for fallbackRows.Next() {
+			var tw targetWorker
+			if err := fallbackRows.Scan(&tw.id, &tw.waveID, &tw.status, &tw.processID); err != nil {
+				return err
+			}
+			targets = append(targets, tw)
+		}
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no parallel wave worker found for session %d", globalSessionID)
+	}
+
+	for _, tw := range targets {
+		if tw.processID > 0 {
+			var pid int
+			var procStatus string
+			if err := db.QueryRow(
+				`SELECT pid, status FROM worker_process WHERE id = ? AND project_id = ?`,
+				tw.processID, projectID,
+			).Scan(&pid, &procStatus); err == nil {
+				if procStatus == workerStatusRunning && pid > 0 {
+					_ = terminateParallelWaveWorkerProcessGroup(parallelWaveWorkerLiveness{
+						PID: pid, ProcessFound: true, ProcessRunning: true, PIDAlive: true,
+					})
+				}
+			}
+			_, _ = db.Exec(
+				`UPDATE worker_process
+				 SET status = ?, stop_reason = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+				 WHERE id = ? AND project_id = ? AND status = ?`,
+				workerStatusStopped, "rework requested", tw.processID, projectID, workerStatusRunning,
+			)
+		}
+		_, _ = db.Exec(
+			`UPDATE worker_process
+			 SET status = ?, stop_reason = ?, stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			 WHERE session_id = ? AND parallel_wave_worker_id = ? AND project_id = ? AND status = ?`,
+			workerStatusStopped, "rework requested", globalSessionID, tw.id, projectID, workerStatusRunning,
+		)
+
+		res, err := db.Exec(
+			`UPDATE parallel_wave_worker
+			 SET status = ?,
+			     retry_attempt_count = 0,
+			     retry_cause = ?,
+			     retry_next_eligible_at = '',
+			     worker_process_id = NULL,
+			     terminal_outcome = '',
+			     failure_reason = '',
+			     terminal_at = NULL,
+			     updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ?`,
+			parallelWaveWorkerStatusRetryWait,
+			"rework",
+			tw.id,
+			projectID,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return fmt.Errorf("failed to requeue wave worker %d: 0 rows affected", tw.id)
+		}
+	}
+
+	refreshedWaves := make(map[int]struct{})
+	for _, tw := range targets {
+		if tw.waveID > 0 {
+			if _, seen := refreshedWaves[tw.waveID]; !seen {
+				refreshedWaves[tw.waveID] = struct{}{}
+				_ = refreshParallelWaveAggregateStatus(tw.waveID, projectID)
+			}
+		}
+	}
+	return nil
 }
 
 // requeueFailedWaveWorkerForRetry is the guarded core of the governed requeue
@@ -914,6 +1028,7 @@ type VerifySessionCleanupClaimsOutput struct {
 	ReportPresent bool                `json:"report_present"`
 	AllMatched    bool                `json:"all_matched"`
 	Claims        []CleanupClaimCheck `json:"claims"`
+	Diagnostic    string              `json:"diagnostic,omitempty"`
 }
 
 func VerifySessionCleanupClaims(ctx context.Context, req *mcp.CallToolRequest, input VerifySessionCleanupClaimsInput) (*mcp.CallToolResult, VerifySessionCleanupClaimsOutput, error) {
@@ -938,10 +1053,40 @@ func VerifySessionCleanupClaims(ctx context.Context, req *mcp.CallToolRequest, i
 		return &mcp.CallToolResult{IsError: true}, VerifySessionCleanupClaimsOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
 
-	reportPresent := strings.TrimSpace(report) != ""
-	parsedReport, _, err := decodeStructuredFinalReport(report)
+	trimmedReport := strings.TrimSpace(report)
+	if trimmedReport == "" {
+		return nil, VerifySessionCleanupClaimsOutput{
+			Status:        "success",
+			SessionId:     input.SessionId,
+			ReportPresent: false,
+			AllMatched:    false,
+			Claims:        []CleanupClaimCheck{},
+			Diagnostic:    "no report submitted for session; cleanup claims unverified",
+		}, nil
+	}
+
+	parsedReport, _, err := decodeStructuredFinalReport(trimmedReport)
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, VerifySessionCleanupClaimsOutput{}, err
+		return nil, VerifySessionCleanupClaimsOutput{
+			Status:        "success",
+			SessionId:     input.SessionId,
+			ReportPresent: true,
+			AllMatched:    false,
+			Claims:        []CleanupClaimCheck{},
+			Diagnostic:    fmt.Sprintf("unsupported or malformed report envelope (%v); cleanup claims unverified", err),
+		}, nil
+	}
+
+	totalClaims := len(parsedReport.CleanupClaims.RemovedPaths) + len(parsedReport.CleanupClaims.ExpectedPresentPaths)
+	if totalClaims == 0 {
+		return nil, VerifySessionCleanupClaimsOutput{
+			Status:        "success",
+			SessionId:     input.SessionId,
+			ReportPresent: true,
+			AllMatched:    false,
+			Claims:        []CleanupClaimCheck{},
+			Diagnostic:    "no cleanup claims declared in report; status unverified",
+		}, nil
 	}
 
 	projectCWD, err := projectCWDFromID(authorizedProjectId)
@@ -987,12 +1132,18 @@ func VerifySessionCleanupClaims(ctx context.Context, req *mcp.CallToolRequest, i
 		}
 	}
 
+	diagnostic := ""
+	if !allMatched {
+		diagnostic = "one or more cleanup claims failed verification against disk state"
+	}
+
 	return nil, VerifySessionCleanupClaimsOutput{
 		Status:        "success",
 		SessionId:     input.SessionId,
-		ReportPresent: reportPresent,
+		ReportPresent: true,
 		AllMatched:    allMatched,
 		Claims:        claims,
+		Diagnostic:    diagnostic,
 	}, nil
 }
 

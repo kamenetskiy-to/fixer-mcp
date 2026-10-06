@@ -6,6 +6,7 @@ except ImportError:  # package-style import
     from ._provider_stubs import provider_stub_path
 
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -57,9 +58,20 @@ class FixerWireResumeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._provider_stubs = provider_stub_path()
         self._provider_stubs.__enter__()
+        # Resume-summary loading touches the session store: the probe/test DB
+        # must be an explicit temporary database, never the inherited live
+        # FIXER_DB_PATH (whose alias rows also made these tests flaky).
+        self._db_tmp = tempfile.mkdtemp(prefix="fixer_wire_resume_db_")
+        self._live_env_patch = patch.dict(
+            os.environ,
+            {fixer_wire.FIXER_DB_PATH_ENV: str(Path(self._db_tmp) / "probe.db")},
+        )
+        self._live_env_patch.start()
 
     def tearDown(self) -> None:
+        self._live_env_patch.stop()
         self._provider_stubs.__exit__(None, None, None)
+        shutil.rmtree(self._db_tmp, ignore_errors=True)
 
     def test_module_marker_helpers_detect_role_markers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,9 +241,12 @@ class FixerWireResumeTests(unittest.TestCase):
             home = Path(tmp) / "home"
             cwd = Path(tmp) / "workspace" / "self_orchestration"
             cwd.mkdir(parents=True)
-            slug = "-".join(str(cwd.resolve()).split("/"))
-            slug = f"-{slug}" if not slug.startswith("-") else slug
-            slug = slug.replace("_", "-")
+            # Fixture store directories must use the production slug helper
+            # verbatim. The old hand-rolled mapping diverged whenever the
+            # resolved temp path contained a run of non-alphanumerics (e.g. a
+            # TMPDIR/tmp name ending in "_": "tmpabc--workspace" vs production
+            # "tmpabc-workspace"), so claude/droid discovery was flaky.
+            slug = fixer_wire_resume._project_store_slug(cwd)
 
             codex_log = Path(tmp) / "codex.jsonl"
             codex_log.write_text('Activate skill $init-fixer immediately.\n', encoding="utf-8")

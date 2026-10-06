@@ -205,10 +205,10 @@ func TestNativeFixerScreenOffersNewResumeUnattached(t *testing.T) {
 		t.Fatalf("a Netrunner id leaked into Fixer resume: %#v", model.workMode.resumeIDs)
 	}
 
-	// Resume becomes a second field with its own selectable sessions.
+	// Resume becomes a second field with its own selectable sessions, plus MCP servers.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
 	model = updated.(Model)
-	if model.workMode.action != "resume" || model.workMode.fieldCount() != 2 {
+	if model.workMode.action != "resume" || model.workMode.fieldCount() != 3 {
 		t.Fatalf("resume action was not selected: %#v", model.workMode)
 	}
 	if !strings.Contains(model.View(), "Ship the term") {
@@ -310,7 +310,7 @@ func TestHandsScreenOffersNativeMCPAndDocumentSelection(t *testing.T) {
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	model = updated.(Model)
 	view := model.View()
-	for _, want := range []string{"MCP-серверы", "Документы", "как в проекте (keep)"} {
+	for _, want := range []string{"MCP-серверы", "Документы", "подключено 1"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("Hands screen missing %q:\n%s", want, view)
 		}
@@ -363,7 +363,7 @@ func TestHandsScreenOffersNativeMCPAndDocumentSelection(t *testing.T) {
 		t.Fatalf("documents picker did not open: %#v", model.multi)
 	}
 	view = model.View()
-	if !strings.Contains(view, "History Split") || !strings.Contains(view, "[x] Canon") {
+	if !strings.Contains(view, "History Split") || !strings.Contains(view, "Canon") || !strings.Contains(view, "[x]") {
 		t.Fatalf("document picker missing pool/selection:\n%s", view)
 	}
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -399,7 +399,7 @@ func TestMachinesSpaceProbesReachabilityWhenOpened(t *testing.T) {
 	if !strings.Contains(model.View(), "проверяю…") {
 		// The machines view is only rendered on its own tab.
 	}
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
 	model = updated.(Model)
 	if model.tab != machinesTab {
 		t.Fatalf("tab = %d, want machines", model.tab)
@@ -440,7 +440,7 @@ func TestResourcesViewRendersNativeLimitsBoard(t *testing.T) {
 		},
 	}))
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	model = updated.(Model)
 	view := model.View()
 
@@ -620,3 +620,138 @@ func TestWorkViewSurfacesIgnoredStrayDatabase(t *testing.T) {
 		t.Fatalf("stray line must show the explicit adoption override:\n%s", view)
 	}
 }
+
+func TestMCPAndDocsDedicatedTab(t *testing.T) {
+	model, err := New(Options{StatePath: filepath.Join(t.TempDir(), "console.json"), InitialPath: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(projectWorkMsg(mcpclient.Snapshot{
+		Available: true,
+		MCPPool: []mcpclient.MCPServer{
+			{Name: "postgres", Category: "DB", ShortDescription: "PostgreSQL ops"},
+			{Name: "sqlite", Category: "DB", ShortDescription: "SQLite inspection"},
+		},
+		ProjectAllowedMCP: []string{"postgres"},
+		HandsMCP:          []string{"postgres"},
+		DocPool: []mcpclient.ProjectDoc{
+			{DocID: 1, Title: "Canon", Level: 0, Path: "docs/canon.md"},
+			{DocID: 2, Title: "Architecture", Level: 1, Path: "docs/arch.md"},
+		},
+		HandsDocs: []int{1},
+	}))
+	model = updated.(Model)
+
+	// Key '2' opens tab 1 (mcpDocsTab).
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	model = updated.(Model)
+	if model.tab != mcpDocsTab {
+		t.Fatalf("tab = %d, want mcpDocsTab (%d)", model.tab, mcpDocsTab)
+	}
+	view := model.View()
+	for _, want := range []string{"MCP-серверы и документы проекта", "1. MCP-серверы", "2. Документы проекта (0-1-2-3)", "postgres", "sqlite"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("mcpDocsView missing %q:\n%s", want, view)
+		}
+	}
+
+	// Switch section to Docs using Tab.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.mcpDocsSection != 1 {
+		t.Fatalf("mcpDocsSection = %d, want 1", model.mcpDocsSection)
+	}
+	view = model.View()
+	for _, want := range []string{"Canon", "Architecture", "[L0]", "[L1]"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("docs view missing %q:\n%s", want, view)
+		}
+	}
+
+	// Toggle selection on current doc.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	model = updated.(Model)
+	if len(model.projectWork.HandsDocs) != 0 {
+		t.Fatalf("toggling checked doc should uncheck it, got %#v", model.projectWork.HandsDocs)
+	}
+
+	// Switch back to MCP section.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.mcpDocsSection != 0 {
+		t.Fatalf("mcpDocsSection = %d, want 0", model.mcpDocsSection)
+	}
+
+	// In MCP section, toggle allowlist with 'p' on first item ("postgres").
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	model = updated.(Model)
+	allowedMap := make(map[string]bool)
+	for _, name := range model.projectWork.ProjectAllowedMCP {
+		allowedMap[name] = true
+	}
+	if allowedMap["postgres"] {
+		t.Fatalf("toggling allowlist with 'p' should remove postgres, got %#v", model.projectWork.ProjectAllowedMCP)
+	}
+}
+
+func TestNativeFixerScreenHarnessModelMCPSelection(t *testing.T) {
+	model, err := New(Options{StatePath: filepath.Join(t.TempDir(), "console.json"), InitialPath: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := model.Update(projectWorkMsg(mcpclient.Snapshot{
+		Available: true,
+		MCPPool: []mcpclient.MCPServer{
+			{Name: "postgres", Category: "DB"},
+			{Name: "tavily", Category: "Web-search"},
+		},
+		ProjectAllowedMCP: []string{"postgres"},
+	}))
+	model = updated.(Model)
+
+	// Press 'f' opens native Fixer screen.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	model = updated.(Model)
+	if model.workMode == nil || model.workMode.kind != launch.KindWorkroom {
+		t.Fatalf("f must open native Fixer screen: %#v", model.workMode)
+	}
+	form := model.workMode
+	if form.fixerHarness != "pi" || form.fixerModel != "mimo-v2.6-pro" || form.fixerReasoning != "high" {
+		t.Fatalf("default Fixer config = %s/%s/%s, want pi/mimo-v2.6-pro/high", form.fixerHarness, form.fixerModel, form.fixerReasoning)
+	}
+
+	// Move focus to Harness (focus 1).
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if model.workMode.focus != 1 {
+		t.Fatalf("focus = %d, want 1", model.workMode.focus)
+	}
+
+	// Cycle Harness with Right -> codex.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	if model.workMode.fixerHarness != "codex" || model.workMode.fixerModel != "gpt-6.1-sol" {
+		t.Fatalf("cycled harness = %s/%s, want codex/gpt-6.1-sol", model.workMode.fixerHarness, model.workMode.fixerModel)
+	}
+
+	// Move focus to MCP-серверы row (focus 4).
+	for i := 0; i < 3; i++ {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = updated.(Model)
+	}
+	if model.workMode.focus != 4 {
+		t.Fatalf("focus = %d, want 4 (MCP-серверы)", model.workMode.focus)
+	}
+
+	// Open MCP selector with Right or Enter.
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	if model.multi == nil || model.multi.target != "mcp" {
+		t.Fatalf("MCP selector must open on Right: %#v", model.multi)
+	}
+	view := model.View()
+	if !strings.Contains(view, "MCP-серверы для Fixer") || !strings.Contains(view, "postgres") {
+		t.Fatalf("MCP selector for Fixer missing expected content:\n%s", view)
+	}
+}
+

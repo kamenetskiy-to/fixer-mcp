@@ -68,22 +68,17 @@ func TestPermanentHandsIdentityAndProviderDefaultsAreAvailable(t *testing.T) {
 		t.Fatalf("repeat migration duplicated identity: %d", identityCount)
 	}
 	lanes := readHandsLanes()
-	if len(lanes) != 6 || lanes[0].Provider != "commandcode" || lanes[0].Model != "commandcode/zai-org/glm-5.3-flash" || lanes[0].Reasoning != "medium" || lanes[3].Model != "kimi-k3-256k" || lanes[5].Provider != "grok" {
+	if len(lanes) != 4 || lanes[0].Provider != "pi" || lanes[0].Model != "mimo-v2.6-pro" || lanes[0].Reasoning != "high" ||
+		lanes[1].Provider != "codex" || lanes[1].Model != "gpt-6.1-sol" || lanes[1].Reasoning != "high" ||
+		lanes[2].Provider != "grok" || lanes[2].Model != "grok-4.7" || lanes[2].Reasoning != "high" ||
+		lanes[3].Provider != "antigravity" || lanes[3].Model != "gemini-3.8-flash" || lanes[3].Reasoning != "high" {
 		t.Fatalf("unexpected provider defaults: %+v", lanes)
 	}
-	// `pi` is a first class agent backend but not a Project Hands lane: the
-	// hands_instruction CHECK constraints cannot store it, so advertising it
-	// would crash a preset launch instead of offering a usable choice.
-	for _, lane := range lanes {
-		if lane.Provider == "pi" {
-			t.Fatalf("pi must not be advertised as a Project Hands lane: %+v", lanes)
-		}
-	}
-	if handsLanePersistable("pi") {
-		t.Fatal("pi must not be persisted as a Project Hands lane")
+	if !handsLanePersistable("pi") {
+		t.Fatal("pi must be persisted as a Project Hands lane")
 	}
 	piModel, piReasoning, piOK := handsProviderConfig("pi")
-	if !piOK || piModel != "openai-codex/gpt-5.6-luna" || piReasoning != "high" {
+	if !piOK || piModel != "mimo-v2.6-pro" || piReasoning != "high" {
 		t.Fatalf("handsProviderConfig(pi) mismatch: model=%q reasoning=%q ok=%v", piModel, piReasoning, piOK)
 	}
 }
@@ -254,7 +249,7 @@ func TestWaitHandsInstructionIgnoresUnrelatedWakeAndFindsExternalCommit(t *testi
 func TestSubmitHandsInstructionAcceptsEveryRegisteredLane(t *testing.T) {
 	setupWorkroomHandlerTestDB(t)
 	_, receipt, err := SubmitHandsInstruction(context.Background(), nil, SubmitHandsInstructionInput{
-		InstructionText: "Use the registered provider lane.", RequestedLane: "kimi-code", IdempotencyKey: "registered-lane-1",
+		InstructionText: "Use the registered provider lane.", RequestedLane: "pi", IdempotencyKey: "registered-lane-1",
 	})
 	if err != nil {
 		t.Fatalf("registered lane must be accepted: %v", err)

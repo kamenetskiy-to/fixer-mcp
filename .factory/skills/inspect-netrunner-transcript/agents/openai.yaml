@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Netrunner Transcript"
+  short_description: "Find local worker transcript paths safely"
+  default_prompt: "Use $inspect-netrunner-transcript to locate a stalled worker transcript without loading the JSONL into context."

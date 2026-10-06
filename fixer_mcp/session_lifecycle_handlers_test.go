@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -966,3 +967,375 @@ func TestForkRepairSessionFrom_CopiesContextAndProvenance(t *testing.T) {
 		t.Fatalf("expected 1 copied MCP server, got %d", mcpCount)
 	}
 }
+
+func TestVerifySessionCleanupClaims_ValidClaims(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	tempDir := t.TempDir()
+	if _, err := testDB.Exec("UPDATE project SET cwd = ? WHERE id = 1", tempDir); err != nil {
+		t.Fatalf("set project cwd: %v", err)
+	}
+
+	presentPath := filepath.Join(tempDir, "kept_file.txt")
+	if err := os.WriteFile(presentPath, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write present file: %v", err)
+	}
+
+	report := `{"files_changed":["kept_file.txt"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[],"cleanup_claims":{"removed_paths":["removed_file.txt"],"expected_present_paths":["kept_file.txt"]}}`
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", report); err != nil {
+		t.Fatalf("seed session report: %v", err)
+	}
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	callResult, out, err := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{
+		SessionId: 1,
+	})
+	if err != nil {
+		t.Fatalf("verify_session_cleanup_claims failed: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result, got %+v", callResult)
+	}
+	if !out.ReportPresent || !out.AllMatched || len(out.Claims) != 2 {
+		t.Fatalf("expected 2 matched claims, got %+v", out)
+	}
+	for _, claim := range out.Claims {
+		if !claim.Matches {
+			t.Fatalf("expected claim %s to match, got %+v", claim.Path, claim)
+		}
+	}
+}
+
+func TestCompleteTask_InvalidCleanupClaimsArray(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "netrunner"
+	authorizedProjectId = 1
+	authorizedSessionId = 1
+
+	if _, err := testDB.Exec("UPDATE session SET status = 'in_progress' WHERE id = 1"); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+
+	// 1. Worker submits structured report with cleanup_claims as an array
+	invalidArrayReport := `{"files_changed":["a.go"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[],"cleanup_claims":["deleted_file.txt"]}`
+	callResult, _, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
+		SessionId:   1,
+		FinalReport: invalidArrayReport,
+	})
+	if err == nil {
+		t.Fatal("expected complete_task to reject cleanup_claims array")
+	}
+	if callResult == nil || !callResult.IsError {
+		t.Fatal("expected MCP error result")
+	}
+	if !strings.Contains(err.Error(), "cleanup_claims") || !strings.Contains(err.Error(), "array") {
+		t.Fatalf("expected clear cleanup_claims array error, got: %v", err)
+	}
+
+	// 2. Historical unverifiable report in DB must be reported as unsupported/malformed by verifier without crashing or inventing verified state
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", invalidArrayReport); err != nil {
+		t.Fatalf("seed historical invalid report: %v", err)
+	}
+
+	authorizedRole = "fixer"
+	_, verifyOut, verifyErr := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{
+		SessionId: 1,
+	})
+	if verifyErr != nil {
+		t.Fatalf("verify_session_cleanup_claims should return diagnostic instead of failing: %v", verifyErr)
+	}
+	if verifyOut.AllMatched {
+		t.Fatal("malformed report envelope must not invent verified state (all_matched must be false)")
+	}
+	if !strings.Contains(verifyOut.Diagnostic, "unsupported") && !strings.Contains(verifyOut.Diagnostic, "malformed") && !strings.Contains(verifyOut.Diagnostic, "unverified") {
+		t.Fatalf("expected unverified/malformed diagnostic, got %q", verifyOut.Diagnostic)
+	}
+}
+
+func TestVerifySessionCleanupClaims_LegacyText(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	legacyText := "Historical unstructured plain text report describing completed work."
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", legacyText); err != nil {
+		t.Fatalf("seed legacy text report: %v", err)
+	}
+
+	_, out, err := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{
+		SessionId: 1,
+	})
+	if err != nil {
+		t.Fatalf("verify_session_cleanup_claims on legacy text should not error: %v", err)
+	}
+	if !out.ReportPresent {
+		t.Fatal("expected report_present=true for legacy text")
+	}
+	if out.AllMatched {
+		t.Fatal("legacy text must not be falsely verified (all_matched must be false)")
+	}
+	if len(out.Claims) != 0 {
+		t.Fatalf("expected empty claims for legacy text, got %d", len(out.Claims))
+	}
+	if !strings.Contains(out.Diagnostic, "unverified") && !strings.Contains(out.Diagnostic, "unsupported") {
+		t.Fatalf("expected unverified/unsupported diagnostic, got %q", out.Diagnostic)
+	}
+}
+
+func TestCompleteTask_RawPreservation(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedRole = "netrunner"
+	authorizedProjectId = 1
+	authorizedSessionId = 1
+
+	if _, err := testDB.Exec("UPDATE session SET status = 'in_progress' WHERE id = 1"); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+
+	rawProse := "Finished documentation update and executed manual checks without JSON envelope.\n\nAll targets verified."
+	_, out, err := CompleteTask(context.Background(), nil, CompleteTaskInput{
+		SessionId:   1,
+		FinalReport: rawProse,
+	})
+	if err != nil {
+		t.Fatalf("complete_task failed: %v", err)
+	}
+	if out.Status != "success" {
+		t.Fatalf("expected success, got %+v", out)
+	}
+
+	var status, storedReport string
+	if err := testDB.QueryRow("SELECT status, COALESCE(report, '') FROM session WHERE id = 1").Scan(&status, &storedReport); err != nil {
+		t.Fatalf("query session: %v", err)
+	}
+	if status != "review" {
+		t.Fatalf("expected status review, got %q", status)
+	}
+	if storedReport != rawProse {
+		t.Fatalf("expected exact raw report preserved in database, got %q", storedReport)
+	}
+}
+
+func TestVerifySessionCleanupClaims_Repeat(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	tempDir := t.TempDir()
+	if _, err := testDB.Exec("UPDATE project SET cwd = ? WHERE id = 1", tempDir); err != nil {
+		t.Fatalf("set project cwd: %v", err)
+	}
+
+	report := `{"files_changed":["a.txt"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[],"cleanup_claims":{"removed_paths":["nonexistent.txt"]}}`
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", report); err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out1, err1 := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{SessionId: 1})
+	if err1 != nil {
+		t.Fatalf("first verify call failed: %v", err1)
+	}
+	_, out2, err2 := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{SessionId: 1})
+	if err2 != nil {
+		t.Fatalf("repeated verify call failed: %v", err2)
+	}
+
+	if out1.AllMatched != out2.AllMatched || out1.ReportPresent != out2.ReportPresent || len(out1.Claims) != len(out2.Claims) {
+		t.Fatalf("repeated calls must yield identical deterministic output: first=%+v second=%+v", out1, out2)
+	}
+}
+
+func TestVerifySessionCleanupClaims_NoFilesystemSideEffect(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	tempDir := t.TempDir()
+	if _, err := testDB.Exec("UPDATE project SET cwd = ? WHERE id = 1", tempDir); err != nil {
+		t.Fatalf("set project cwd: %v", err)
+	}
+
+	existingFile := filepath.Join(tempDir, "existing.txt")
+	originalContent := []byte("original disk content")
+	if err := os.WriteFile(existingFile, originalContent, 0o600); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	nonexistentPath := filepath.Join(tempDir, "absent.txt")
+
+	report := `{"files_changed":["existing.txt"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[],"cleanup_claims":{"removed_paths":["absent.txt"],"expected_present_paths":["existing.txt"]}}`
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", report); err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{SessionId: 1})
+	if err != nil {
+		t.Fatalf("verify failed: %v", err)
+	}
+	if !out.AllMatched {
+		t.Fatalf("expected all matched, got %+v", out)
+	}
+
+	// Verify no filesystem side effects:
+	// 1. nonexistent file was not created
+	if _, err := os.Stat(nonexistentPath); !os.IsNotExist(err) {
+		t.Fatalf("absent file must remain absent, stat err=%v", err)
+	}
+	// 2. existing file was not deleted or modified
+	readBack, err := os.ReadFile(existingFile)
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+	if string(readBack) != string(originalContent) {
+		t.Fatalf("existing file content altered: %q", string(readBack))
+	}
+}
+
+func TestVerifySessionCleanupClaims_MismatchedClaims(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	tempDir := t.TempDir()
+	if _, err := testDB.Exec("UPDATE project SET cwd = ? WHERE id = 1", tempDir); err != nil {
+		t.Fatalf("set project cwd: %v", err)
+	}
+
+	// removed_file.txt actually exists on disk (should have been removed)
+	stillExistingFile := filepath.Join(tempDir, "removed_file.txt")
+	if err := os.WriteFile(stillExistingFile, []byte("lingering"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// missing_file.txt does NOT exist on disk (should have been present)
+	report := `{"files_changed":["missing_file.txt"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[],"cleanup_claims":{"removed_paths":["removed_file.txt"],"expected_present_paths":["missing_file.txt"]}}`
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = 1", report); err != nil {
+		t.Fatalf("seed session report: %v", err)
+	}
+
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	callResult, out, err := VerifySessionCleanupClaims(context.Background(), nil, VerifySessionCleanupClaimsInput{
+		SessionId: 1,
+	})
+	if err != nil {
+		t.Fatalf("verify_session_cleanup_claims failed: %v", err)
+	}
+	if callResult != nil {
+		t.Fatalf("expected nil call result, got %+v", callResult)
+	}
+	if !out.ReportPresent || out.AllMatched || len(out.Claims) != 2 {
+		t.Fatalf("expected 2 mismatched claims, got %+v", out)
+	}
+	if !strings.Contains(out.Diagnostic, "failed verification against disk state") {
+		t.Fatalf("expected failed verification diagnostic, got %q", out.Diagnostic)
+	}
+	for _, claim := range out.Claims {
+		if claim.Matches {
+			t.Fatalf("expected claim %s not to match, got %+v", claim.Path, claim)
+		}
+	}
+}
+
+

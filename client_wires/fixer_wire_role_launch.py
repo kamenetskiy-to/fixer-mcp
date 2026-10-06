@@ -373,6 +373,25 @@ def launch_fresh_role_session(
     return subprocess.call(command, env=env, cwd=str(cwd))
 
 
+def _resolve_preset_names(
+    preset: str,
+    allowed: Sequence[str],
+    previous: Sequence[str],
+    *,
+    normalize_names: Callable[[Sequence[str]], list[str]],
+) -> list[str]:
+    text = str(preset).strip()
+    lowered = text.lower()
+    if lowered == "keep":
+        return list(previous)
+    if lowered == "none":
+        return []
+    if lowered == "all":
+        return list(allowed)
+    allowed_set = set(allowed)
+    return [name for name in normalize_names(text.split(",")) if name in allowed_set]
+
+
 def launch_fixer(
     passthrough_args: Sequence[str],
     *,
@@ -380,6 +399,10 @@ def launch_fixer(
     dry_run: bool,
     preset_resume_latest: bool,
     preset_resume_session_id: str | None,
+    preset_backend: str | None = None,
+    preset_model: str | None = None,
+    preset_reasoning: str | None = None,
+    preset_mcp: str | None = None,
     Option: Any,
     single_select_items: Any,
     callbacks: RoleLaunchCallbacks,
@@ -414,7 +437,16 @@ def launch_fixer(
     else:
         launch_mode = callbacks.select_fixer_launch_action_interactive(Option, single_select_items)
         if launch_mode == fixer_wire_selectors.UNATTACHED_FIXER_ACTION:
-            return callbacks.launch_unattached_fixer(passthrough_args, dry_run=dry_run, Option=Option, single_select_items=single_select_items)
+            return callbacks.launch_unattached_fixer(
+                passthrough_args,
+                dry_run=dry_run,
+                preset_backend=preset_backend,
+                preset_model=preset_model,
+                preset_reasoning=preset_reasoning,
+                preset_mcp=preset_mcp,
+                Option=Option,
+                single_select_items=single_select_items,
+            )
         if launch_mode == callbacks.fixer_launch_resume:
             fixer_summaries = callbacks.load_fixer_resume_summaries(cwd)
             raw_selection = callbacks.select_fixer_resume_session_interactive(
@@ -427,8 +459,17 @@ def launch_fixer(
             resume_subscription_provider = resume_selection.subscription_provider or "openai"
             resume_session_id = resume_selection.session_id
         else:
-            available_servers, _config_env_vars, _adapter, _ensure_sqlite_scaffold = callbacks.load_available_servers(cwd)
-            selected_mcp_names = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+            available_servers, _config_env_vars, _adapter, _ensure_sqlite_scaffold = callbacks.load_available_servers(
+                cwd,
+                backend=preset_backend,
+            )
+            forced_mcp = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+            if preset_mcp is not None:
+                pool = list(available_servers.keys())
+                extra_mcp = _resolve_preset_names(preset_mcp, pool, [], normalize_names=callbacks.normalize_names)
+                selected_mcp_names = list(dict.fromkeys([*forced_mcp, *extra_mcp]))
+            else:
+                selected_mcp_names = forced_mcp
             return callbacks.launch_fresh_role_session(
                 "fixer",
                 callbacks.build_fixer_prompt(),
@@ -436,9 +477,9 @@ def launch_fixer(
                 launch_cwd=cwd,
                 selected_mcp_names=selected_mcp_names,
                 dry_run=dry_run,
-                preset_backend=None,
-                preset_model=None,
-                preset_reasoning=None,
+                preset_backend=preset_backend,
+                preset_model=preset_model,
+                preset_reasoning=preset_reasoning,
                 dangerous_sandbox=True,
                 Option=Option,
                 single_select_items=single_select_items,
@@ -448,7 +489,13 @@ def launch_fixer(
         cwd,
         backend=resume_provider,
     )
-    selected_mcp_names = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+    forced_mcp = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+    if preset_mcp is not None:
+        pool = list(available_servers.keys())
+        extra_mcp = _resolve_preset_names(preset_mcp, pool, [], normalize_names=callbacks.normalize_names)
+        selected_mcp_names = list(dict.fromkeys([*forced_mcp, *extra_mcp]))
+    else:
+        selected_mcp_names = forced_mcp
     selected_servers = {name: available_servers[name] for name in selected_mcp_names}
     selected_servers = _bind_role_server_env(selected_servers, cwd=cwd, role="fixer", callbacks=callbacks)
     selected_config_paths = _selected_sqlite_config_paths(
@@ -573,6 +620,10 @@ def launch_unattached_fixer(
     passthrough_args: Sequence[str],
     *,
     dry_run: bool,
+    preset_backend: str | None = None,
+    preset_model: str | None = None,
+    preset_reasoning: str | None = None,
+    preset_mcp: str | None = None,
     Option: Any,
     single_select_items: Any,
     callbacks: RoleLaunchCallbacks,
@@ -583,8 +634,17 @@ def launch_unattached_fixer(
         callbacks.ensure_wire_schema(conn)
         callbacks.ensure_unattached_fixer_project(conn, scratch_cwd=scratch_cwd)
 
-    available_servers, _config_env_vars, _adapter, _ensure_sqlite_scaffold = callbacks.load_available_servers(scratch_cwd)
-    selected_mcp_names = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+    available_servers, _config_env_vars, _adapter, _ensure_sqlite_scaffold = callbacks.load_available_servers(
+        scratch_cwd,
+        backend=preset_backend,
+    )
+    forced_mcp = _forced_fixer_mcp_names(available_servers, callbacks=callbacks)
+    if preset_mcp is not None:
+        pool = list(available_servers.keys())
+        extra_mcp = _resolve_preset_names(preset_mcp, pool, [], normalize_names=callbacks.normalize_names)
+        selected_mcp_names = list(dict.fromkeys([*forced_mcp, *extra_mcp]))
+    else:
+        selected_mcp_names = forced_mcp
 
     return callbacks.launch_fresh_role_session(
         "fixer",
@@ -593,9 +653,9 @@ def launch_unattached_fixer(
         launch_cwd=scratch_cwd,
         selected_mcp_names=selected_mcp_names,
         dry_run=dry_run,
-        preset_backend=None,
-        preset_model=None,
-        preset_reasoning=None,
+        preset_backend=preset_backend,
+        preset_model=preset_model,
+        preset_reasoning=preset_reasoning,
         dangerous_sandbox=True,
         Option=Option,
         single_select_items=single_select_items,

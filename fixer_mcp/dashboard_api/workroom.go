@@ -178,10 +178,24 @@ type dashboardHandsProviderSpec struct {
 }
 
 var dashboardHandsProviderSpecs = map[string]dashboardHandsProviderSpec{
-	"codex": {
-		defaultModel:     "gpt-5.6-luna",
+	"pi": {
+		defaultModel:     "mimo-v2.6-pro",
 		defaultReasoning: "high",
 		modelOptions: []string{
+			"mimo-v2.6-pro",
+			"commandcode/xiaomi/mimo-v2.6-pro",
+			"commandcode/xiaomi/mimo-v2.6-flash",
+			"deepseek-v4.1-flash",
+			"deepseek-v4-flash",
+			"deepseek-v4-pro",
+		},
+		reasoningOptions: []string{"low", "medium", "high", "xhigh", "max"},
+	},
+	"codex": {
+		defaultModel:     "gpt-6.1-sol",
+		defaultReasoning: "high",
+		modelOptions: []string{
+			"gpt-6.1-sol",
 			"gpt-5.6-sol",
 			"gpt-5.6-terra",
 			"gpt-5.6-luna",
@@ -197,6 +211,36 @@ var dashboardHandsProviderSpecs = map[string]dashboardHandsProviderSpec{
 			"deepseek/deepseek-v4-pro-0813",
 		},
 		reasoningOptions: []string{"low", "medium", "high", "xhigh", "max", "ultra"},
+	},
+	"grok": {
+		defaultModel:     "grok-4.7",
+		defaultReasoning: "high",
+		modelOptions: []string{
+			"grok-4.7",
+			"grok-4.6",
+			"grok-4.5",
+		},
+		reasoningOptions: []string{"default", "low", "medium", "high"},
+	},
+	"antigravity": {
+		defaultModel:     "gemini-3.8-flash",
+		defaultReasoning: "high",
+		modelOptions: []string{
+			"gemini-3.8-flash",
+			"Gemini 3.8 Flash (High)",
+			"Gemini 3.8 Flash (Medium)",
+			"Gemini 3.8 Flash (Low)",
+			"Gemini 3.7 Flash",
+			"Gemini 3.6 Flash",
+			"Gemini 3.1 Pro",
+			"Claude Opus 5.5 (Low)",
+			"Claude Opus 5.5 (Medium)",
+			"Claude Opus 5.5 (High)",
+			"Claude Sonnet 5.5 (Low)",
+			"Claude Sonnet 5.5 (Medium)",
+			"Claude Sonnet 5.5 (High)",
+		},
+		reasoningOptions: []string{"default", "low", "medium", "high"},
 	},
 	"commandcode": {
 		defaultModel:     "commandcode/zai-org/glm-5.3-flash",
@@ -231,21 +275,6 @@ var dashboardHandsProviderSpecs = map[string]dashboardHandsProviderSpec{
 			"kimi-k3-256k",
 		},
 		reasoningOptions: []string{"default"},
-	},
-	"antigravity": {
-		defaultModel:     "Gemini 3.6 Flash",
-		defaultReasoning: "high",
-		modelOptions: []string{
-			"Gemini 3.6 Flash",
-			"Gemini 3.1 Pro",
-			"Claude Opus 5.5 (Low)",
-			"Claude Opus 5.5 (Medium)",
-			"Claude Opus 5.5 (High)",
-			"Claude Sonnet 5.5 (Low)",
-			"Claude Sonnet 5.5 (Medium)",
-			"Claude Sonnet 5.5 (High)",
-		},
-		reasoningOptions: []string{"default", "low", "medium", "high"},
 	},
 }
 

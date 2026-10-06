@@ -904,3 +904,523 @@ func TestSetDocProposalStatus_ApprovalCanPlaceCreatedDoc(t *testing.T) {
 		t.Fatalf("expected proposed content, got %q", content)
 	}
 }
+
+func TestSetDocProposalStatus_SoleExistingType_AbsentTargetRequiresExplicitDecision(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	// In project 1, Doc B has doc_type 'architecture' (sole existing doc of this type).
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, proposalOut, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "New architecture overview",
+		ProposedDocType: "architecture",
+	})
+	if err != nil {
+		t.Fatalf("propose_doc_update failed: %v", err)
+	}
+
+	// 1. Approval without target and without intent must NOT silently overwrite Doc B.
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: proposalOut.ProposalId,
+		Status:     "approved",
+	})
+	if err == nil {
+		t.Fatal("expected approval without target/intent to fail for sole existing doc_type")
+	}
+	if !strings.Contains(err.Error(), "absent target must not silently overwrite") ||
+		!strings.Contains(err.Error(), "governed Fixer may explicitly retarget") ||
+		!strings.Contains(err.Error(), "intent='create'") {
+		t.Fatalf("expected teach error guidance, got: %v", err)
+	}
+
+	// Verify Doc B was not overwritten
+	var contentB string
+	if err := db.QueryRow("SELECT content FROM project_doc WHERE id = 2").Scan(&contentB); err != nil {
+		t.Fatalf("query Doc B: %v", err)
+	}
+	if contentB != "Content B" {
+		t.Fatalf("expected Doc B content unchanged, got %q", contentB)
+	}
+
+	// 2. Fixer retargets explicitly to Doc B (local doc_id 2 in project 1)
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId:         proposalOut.ProposalId,
+		Status:             "approved",
+		TargetProjectDocId: 2,
+	})
+	if err != nil {
+		t.Fatalf("approval with explicit retarget failed: %v", err)
+	}
+
+	if err := db.QueryRow("SELECT content FROM project_doc WHERE id = 2").Scan(&contentB); err != nil {
+		t.Fatalf("query Doc B after update: %v", err)
+	}
+	if contentB != "New architecture overview" {
+		t.Fatalf("expected Doc B content updated via retarget, got %q", contentB)
+	}
+}
+
+func TestSetDocProposalStatus_TwoRandomNewDocs_SameTypeBothSurvive(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	// Propose two new docs of the same new type 'runbook'
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, prop1, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Runbook A content",
+		ProposedDocType: "runbook",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("propose 1 failed: %v", err)
+	}
+
+	_, prop2, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Runbook B content",
+		ProposedDocType: "runbook",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("propose 2 failed: %v", err)
+	}
+
+	// Approve both with explicit create intent: both must survive!
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop1.ProposalId,
+		Status:     "approved",
+		Intent:     "create",
+		Slug:       "runbook-a",
+	})
+	if err != nil {
+		t.Fatalf("approve prop 1 failed: %v", err)
+	}
+
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop2.ProposalId,
+		Status:     "approved",
+		Intent:     "create",
+		Slug:       "runbook-b",
+	})
+	if err != nil {
+		t.Fatalf("approve prop 2 failed: %v", err)
+	}
+
+	// Verify both docs exist in project_doc
+	rows, err := db.Query("SELECT content, slug FROM project_doc WHERE project_id = 1 AND doc_type = 'runbook' ORDER BY id")
+	if err != nil {
+		t.Fatalf("query runbook docs: %v", err)
+	}
+	defer rows.Close()
+
+	type docRow struct {
+		content, slug string
+	}
+	var docs []docRow
+	for rows.Next() {
+		var d docRow
+		if err := rows.Scan(&d.content, &d.slug); err != nil {
+			t.Fatalf("scan doc: %v", err)
+		}
+		docs = append(docs, d)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected both new docs of same type to survive, got %d", len(docs))
+	}
+	if docs[0].content != "Runbook A content" || docs[1].content != "Runbook B content" {
+		t.Fatalf("unexpected doc contents: %+v", docs)
+	}
+}
+
+func TestSetDocProposalStatus_AmbiguousMultipleExistingType(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	// Seed two docs of type 'spec'
+	if _, err := db.Exec("INSERT INTO project_doc (project_id, title, content, doc_type) VALUES (1, 'Spec 1', 'Content 1', 'spec'), (1, 'Spec 2', 'Content 2', 'spec')"); err != nil {
+		t.Fatalf("seed specs: %v", err)
+	}
+
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, prop, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "New Spec Content",
+		ProposedDocType: "spec",
+	})
+	if err != nil {
+		t.Fatalf("propose spec failed: %v", err)
+	}
+
+	// Fixer attempts approval without target and without intent: must fail with teach error
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "approved",
+	})
+	if err == nil {
+		t.Fatal("expected ambiguous approval to fail")
+	}
+	if !strings.Contains(err.Error(), "absent target must not silently overwrite") ||
+		!strings.Contains(err.Error(), "governed Fixer may explicitly retarget") {
+		t.Fatalf("expected teach error for ambiguous multiple existing type, got: %v", err)
+	}
+
+	// Fixer can explicitly create a 3rd spec
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "approved",
+		Intent:     "create",
+		Slug:       "spec-3",
+	})
+	if err != nil {
+		t.Fatalf("approval with intent=create should succeed: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = 1 AND doc_type = 'spec'").Scan(&count); err != nil {
+		t.Fatalf("count specs: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 specs after create, got %d", count)
+	}
+}
+
+func TestSetDocProposalStatus_RejectInvalidTargetAndCrossProjectWithoutChanges(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	// Count docs before
+	var beforeCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = 1").Scan(&beforeCount); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+
+	// 1. ProposeDocUpdate with invalid negative target
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, _, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent:    "Invalid target doc",
+		TargetProjectDocId: -5,
+	})
+	if err == nil {
+		t.Fatal("expected propose with negative target to fail")
+	}
+
+	// 2. ProposeDocUpdate with cross-project target (target 999 does not exist)
+	_, _, err = ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent:    "Nonexistent target doc",
+		TargetProjectDocId: 999,
+	})
+	if err == nil {
+		t.Fatal("expected propose with nonexistent target to fail")
+	}
+
+	// Valid proposal
+	_, prop, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Candidate content",
+		ProposedDocType: "documentation",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("valid propose failed: %v", err)
+	}
+
+	// 3. Approval with invalid target
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId:         prop.ProposalId,
+		Status:             "approved",
+		TargetProjectDocId: 999,
+	})
+	if err == nil {
+		t.Fatal("expected approval with nonexistent target to fail")
+	}
+
+	// 4. Approval with negative target
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId:         prop.ProposalId,
+		Status:             "approved",
+		TargetProjectDocId: -1,
+	})
+	if err == nil {
+		t.Fatal("expected approval with negative target to fail")
+	}
+
+	// Verify no docs added or changed
+	var afterCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = 1").Scan(&afterCount); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if beforeCount != afterCount {
+		t.Fatalf("expected doc count unchanged after rejected operations, before=%d after=%d", beforeCount, afterCount)
+	}
+}
+
+func TestSetDocProposalStatus_LocalizationAndTreeIntact(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, prop, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Sub-document guide",
+		ProposedDocType: "guide",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("propose failed: %v", err)
+	}
+
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId:  prop.ProposalId,
+		Status:      "approved",
+		ParentDocId: 1, // Child of Doc A
+		Level:       1,
+		Slug:        "child-guide",
+		Intent:      "create",
+	})
+	if err != nil {
+		t.Fatalf("approval with tree placement failed: %v", err)
+	}
+
+	var parentID, level int
+	var slug, path, status, content string
+	err = db.QueryRow(`
+		SELECT parent_doc_id, level, slug, path, status, content
+		FROM project_doc
+		WHERE project_id = 1 AND slug = 'child-guide'
+	`).Scan(&parentID, &level, &slug, &path, &status, &content)
+	if err != nil {
+		t.Fatalf("query placed doc: %v", err)
+	}
+	if parentID != 1 || level != 1 || slug != "child-guide" || status != "current" {
+		t.Fatalf("unexpected tree fields: parent=%d level=%d slug=%q status=%q", parentID, level, slug, status)
+	}
+	if content != "Sub-document guide" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+func TestSetDocProposalStatus_RepeatedApprove(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, prop, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Canonical API documentation",
+		ProposedDocType: "api_spec",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("propose failed: %v", err)
+	}
+
+	// 1. Initial approval succeeds
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "approved",
+		Intent:     "create",
+		Slug:       "api-spec",
+	})
+	if err != nil {
+		t.Fatalf("initial approval failed: %v", err)
+	}
+
+	var countAfterFirst int
+	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = 1 AND doc_type = 'api_spec'").Scan(&countAfterFirst); err != nil {
+		t.Fatalf("count after first: %v", err)
+	}
+	if countAfterFirst != 1 {
+		t.Fatalf("expected 1 doc after first approval, got %d", countAfterFirst)
+	}
+
+	// 2. Repeated approval MUST be rejected and must NOT create duplicate docs
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "approved",
+		Intent:     "create",
+		Slug:       "api-spec-repeat",
+	})
+	if err == nil {
+		t.Fatal("expected repeated approval to fail")
+	}
+	if !strings.Contains(err.Error(), "not pending") {
+		t.Fatalf("expected not pending error on repeated approval, got: %v", err)
+	}
+
+	var countAfterSecond int
+	if err := db.QueryRow("SELECT COUNT(*) FROM project_doc WHERE project_id = 1 AND doc_type = 'api_spec'").Scan(&countAfterSecond); err != nil {
+		t.Fatalf("count after second: %v", err)
+	}
+	if countAfterSecond != 1 {
+		t.Fatalf("expected doc count to remain 1 after repeated approval, got %d", countAfterSecond)
+	}
+
+	// 3. Repeated rejection on approved proposal must also be rejected (audit preserved)
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "rejected",
+	})
+	if err == nil {
+		t.Fatal("expected rejection of approved proposal to fail")
+	}
+
+	var proposalStatus string
+	if err := db.QueryRow("SELECT status FROM doc_proposal WHERE id = ?", prop.ProposalId).Scan(&proposalStatus); err != nil {
+		t.Fatalf("query proposal status: %v", err)
+	}
+	if proposalStatus != "approved" {
+		t.Fatalf("expected proposal status to remain 'approved', got %q", proposalStatus)
+	}
+}
+
+func TestSetDocProposalStatus_ApprovalWithUpdateIntentRequiresTarget(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalSessionID := authorizedSessionId
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		authorizedSessionId = originalSessionID
+	}()
+
+	testDB := setupGetProjectsTestDB(t)
+	defer func() {
+		_ = testDB.Close()
+	}()
+
+	db = testDB
+	authorizedProjectId = 1
+
+	authorizedRole = "netrunner"
+	authorizedSessionId = 1
+	_, prop, err := ProposeDocUpdate(context.Background(), nil, ProposeDocUpdateInput{
+		ProposedContent: "Targetless update proposal",
+		ProposedDocType: "architecture",
+		Intent:          "create",
+	})
+	if err != nil {
+		t.Fatalf("propose failed: %v", err)
+	}
+
+	authorizedRole = "fixer"
+	_, _, err = SetDocProposalStatus(context.Background(), nil, SetDocProposalStatusInput{
+		ProposalId: prop.ProposalId,
+		Status:     "approved",
+		Intent:     "update",
+	})
+	if err == nil {
+		t.Fatal("expected approval with update intent and absent target to fail")
+	}
+	if !strings.Contains(err.Error(), "approval with update intent requires target_project_doc_id") ||
+		!strings.Contains(err.Error(), "absent target must not silently overwrite") ||
+		!strings.Contains(err.Error(), "governed Fixer may explicitly retarget") {
+		t.Fatalf("expected teach error with retarget guidance, got: %v", err)
+	}
+}
+
+

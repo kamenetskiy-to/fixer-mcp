@@ -169,6 +169,13 @@ def _parse_wire_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]
         choices=("new", "resume", "unattached"),
         help="Fixer launch action; when set, the legacy line selector is skipped.",
     )
+    parser.add_argument("--fixer-backend")
+    parser.add_argument("--fixer-model")
+    parser.add_argument("--fixer-reasoning")
+    parser.add_argument(
+        "--fixer-mcp",
+        help="Fixer MCP servers: 'keep' reuses stored selection, 'none' attaches none, otherwise a comma-separated list of server names.",
+    )
     parser.add_argument(
         "--list-fixer-sessions",
         action="store_true",
@@ -1022,7 +1029,12 @@ def _resolve_latest_fixer_resume_session_id(cwd: Path) -> str:
     return fixer_wire_resume.resolve_latest_fixer_resume_session_id(
         cwd,
         load_fixer_resume_summaries=_load_fixer_resume_summaries,
+        verify_resume_mcp_identity=_verify_resume_mcp_config_current,
     )
+
+
+def _verify_resume_mcp_config_current() -> object:
+    return fixer_wire_resume.assert_resume_mcp_config_current()
 
 
 def _select_netrunner_resume_session_interactive(
@@ -1056,6 +1068,7 @@ def _resolve_netrunner_resume_session_id(
         prompt_resume_session_id=_prompt_resume_session_id,
         load_netrunner_resume_summaries=_load_netrunner_resume_summaries,
         select_netrunner_resume_session_interactive=_select_netrunner_resume_session_interactive,
+        verify_resume_mcp_identity=_verify_resume_mcp_config_current,
     )
 
 
@@ -1109,6 +1122,7 @@ def _load_available_servers(cwd: Path, *, backend: str = DEFAULT_BACKEND) -> tup
         available_servers = _inject_research_query_server(available_servers, cwd)
         available_servers = _inject_figma_console_server(available_servers, cwd)
         available_servers = _inject_forced_fixer_server(available_servers)
+        _ensure_forced_fixer_server_resolved(available_servers)
         attach_preprompts_from_command_paths(available_servers)
     except ConfigError as err:
         raise RuntimeError(str(err)) from err
@@ -1466,6 +1480,10 @@ def _launch_fixer(
     dry_run: bool,
     preset_resume_latest: bool,
     preset_resume_session_id: str | None,
+    preset_backend: str | None = None,
+    preset_model: str | None = None,
+    preset_reasoning: str | None = None,
+    preset_mcp: str | None = None,
     Option: Any,
     single_select_items: Any,
 ) -> int:
@@ -1475,6 +1493,10 @@ def _launch_fixer(
         dry_run=dry_run,
         preset_resume_latest=preset_resume_latest,
         preset_resume_session_id=preset_resume_session_id,
+        preset_backend=preset_backend,
+        preset_model=preset_model,
+        preset_reasoning=preset_reasoning,
+        preset_mcp=preset_mcp,
         Option=Option,
         single_select_items=single_select_items,
         callbacks=_role_launch_callbacks(),
@@ -1485,12 +1507,20 @@ def _launch_unattached_fixer(
     passthrough_args: Sequence[str],
     *,
     dry_run: bool,
+    preset_backend: str | None = None,
+    preset_model: str | None = None,
+    preset_reasoning: str | None = None,
+    preset_mcp: str | None = None,
     Option: Any,
     single_select_items: Any,
 ) -> int:
     return fixer_wire_role_launch.launch_unattached_fixer(
         passthrough_args,
         dry_run=dry_run,
+        preset_backend=preset_backend,
+        preset_model=preset_model,
+        preset_reasoning=preset_reasoning,
+        preset_mcp=preset_mcp,
         Option=Option,
         single_select_items=single_select_items,
         callbacks=_role_launch_callbacks(),
@@ -1978,6 +2008,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=wire_args.dry_run,
             preset_resume_latest=wire_args.fixer_resume_latest,
             preset_resume_session_id=wire_args.fixer_session_id,
+            preset_backend=wire_args.fixer_backend,
+            preset_model=wire_args.fixer_model,
+            preset_reasoning=wire_args.fixer_reasoning,
+            preset_mcp=wire_args.fixer_mcp,
             Option=Option,
             single_select_items=single_select_items,
         )
@@ -2018,6 +2052,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _launch_unattached_fixer(
             passthrough_args,
             dry_run=wire_args.dry_run,
+            preset_backend=wire_args.fixer_backend,
+            preset_model=wire_args.fixer_model,
+            preset_reasoning=wire_args.fixer_reasoning,
+            preset_mcp=wire_args.fixer_mcp,
             Option=Option,
             single_select_items=single_select_items,
         )
@@ -2087,6 +2125,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dry_run=wire_args.dry_run,
                 preset_resume_latest=wire_args.fixer_resume_latest,
                 preset_resume_session_id=wire_args.fixer_session_id,
+                preset_backend=wire_args.fixer_backend,
+                preset_model=wire_args.fixer_model,
+                preset_reasoning=wire_args.fixer_reasoning,
+                preset_mcp=wire_args.fixer_mcp,
                 Option=Option,
                 single_select_items=single_select_items,
             )

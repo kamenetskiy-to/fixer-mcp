@@ -23,8 +23,10 @@ import (
 //
 // A wave carries a system1_check packet; when a worker reaches review_ready the
 // wait/review path runs a bounded two-stage check before the Fixer is asked to
-// accept: a one-shot transcript reader (MiMo 2.6 Flash via cmd) produces a
-// factual overview, then typesafe/jev answers one noul question per criterion.
+// accept: a one-shot transcript reader (sandboxed Pi on the existing
+// CommandCode subscription, MiMo 2.6 Flash) reads the full original transcript
+// history through sequential chunked executions and produces a factual
+// overview, then typesafe/jev answers one noul question per criterion.
 // Pass is decided here (overall_probability >= threshold AND every hard
 // criterion >= 0.5), not by the model. At most max_checks (clamped 1..3)
 // checks run per worker; a failed
@@ -60,7 +62,6 @@ const (
 	system1ReviewToolName = "get_system1_reviews"
 
 	system1ManagedExecTimeout = 10 * time.Minute
-	system1TranscriptMaxBytes = 128 * 1024
 
 	// A worker gets at most this many infrastructure attempts before the
 	// failure is escalated to the Fixer instead of being retried.
@@ -163,12 +164,11 @@ const (
 	system1OutcomeInfraFailed system1Outcome = "infra_failed"
 )
 
-type system1ExecutorFunc func(ctx context.Context, projectCWD string, model string, prompt string) (string, error)
-
-// system1ReaderExec is the one-shot transcript reader (cmd + MiMo 2.6 Flash).
+// system1ReaderExec is the one-shot transcript reader: the restricted Pi
+// sandbox on the existing CommandCode subscription (see restricted_reader_pi.go).
 // system1JudgeExec is typesafe/jev: typed questions in, noul probabilities out.
 // Tests swap either seam so no provider process is spawned.
-var system1ReaderExec system1ExecutorFunc = launchSystem1ManagedNetrunner
+var system1ReaderExec system1ReaderExecFunc = launchSystem1PiReader
 var system1JudgeExec func(ctx context.Context, projectCWD string, payload string) (string, error) = launchSystem1Jev
 
 const system1JudgeExecutorName = "typesafe/jev"
@@ -343,22 +343,24 @@ func system1InfraArtifactPath(projectCWD string, waveID int, localSessionID int,
 }
 
 type system1Artifact struct {
-	CheckId         string             `json:"check_id"`
-	ContractVersion string             `json:"contract_version"`
-	WaveId          int                `json:"wave_id"`
-	SessionId       int                `json:"session_id"`
-	CheckNumber     int                `json:"check_number"`
-	Packet          *System1CheckInput `json:"packet"`
-	WorkerStatus    string             `json:"worker_status"`
-	FinalReport     string             `json:"final_report"`
-	TranscriptPath  string             `json:"transcript_path"`
-	ReaderReport    string             `json:"reader_report"`
-	JudgeRawOutput  string             `json:"judge_raw_output"`
-	Verdict         *System1Verdict    `json:"verdict,omitempty"`
-	Passed          bool               `json:"passed"`
-	Outcome         string             `json:"outcome"`
-	InfraAttempt    int                `json:"infra_attempt,omitempty"`
-	InfraDiagnostic string             `json:"infra_diagnostic,omitempty"`
+	CheckId            string                    `json:"check_id"`
+	ContractVersion    string                    `json:"contract_version"`
+	WaveId             int                       `json:"wave_id"`
+	SessionId          int                       `json:"session_id"`
+	CheckNumber        int                       `json:"check_number"`
+	Packet             *System1CheckInput        `json:"packet"`
+	WorkerStatus       string                    `json:"worker_status"`
+	FinalReport        string                    `json:"final_report"`
+	TranscriptPath     string                    `json:"transcript_path"`
+	TranscriptHistory  []string                  `json:"transcript_history,omitempty"`
+	TranscriptCoverage *transcriptCoverageLedger `json:"transcript_coverage,omitempty"`
+	ReaderReport       string                    `json:"reader_report"`
+	JudgeRawOutput     string                    `json:"judge_raw_output"`
+	Verdict            *System1Verdict           `json:"verdict,omitempty"`
+	Passed             bool                      `json:"passed"`
+	Outcome            string                    `json:"outcome"`
+	InfraAttempt       int                       `json:"infra_attempt,omitempty"`
+	InfraDiagnostic    string                    `json:"infra_diagnostic,omitempty"`
 }
 
 func persistSystem1CheckRecord(record System1CheckRecord, globalSessionID int) (int, error) {
@@ -837,13 +839,18 @@ func decideSystem1Pass(verdict System1Verdict, packet system1CheckPacket) bool {
 	return true
 }
 
-func buildSystem1ReaderPrompt(finalReport string, transcriptPath string, diagnostics []string, transcriptPayload string) string {
+// buildSystem1ReaderPrompt assembles the one-shot reader input: the worker's
+// final report as a claim, the full original transcript history (continuation
+// attempts included, numbered end to end), and the deterministic coverage
+// ledger. The reader cites the global line numbers produced by the coverage
+// reader; no truncated head/tail excerpt is ever presented as the transcript.
+func buildSystem1ReaderPrompt(finalReport string, transcriptPaths []string, diagnostics []string, transcriptPayload string, ledger transcriptCoverageLedger) string {
 	var prompt strings.Builder
 	prompt.WriteString(system1AnalystPrompt)
 	prompt.WriteString("\n\nWorker final report (a claim for the claims-vs-observed table, not evidence):\n")
 	prompt.WriteString(finalReport)
 	prompt.WriteString("\n\nWorker full session transcript resolved via get_netrunner_transcript_path (JSONL; cite line numbers):\n")
-	if strings.TrimSpace(transcriptPath) == "" {
+	if len(transcriptPaths) == 0 {
 		prompt.WriteString("transcript path: (not resolved)\n")
 		if len(diagnostics) > 0 {
 			prompt.WriteString("lookup diagnostics: " + strings.Join(diagnostics, "; ") + "\n")
@@ -851,8 +858,13 @@ func buildSystem1ReaderPrompt(finalReport string, transcriptPath string, diagnos
 		prompt.WriteString("The transcript is missing or unreadable; say exactly what is missing.\n")
 		return prompt.String()
 	}
-	prompt.WriteString("transcript path: ")
-	prompt.WriteString(transcriptPath)
+	for _, path := range transcriptPaths {
+		prompt.WriteString("transcript path: ")
+		prompt.WriteString(path)
+		prompt.WriteString("\n")
+	}
+	prompt.WriteString("coverage ledger (deterministic proof the input below covers the original files end to end):\n")
+	prompt.WriteString(strings.Join(ledger.Diagnostics(), "\n"))
 	prompt.WriteString("\n")
 	if transcriptPayload == "" {
 		if len(diagnostics) > 0 {
@@ -865,56 +877,35 @@ func buildSystem1ReaderPrompt(finalReport string, transcriptPath string, diagnos
 	return prompt.String()
 }
 
-// readSystem1TranscriptPayload numbers the transcript lines and bounds the
-// embed size (head plus tail with an explicit truncation marker) so the reader
-// can still cite real line numbers.
-func readSystem1TranscriptPayload(path string) string {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	lines := strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
-	numbered := make([]string, 0, len(lines))
-	for index, line := range lines {
-		numbered = append(numbered, fmt.Sprintf("%d: %s", index+1, line))
-	}
-	payload := strings.Join(numbered, "\n")
-	if len(payload) <= system1TranscriptMaxBytes {
-		return payload
-	}
-	half := system1TranscriptMaxBytes / 2
-	head := payload[:half]
-	tail := payload[len(payload)-half:]
-	return head + "\n...[transcript truncated for prompt budget]...\n" + tail
-}
-
-func resolveSystem1WorkerTranscript(globalSessionID int, projectID int, backend string, projectCWD string) (string, []string) {
+// resolveSystem1WorkerTranscriptHistory resolves the full transcript
+// continuation history for one worker: every attempt provably linked to the
+// current worker/head (launcher-registered attempts plus fresh and resumed
+// runs bound to the worker's execution worktree), ordered chronologically,
+// ending with the head transcript the public lookup resolves. It never picks
+// an arbitrary newest file, and a missing or contradictory provenance stays
+// an infrastructure condition instead of a content verdict.
+func resolveSystem1WorkerTranscriptHistory(globalSessionID int, localSessionID int, projectID int, backend string, projectCWD string) (string, []string, []string) {
 	diagnostics := []string{}
-	externalSessionID, err := fetchSessionExternalID(globalSessionID, backend)
-	if err != nil {
-		diagnostics = append(diagnostics, fmt.Sprintf("failed to resolve external session id: %v", err))
-		return "", diagnostics
+	head, history, _ := resolveWorkerTranscriptProvenance(globalSessionID, localSessionID, backend, projectCWD, &diagnostics)
+	if len(history) == 0 {
+		return "", nil, diagnostics
 	}
-	if strings.TrimSpace(externalSessionID) == "" {
-		diagnostics = append(diagnostics, "transcript unavailable: no persisted external session id; transcript identity cannot be proven")
-		return "", diagnostics
+	// The head the public lookup resolves is placed last so the history stays
+	// chronological and always ends with the current worker's transcript.
+	ordered := make([]string, 0, len(history))
+	for _, path := range history {
+		if path != head {
+			ordered = append(ordered, path)
+		}
 	}
-	return resolveBackendTranscriptPath(backend, projectCWD, externalSessionID, &diagnostics), diagnostics
+	ordered = append(ordered, head)
+	return head, ordered, diagnostics
 }
 
-func system1CommandcodeModelID(model string) string {
-	trimmed := strings.TrimSpace(model)
-	return strings.TrimPrefix(trimmed, "commandcode/")
-}
-
-// system1CommandcodeEffort mirrors the client-wires adapter: the MiMo 2.6
-// family ships fixed reasoning and the CLI refuses any --effort flag for it.
-func system1CommandcodeEffort(model string) string {
-	modelID := system1CommandcodeModelID(model)
-	if strings.HasPrefix(modelID, "xiaomi/mimo-v2.6") {
-		return ""
-	}
-	return "high"
+func resolveSystem1WorkerTranscript(globalSessionID int, localSessionID int, projectID int, backend string, projectCWD string) (string, []string) {
+	diagnostics := []string{}
+	head, _, _ := resolveWorkerTranscriptProvenance(globalSessionID, localSessionID, backend, projectCWD, &diagnostics)
+	return head, diagnostics
 }
 
 func resolveSystem1CommandcodeBinary() string {
@@ -926,188 +917,269 @@ func resolveSystem1CommandcodeBinary() string {
 	return "cmd"
 }
 
-// launchSystem1ManagedNetrunner runs one bounded headless commandcode query in
-// the project cwd with the same runtime environment the wave launcher uses.
-// It is the default System1 executor; no HTTP API is ever called directly.
-func launchSystem1ManagedNetrunner(ctx context.Context, projectCWD string, model string, prompt string) (string, error) {
-	args := []string{
-		"--model", system1CommandcodeModelID(model),
-		"--yolo",
-		"--trust",
-		"--skip-onboarding",
-		"--no-auto-update",
-		"--output-format", "json",
-	}
-	if effort := system1CommandcodeEffort(model); effort != "" {
-		args = append(args, "--effort", effort)
-	}
-	args = append(args, "--print")
+// Chunked full-history reader pipeline. The original transcript history is
+// read end to end through sequential bounded reader executions (one per
+// covered chunk range, including histories larger than any single prompt such
+// as >8MiB), each producing a bounded factual observation. Only after the full
+// reading is verified against the deterministic coverage ledger does a bounded
+// synthesis execution produce the final overview that typesafe/jev sees.
 
-	command := execCommand(resolveSystem1CommandcodeBinary(), args...)
-	command.Dir = projectCWD
-	// The prompt (reader instructions plus up to 128KiB of numbered transcript)
-	// travels on stdin, like the Jev payload. On argv it would exceed ARG_MAX
-	// ("argument list too long") and the run would never start.
-	command.Stdin = strings.NewReader(prompt)
-	commandEnv, envErr := resolveRuntimeLaunchEnv(projectCWD, os.Environ())
-	if envErr != nil {
-		log.Printf("warning: system1 managed launch: failed to resolve runtime launch env for %s: %v", projectCWD, envErr)
-		commandEnv = os.Environ()
-	}
-	command.Env = commandEnv
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
-		return "", fmt.Errorf("failed to start managed system1 netrunner (%s): %v", model, err)
-	}
-	waitErrCh := make(chan error, 1)
-	go func() {
-		waitErrCh <- command.Wait()
-	}()
-	select {
-	case waitErr := <-waitErrCh:
-		if waitErr != nil {
-			detail := strings.TrimSpace(stderr.String())
-			if detail == "" {
-				detail = waitErr.Error()
-			}
-			return "", fmt.Errorf("managed system1 netrunner (%s) exited with error: %s", model, boundedParallelWaveSummaryText(detail, 2000))
-		}
-	case <-time.After(system1ManagedExecTimeout):
-		_ = command.Process.Kill()
-		<-waitErrCh
-		return "", fmt.Errorf("managed system1 netrunner (%s) exceeded bounded timeout %s", model, system1ManagedExecTimeout)
-	case <-ctx.Done():
-		_ = command.Process.Kill()
-		<-waitErrCh
-		return "", fmt.Errorf("managed system1 netrunner (%s) canceled: %v", model, ctx.Err())
-	}
-	return extractSystem1ModelText(stdout.String())
+const system1ChunkObservationPrompt = "You are an independent transcript reader processing one sequential chunk of a worker's full session transcript. This is a FACTUAL OBSERVATION pass, not a judgment. Read the numbered lines of this chunk end to end and record: commands actually executed and their real outcomes; files actually modified; tests actually run and genuine results; errors, dead ends, reverts; notable worker claims. Cite the global line numbers given below. Do not judge quality. Stay under 400 words. If lines are unreadable, say exactly what is missing."
+
+const system1ReaderSynthesisPrompt = "You are an independent transcript reader producing the final FACTUAL overview of a worker session. The full original transcript history was read end to end in sequential chunk executions; the per-chunk factual observations below cover every line exactly once, and the deterministic coverage ledger proves it. Sections: timeline with line references; commands actually executed and real outcomes; files actually modified; tests actually run and genuine results; errors, dead ends, reverts; a claims-vs-observed table against the worker final report (supported / partially / unsupported / not observable). Evidence over narration. Stay under 1200 words."
+
+// system1ChunkedReaderInput carries everything the chunked reader pipeline
+// needs: the worker's final report as a claim, the resolved continuation
+// history, and the covered numbered chunks with their coverage ledger.
+type system1ChunkedReaderInput struct {
+	FinalReport     string
+	TranscriptPaths []string
+	Diagnostics     []string
+	Chunks          []transcriptNumberedChunk
+	Ledger          *transcriptCoverageLedger
 }
 
-// extractSystem1ModelText extracts the final overview text from one cmd run's
-// stdout. cmd --print emits a JSONL event stream ({"type":"event",...} lines
-// followed by a terminal {"type":"result",...} line). For a recognized event
-// stream only the terminal successful result.finalText — or the
-// run_end.result.finalText fallback — is a legitimate overview: unsuccessful
-// results, turn-limit truncation, and streams without a final overview fail
-// closed instead of leaking the event stream, intermediate text, thinking, or
-// tool output to the judge. Single-document JSON results and plain-text
-// results stay supported.
-func extractSystem1ModelText(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", fmt.Errorf("cmd produced no output: no final overview")
+// buildSystem1ChunkObservationPrompt assembles one bounded chunk execution
+// prompt: the observation instructions, the exact covered range, and the
+// numbered lines of that range (contiguous with every other chunk, no skipped
+// ranges). The transcript paths are listed so the restricted evidence tool can
+// only ever read those files.
+func buildSystem1ChunkObservationPrompt(transcriptPaths []string, chunk transcriptNumberedChunk, index int, total int, ledger transcriptCoverageLedger) string {
+	var prompt strings.Builder
+	prompt.WriteString(system1ChunkObservationPrompt)
+	fmt.Fprintf(&prompt, "\n\nThis is chunk %d of %d of the worker's full session transcript (JSONL continuation history; cite the global line numbers).\n", index+1, total)
+	for _, path := range transcriptPaths {
+		prompt.WriteString("transcript path: ")
+		prompt.WriteString(path)
+		prompt.WriteString("\n")
 	}
-	var single map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &single); err == nil {
-		if isSystem1CmdStreamMarker(single) {
-			return extractSystem1ModelTextFromStream(trimmed)
-		}
-		for _, key := range []string{"result", "text", "output", "response"} {
-			if value, ok := single[key].(string); ok && strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value), nil
-			}
-		}
-		if message, ok := single["message"].(map[string]any); ok {
-			for _, key := range []string{"content", "text"} {
-				if value, ok := message[key].(string); ok && strings.TrimSpace(value) != "" {
-					return strings.TrimSpace(value), nil
-				}
-			}
-		}
-		if content, ok := single["content"].(string); ok && strings.TrimSpace(content) != "" {
-			return strings.TrimSpace(content), nil
-		}
-		// A single JSON document without a known text field is still a
-		// legitimate single-document result variant.
-		return trimmed, nil
+	prompt.WriteString("covered range: ")
+	prompt.WriteString(formatChunkRangeLabel(chunk.transcriptCoverageChunk))
+	prompt.WriteString("\n")
+	if diagnostics := ledger.Diagnostics(); len(diagnostics) > 0 {
+		prompt.WriteString("coverage ledger: ")
+		prompt.WriteString(diagnostics[0])
+		prompt.WriteString("\n")
 	}
-	if isSystem1CmdEventStream(trimmed) {
-		return extractSystem1ModelTextFromStream(trimmed)
-	}
-	return trimmed, nil
+	prompt.WriteString(chunk.NumberedText)
+	return prompt.String()
 }
 
-func isSystem1CmdStreamMarker(entry map[string]any) bool {
-	kind, _ := entry["type"].(string)
-	return kind == "event" || kind == "result"
+// buildSystem1ReaderSynthesisPrompt assembles the bounded final synthesis
+// prompt. It carries the claim, the coverage ledger diagnostics, and the
+// bounded per-chunk observations produced after the full original reading —
+// never a compressed index substituting for that reading.
+func buildSystem1ReaderSynthesisPrompt(input system1ChunkedReaderInput, observations []string, ledger transcriptCoverageLedger) string {
+	var prompt strings.Builder
+	prompt.WriteString(system1ReaderSynthesisPrompt)
+	prompt.WriteString("\n\nWorker final report (a claim for the claims-vs-observed table, not evidence):\n")
+	prompt.WriteString(input.FinalReport)
+	prompt.WriteString("\n\nWorker full session transcript resolved via get_netrunner_transcript_path (JSONL; cite line numbers):\n")
+	if len(input.TranscriptPaths) == 0 {
+		prompt.WriteString("transcript path: (not resolved)\n")
+	} else {
+		for _, path := range input.TranscriptPaths {
+			prompt.WriteString("transcript path: ")
+			prompt.WriteString(path)
+			prompt.WriteString("\n")
+		}
+	}
+	prompt.WriteString("coverage ledger (deterministic proof the chunk observations below cover the original files end to end):\n")
+	prompt.WriteString(strings.Join(ledger.Diagnostics(), "\n"))
+	if len(input.Diagnostics) > 0 {
+		prompt.WriteString("\nlookup diagnostics: ")
+		prompt.WriteString(strings.Join(input.Diagnostics, "; "))
+	}
+	prompt.WriteString("\n\nPer-chunk factual observations:\n")
+	for index, observation := range observations {
+		fmt.Fprintf(&prompt, "\n[chunk %d]\n%s\n", index+1, observation)
+	}
+	prompt.WriteString("\nProduce the final factual overview now.\n")
+	return prompt.String()
 }
 
-// isSystem1CmdEventStream recognizes the cmd --print JSONL shape: the first
-// non-empty line is an event/result wrapper object.
-func isSystem1CmdEventStream(raw string) bool {
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			return false
-		}
-		return isSystem1CmdStreamMarker(entry)
+func buildSystem1ObservationCompactionPrompt(group []string, index int, total int) string {
+	var prompt strings.Builder
+	prompt.WriteString("You are an independent transcript reader. Merge the following factual transcript observations into ONE factual observation covering everything they contain: commands and outcomes, files modified, tests run and results, errors, and claims, with their line references preserved. Do not judge quality. Do not drop facts. Stay under 400 words.")
+	fmt.Fprintf(&prompt, "\n\nThis is compaction batch %d of %d.\n", index+1, total)
+	for partIndex, observation := range group {
+		fmt.Fprintf(&prompt, "\n[observation %d]\n%s\n", partIndex+1, observation)
 	}
-	return false
+	return prompt.String()
 }
 
-func extractSystem1ModelTextFromStream(raw string) (string, error) {
-	var terminal map[string]any
-	var runEnd map[string]any
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var entry map[string]any
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		switch entry["type"] {
-		case "result":
-			terminal = entry
-		case "event":
-			if event, ok := entry["event"].(map[string]any); ok && event["type"] == "run_end" {
-				runEnd = event
-			}
-		}
+// recordSystem1ChunkExecution appends the durable execution record for one
+// covered chunk range: the exact range, the prompt fingerprint, the bounded
+// observation fingerprint, and the terminal status. Failed executions are
+// recorded too so partial reading is always visible.
+func recordSystem1ChunkExecution(ledger *transcriptCoverageLedger, index int, chunk transcriptNumberedChunk, prompt string, observation string, runErr error) {
+	if ledger == nil {
+		return
 	}
-	if terminal != nil {
-		subtype, _ := terminal["subtype"].(string)
-		stopReason, _ := terminal["stopReason"].(string)
-		switch {
-		case subtype == "error":
-			errorText, _ := terminal["error"].(string)
-			return "", fmt.Errorf("cmd result is unsuccessful: %s", boundedParallelWaveSummaryText(strings.TrimSpace(errorText), 500))
-		case subtype == "max_turns" || stopReason == "max_turns":
-			return "", fmt.Errorf("cmd result is truncated by the turn limit (max_turns): there is no complete final overview")
-		case subtype != "success":
-			return "", fmt.Errorf("cmd result has unrecognized subtype %q: refusing to treat it as a final overview", subtype)
-		}
-		finalText, _ := terminal["finalText"].(string)
-		if strings.TrimSpace(finalText) != "" {
-			return strings.TrimSpace(finalText), nil
-		}
+	promptBytes, promptSHA := readerInputFingerprint(prompt)
+	observationBytes, observationSHA := readerInputFingerprint(observation)
+	execution := transcriptChunkExecution{
+		Index:             index,
+		Label:             fmt.Sprintf("chunk-%d", index+1),
+		FileIndex:         chunk.FileIndex,
+		Path:              chunk.Path,
+		StartByte:         chunk.StartByte,
+		EndByte:           chunk.EndByte,
+		StartLine:         chunk.StartLine,
+		EndLine:           chunk.EndLine,
+		PromptBytes:       promptBytes,
+		PromptSHA256:      promptSHA,
+		ObservationBytes:  observationBytes,
+		ObservationSHA256: observationSHA,
 	}
-	if runEnd != nil {
-		result, ok := runEnd["result"].(map[string]any)
-		if ok {
-			stopReason, _ := result["stopReason"].(string)
-			if stopReason == "max_turns" {
-				return "", fmt.Errorf("cmd run ended truncated by the turn limit (max_turns): there is no complete final overview")
-			}
-			if stopReason == "run_error" {
-				return "", fmt.Errorf("cmd run ended unsuccessfully (run_error): there is no final overview")
-			}
-			finalText, _ := result["finalText"].(string)
-			if strings.TrimSpace(finalText) != "" {
-				return strings.TrimSpace(finalText), nil
-			}
-		}
+	if runErr != nil {
+		execution.Status = transcriptChunkExecutionStatusFailed
+		execution.Error = boundedRedactedExcerpt(redactReaderSecrets(runErr.Error()), restrictedReaderExcerptMaxByte)
+	} else {
+		execution.Status = transcriptChunkExecutionStatusExecuted
 	}
-	return "", fmt.Errorf("cmd event stream has no final overview (no successful result.finalText): refusing to send the event stream to the judge")
+	ledger.recordChunkExecution(execution)
+}
+
+func totalSystem1ObservationBytes(observations []string) int {
+	total := 0
+	for _, observation := range observations {
+		total += len(observation)
+	}
+	return total
+}
+
+// groupSystem1Observations groups consecutive observations into batches whose
+// joined size stays within maxBytes. Grouping is deterministic and never
+// reorders or drops observations.
+func groupSystem1Observations(observations []string, maxBytes int) [][]string {
+	groups := [][]string{}
+	current := []string{}
+	currentBytes := 0
+	for _, observation := range observations {
+		if len(current) > 0 && currentBytes+len(observation) > maxBytes {
+			groups = append(groups, current)
+			current = []string{}
+			currentBytes = 0
+		}
+		current = append(current, observation)
+		currentBytes += len(observation)
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
+}
+
+// compactSystem1ChunkObservations keeps the bounded synthesis input within
+// budget through further bounded reader executions over consecutive
+// observation batches. The full original reading already happened in the chunk
+// executions; this step only compresses derived observations and never skips
+// an observation silently.
+func compactSystem1ChunkObservations(ctx context.Context, projectCWD string, model string, observations []string) ([]string, error) {
+	for iteration := 0; iteration < 4 && totalSystem1ObservationBytes(observations) > system1ReaderSynthesisMaxBytes; iteration++ {
+		groups := groupSystem1Observations(observations, system1ReaderSynthesisMaxBytes)
+		if len(groups) >= len(observations) {
+			break
+		}
+		compacted := make([]string, 0, len(groups))
+		for groupIndex, group := range groups {
+			prompt := buildSystem1ObservationCompactionPrompt(group, groupIndex, len(groups))
+			summary, err := system1ReaderExec(ctx, projectCWD, system1ReaderRun{
+				Label:  fmt.Sprintf("compact-%d", groupIndex+1),
+				Model:  model,
+				Prompt: prompt,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("reader observation compaction %d/%d failed: %v", groupIndex+1, len(groups), err)
+			}
+			compacted = append(compacted, clipSystem1Text(summary, system1ReaderObservationMaxBytes, "chunk observation compaction"))
+		}
+		observations = compacted
+	}
+	return observations, nil
+}
+
+// executeSystem1ChunkedReader reads the full original transcript history end
+// to end through sequential bounded reader executions and returns the bounded
+// final factual overview. When the whole numbered history fits one chunk, one
+// execution reads it all and produces the overview directly; otherwise each
+// chunk is read by its own execution, the coverage ledger plus chunk-execution
+// records are verified, and only then a bounded synthesis execution produces
+// the overview. Any reader failure is an infrastructure failure for the
+// caller: no content verdict, no budget consumption.
+func executeSystem1ChunkedReader(ctx context.Context, projectCWD string, model string, input system1ChunkedReaderInput) (string, error) {
+	if input.Ledger == nil {
+		return "", fmt.Errorf("chunked reader requires the coverage ledger")
+	}
+	ledger := input.Ledger
+	if len(input.Chunks) == 0 {
+		return "", fmt.Errorf("chunked reader received no transcript chunks: %s", strings.Join(ledger.Diagnostics(), "; "))
+	}
+	if len(input.Chunks) == 1 {
+		chunk := input.Chunks[0]
+		prompt := buildSystem1ReaderPrompt(input.FinalReport, input.TranscriptPaths, input.Diagnostics, chunk.NumberedText, *ledger)
+		overview, err := system1ReaderExec(ctx, projectCWD, system1ReaderRun{
+			Label:         "overview",
+			Model:         model,
+			Prompt:        prompt,
+			EvidencePaths: input.TranscriptPaths,
+			ChunkIndex:    1,
+			Chunk:         &chunk.transcriptCoverageChunk,
+		})
+		recordSystem1ChunkExecution(ledger, 0, chunk, prompt, overview, err)
+		if err != nil {
+			return "", fmt.Errorf("reader overview execution failed: %v", err)
+		}
+		if strings.TrimSpace(overview) == "" {
+			return "", fmt.Errorf("reader overview execution produced no factual overview")
+		}
+		return clipSystem1Text(overview, system1ReaderOverviewMaxBytes, "factual overview"), nil
+	}
+
+	observations := make([]string, 0, len(input.Chunks))
+	for index := range input.Chunks {
+		chunk := input.Chunks[index]
+		prompt := buildSystem1ChunkObservationPrompt(input.TranscriptPaths, chunk, index, len(input.Chunks), *ledger)
+		observation, err := system1ReaderExec(ctx, projectCWD, system1ReaderRun{
+			Label:         fmt.Sprintf("chunk-%d", index+1),
+			Model:         model,
+			Prompt:        prompt,
+			EvidencePaths: input.TranscriptPaths,
+			ChunkIndex:    index + 1,
+			Chunk:         &chunk.transcriptCoverageChunk,
+		})
+		recordSystem1ChunkExecution(ledger, index, chunk, prompt, observation, err)
+		if err != nil {
+			return "", fmt.Errorf("reader chunk %d (%s) failed: %v", index+1, formatChunkRangeLabel(chunk.transcriptCoverageChunk), err)
+		}
+		observations = append(observations, clipSystem1Text(observation, system1ReaderObservationMaxBytes, "chunk observation"))
+	}
+
+	// The full reading must be complete and verified before any bounded
+	// synthesis runs: every covered range exactly once, no skipped lines.
+	if problems := append(ledger.transcriptCoverageProblems(), ledger.chunkExecutionProblems()...); len(problems) > 0 {
+		return "", fmt.Errorf("coverage ledger invalid after chunked reading: %s", strings.Join(problems, "; "))
+	}
+
+	observations, compactErr := compactSystem1ChunkObservations(ctx, projectCWD, model, observations)
+	if compactErr != nil {
+		return "", compactErr
+	}
+	finalPrompt := buildSystem1ReaderSynthesisPrompt(input, observations, *ledger)
+	overview, err := system1ReaderExec(ctx, projectCWD, system1ReaderRun{
+		Label:         "synthesis",
+		Model:         model,
+		Prompt:        finalPrompt,
+		EvidencePaths: input.TranscriptPaths,
+	})
+	if err != nil {
+		return "", fmt.Errorf("reader synthesis execution failed: %v", err)
+	}
+	if strings.TrimSpace(overview) == "" {
+		return "", fmt.Errorf("reader synthesis produced no factual overview")
+	}
+	return clipSystem1Text(overview, system1ReaderOverviewMaxBytes, "factual overview"), nil
 }
 
 func buildSystem1Continuation(checkID string, verdict System1Verdict, packet system1CheckPacket) string {
@@ -1221,24 +1293,55 @@ func processSystem1ReviewForWorker(ctx context.Context, projectCWD string, wave 
 	artifact.WorkerStatus = status
 	artifact.FinalReport = report
 
-	transcriptPath, diagnostics := resolveSystem1WorkerTranscript(globalSessionID, wave.ProjectId, backend, projectCWD)
-	transcriptPayload := ""
-	if strings.TrimSpace(transcriptPath) != "" {
-		transcriptPayload = readSystem1TranscriptPayload(transcriptPath)
+	transcriptPath, transcriptHistory, diagnostics := resolveSystem1WorkerTranscriptHistory(globalSessionID, worker.SessionId, wave.ProjectId, backend, projectCWD)
+	if len(transcriptHistory) == 0 {
+		// Missing provenance is an infrastructure condition: no content
+		// verdict, no budget consumption, and no rework for the worker.
+		return system1InfraFailure(projectCWD, wave, worker, packet, checkNumber, checkID, globalSessionID, artifact,
+			fmt.Sprintf("system1 infrastructure failure (transcript provenance): %s", strings.Join(diagnostics, "; ")))
+	}
+	// The full ORIGINAL history is read end to end through sequential
+	// chunked reader executions (line/byte ranges, EOF, and identities in the
+	// deterministic coverage ledger). Histories larger than any single prompt
+	// (including >8MiB) are actually read this way; evidence is never
+	// truncated and never substituted by a compressed index.
+	numberedChunks, ledger, coverageErr := readTranscriptCoverageChunks(transcriptHistory, system1ReaderChunkBytes)
+	if coverageErr != nil {
+		return system1InfraFailure(projectCWD, wave, worker, packet, checkNumber, checkID, globalSessionID, artifact,
+			fmt.Sprintf("system1 infrastructure failure (transcript coverage): %s; %s",
+				coverageErr, strings.Join(ledger.Diagnostics(), "; ")))
 	}
 	artifact.TranscriptPath = transcriptPath
+	artifact.TranscriptHistory = transcriptHistory
+	artifact.TranscriptCoverage = &ledger
 
-	readerPrompt := buildSystem1ReaderPrompt(report, transcriptPath, diagnostics, transcriptPayload)
-	readerReport, readerErr := system1ReaderExec(ctx, projectCWD, system1ReaderModel, readerPrompt)
+	readerReport, readerErr := executeSystem1ChunkedReader(ctx, projectCWD, system1ReaderModel, system1ChunkedReaderInput{
+		FinalReport:     report,
+		TranscriptPaths: transcriptHistory,
+		Diagnostics:     diagnostics,
+		Chunks:          numberedChunks,
+		Ledger:          &ledger,
+	})
 	if readerErr != nil {
 		return system1InfraFailure(projectCWD, wave, worker, packet, checkNumber, checkID, globalSessionID, artifact,
-			fmt.Sprintf("system1 infrastructure failure (reader): %v", readerErr))
+			fmt.Sprintf("system1 infrastructure failure (reader): %v; %s", readerErr, strings.Join(ledger.Diagnostics(), "; ")))
 	}
 	if strings.TrimSpace(readerReport) == "" {
 		return system1InfraFailure(projectCWD, wave, worker, packet, checkNumber, checkID, globalSessionID, artifact,
-			"system1 infrastructure failure (reader): the transcript reader produced no factual overview")
+			fmt.Sprintf("system1 infrastructure failure (reader): the transcript reader produced no factual overview; %s", strings.Join(ledger.Diagnostics(), "; ")))
 	}
 	artifact.ReaderReport = readerReport
+
+	// The deterministic coverage ledger and its chunk-execution records are
+	// re-verified before the judge: a partial or contradictory provenance, or
+	// any chunk range that was not actually read, must never reach a content
+	// verdict.
+	problems := append(ledger.transcriptCoverageProblems(), ledger.chunkExecutionProblems()...)
+	if !ledger.Complete || len(problems) > 0 {
+		return system1InfraFailure(projectCWD, wave, worker, packet, checkNumber, checkID, globalSessionID, artifact,
+			fmt.Sprintf("system1 infrastructure failure (transcript coverage): ledger incomplete before judge: %s",
+				strings.Join(problems, "; ")))
+	}
 
 	jevPayload, criteria, payloadErr := buildSystem1JevPayload(packet, report, readerReport)
 	if payloadErr != nil {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Figma Frontend Works"
+  short_description: "Section-based Figma parity pipeline"
+  default_prompt: "Use $figma-frontend-works to drive a section-by-section Figma parity pass with screenshots, TAs, implementation loops, and fresh verification artifacts."

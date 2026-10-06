@@ -65,6 +65,49 @@ class FixerAutonomousModuleTests(unittest.TestCase):
         self.assertNotIn("Autonomous fixer Codex session ID", prompt)
         self.assertIn("Preselected compatibility session ID from fixer autonomous flow: `7`.", prompt)
 
+    def test_prompt_module_requires_doc_proposal_only_for_real_impact(self) -> None:
+        prompt_wake = fixer_autonomous_prompts._build_autonomous_netrunner_prompt(
+            7,
+            ["fixer_mcp"],
+            "fixer-session",
+            {},
+            default_how_to_fn=lambda name: f"default guidance for {name}",
+            suppress_autonomous_wake=False,
+        )
+        self.assertIn("submit a doc proposal only if there is real canonical doc impact", prompt_wake)
+        self.assertIn("explicit no-impact completion is allowed for verification/code-only work", prompt_wake)
+        self.assertIn("submit the mandatory completion report", prompt_wake)
+        self.assertIn("wake_fixer_autonomous", prompt_wake)
+
+        prompt_suppressed = fixer_autonomous_prompts._build_autonomous_netrunner_prompt(
+            7,
+            ["fixer_mcp"],
+            "fixer-session",
+            {},
+            default_how_to_fn=lambda name: f"default guidance for {name}",
+            suppress_autonomous_wake=True,
+        )
+        self.assertIn("submit a doc proposal only if there is real canonical doc impact", prompt_suppressed)
+        self.assertIn("submit the mandatory completion report", prompt_suppressed)
+        self.assertIn("Do not call fixer_mcp.wake_fixer_autonomous", prompt_suppressed)
+
+        wave_prompt = fixer_autonomous_prompts._build_wave_netrunner_prompt(
+            session_id=7,
+            mcp_names=["fixer_mcp"],
+            fixer_session_id="fixer-session",
+            mcp_how_to={},
+            wave_id=1,
+            wave_worker_id=2,
+            branch_name="fixer/wave-1/session-7",
+            worker_cwd=Path("/tmp/cwd"),
+            positive_wave_int_fn=lambda _name, val: val,
+            validate_wave_branch_name_fn=lambda val: val,
+            default_how_to_fn=lambda name: f"guidance for {name}",
+        )
+        self.assertIn("submit a doc proposal only if there is real canonical doc impact", wave_prompt)
+        self.assertIn("submit the mandatory completion report", wave_prompt)
+        self.assertNotIn("mandatory doc proposal and completion report", wave_prompt)
+
     def test_transcript_module_extracts_droid_session_id_from_plain_log_line(self) -> None:
         session_id = fixer_autonomous_transcripts._extract_droid_session_id_from_line(
             "external_session_id='droid-session-123'",

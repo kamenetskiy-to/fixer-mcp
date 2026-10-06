@@ -759,6 +759,7 @@ type ProposeDocUpdateInput struct {
 	ProposedDocType        string `json:"proposed_doc_type,omitempty" jsonschema:"The canonical document type to propose"`
 	TargetProjectDocId     int    `json:"target_project_doc_id,omitempty" jsonschema:"Optional project-scoped target doc ID when the proposal should update one existing document"`
 	ProposedLocalizedTitle string `json:"proposed_localized_title,omitempty" jsonschema:"Localized title required for an untargeted proposal when the project documentation language is not English"`
+	Intent                 string `json:"intent,omitempty" jsonschema:"Optional explicit proposal intent: 'create' to propose a new document, or 'update' to update an existing document"`
 }
 
 type ProposeDocUpdateOutput struct {
@@ -782,19 +783,40 @@ func ProposeDocUpdate(ctx context.Context, req *mcp.CallToolRequest, input Propo
 		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, err
 	}
 
+	intent := strings.ToLower(strings.TrimSpace(input.Intent))
+	if intent != "" && intent != "create" && intent != "update" {
+		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("invalid intent: must be 'create' or 'update'")
+	}
+	if intent == "create" && input.TargetProjectDocId > 0 {
+		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("create intent cannot specify target_project_doc_id")
+	}
+	if intent == "update" && input.TargetProjectDocId <= 0 {
+		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("update intent requires target_project_doc_id")
+	}
+
 	docType := input.ProposedDocType
 	if docType == "" {
 		docType = "documentation"
 	}
 
 	var targetProjectDocID any
-	if input.TargetProjectDocId != 0 {
+	if input.TargetProjectDocId < 0 {
+		return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("invalid target_project_doc_id: %d", input.TargetProjectDocId)
+	}
+	if input.TargetProjectDocId > 0 {
 		globalDocID, err := globalProjectDocIDFromProjectScoped(input.TargetProjectDocId, authorizedProjectId)
 		if err == sql.ErrNoRows {
 			return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("target_project_doc_id not found in current project")
 		}
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("failed to resolve target_project_doc_id: %v", err)
+		}
+		belongs, err := projectDocBelongsToProject(globalDocID, authorizedProjectId)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
+		if !belongs {
+			return &mcp.CallToolResult{IsError: true}, ProposeDocUpdateOutput{}, fmt.Errorf("target_project_doc_id not found in current project")
 		}
 		targetProjectDocID = globalDocID
 	}
@@ -851,6 +873,7 @@ type DocProposal struct {
 	ProposedDocType        string `json:"proposed_doc_type"`
 	TargetProjectDocId     int    `json:"target_project_doc_id,omitempty"`
 	ProposedLocalizedTitle string `json:"proposed_localized_title,omitempty"`
+	Intent                 string `json:"intent,omitempty"`
 }
 
 type ReviewDocProposalsOutput struct {
@@ -908,8 +931,11 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 		if err := rows.Scan(&p.Id, &p.SessionId, &p.ProposedContent, &p.ProposedDocType, &p.ProposedLocalizedTitle, &targetProjectDocID); err != nil {
 			return &mcp.CallToolResult{IsError: true}, ReviewDocProposalsOutput{}, fmt.Errorf("DB scan error: %v", err)
 		}
-		if targetProjectDocID.Valid {
+		if targetProjectDocID.Valid && targetProjectDocID.Int64 > 0 {
 			p.TargetProjectDocId = int(targetProjectDocID.Int64)
+			p.Intent = "update"
+		} else {
+			p.Intent = "create"
 		}
 		proposals = append(proposals, p)
 	}
@@ -921,11 +947,13 @@ func ReviewDocProposals(ctx context.Context, req *mcp.CallToolRequest, input Rev
 }
 
 type SetDocProposalStatusInput struct {
-	ProposalId  int    `json:"proposal_id" jsonschema:"The ID of the proposal to update"`
-	Status      string `json:"status" jsonschema:"New status: 'approved' or 'rejected'"`
-	ParentDocId int    `json:"parent_doc_id,omitempty" jsonschema:"Optional project-scoped parent document ID when approving a proposal that creates a new canonical doc"`
-	Slug        string `json:"slug,omitempty" jsonschema:"Optional stable slug when approving a proposal that creates a new canonical doc"`
-	Level       int    `json:"level,omitempty" jsonschema:"Optional tree level 0..3 when approving a proposal that creates a new canonical doc"`
+	ProposalId         int    `json:"proposal_id" jsonschema:"The ID of the proposal to update"`
+	Status             string `json:"status" jsonschema:"New status: 'approved' or 'rejected'"`
+	ParentDocId        int    `json:"parent_doc_id,omitempty" jsonschema:"Optional project-scoped parent document ID when approving a proposal that creates a new canonical doc"`
+	Slug               string `json:"slug,omitempty" jsonschema:"Optional stable slug when approving a proposal that creates a new canonical doc"`
+	Level              int    `json:"level,omitempty" jsonschema:"Optional tree level 0..3 when approving a proposal that creates a new canonical doc"`
+	TargetProjectDocId int    `json:"target_project_doc_id,omitempty" jsonschema:"Optional project-scoped target doc ID when approving a proposal to update or retarget an existing document"`
+	Intent             string `json:"intent,omitempty" jsonschema:"Optional explicit approval intent: 'create' to create a new canonical doc, or 'update' to update an existing doc"`
 }
 
 type SetDocProposalStatusOutput struct {
@@ -942,6 +970,10 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 	if input.Status != "approved" && input.Status != "rejected" {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("invalid status: must be 'approved' or 'rejected'")
 	}
+	approvalIntent := strings.ToLower(strings.TrimSpace(input.Intent))
+	if approvalIntent != "" && approvalIntent != "create" && approvalIntent != "update" {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("invalid intent: must be 'create' or 'update'")
+	}
 
 	globalProposalID, err := globalDocProposalIDFromProjectScoped(input.ProposalId, authorizedProjectId)
 	if err == sql.ErrNoRows {
@@ -950,141 +982,182 @@ func SetDocProposalStatus(ctx context.Context, req *mcp.CallToolRequest, input S
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB query error: %v", err)
 	}
+
 	proposalLocalizationColumn := dbTableHasColumn("doc_proposal", "proposed_localized_title")
 
-	if input.Status == "approved" {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to begin approval transaction: %v", err)
-		}
-		defer func() {
-			_ = tx.Rollback()
-		}()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
-		var proposedContent, proposedDocType, proposedLocalizedTitle string
-		var targetProjectDocID sql.NullInt64
-		localizedTitleExpr := "''"
-		if proposalLocalizationColumn {
-			localizedTitleExpr = "COALESCE(proposed_localized_title, '')"
-		}
-		err = tx.QueryRow(
-			fmt.Sprintf("SELECT proposed_content, COALESCE(proposed_doc_type, 'documentation'), %s, target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?", localizedTitleExpr),
-			globalProposalID,
-			authorizedProjectId,
-		).Scan(&proposedContent, &proposedDocType, &proposedLocalizedTitle, &targetProjectDocID)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to fetch proposal: %v", err)
-		}
+	var currentProposalStatus, proposedContent, proposedDocType, proposedLocalizedTitle string
+	var targetProjectDocID sql.NullInt64
+	localizedTitleExpr := "''"
+	if proposalLocalizationColumn {
+		localizedTitleExpr = "COALESCE(proposed_localized_title, '')"
+	}
+	err = tx.QueryRow(
+		fmt.Sprintf("SELECT status, proposed_content, COALESCE(proposed_doc_type, 'documentation'), %s, target_project_doc_id FROM doc_proposal WHERE id = ? AND project_id = ?", localizedTitleExpr),
+		globalProposalID,
+		authorizedProjectId,
+	).Scan(&currentProposalStatus, &proposedContent, &proposedDocType, &proposedLocalizedTitle, &targetProjectDocID)
+	if err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to fetch proposal: %v", err)
+	}
 
-		if targetProjectDocID.Valid {
-			res, err := tx.Exec(
-				"UPDATE project_doc SET content = ?, doc_type = ? WHERE id = ? AND project_id = ?",
-				proposedContent,
-				proposedDocType,
-				targetProjectDocID.Int64,
-				authorizedProjectId,
-			)
-			if err != nil {
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to update targeted project_doc: %v", err)
-			}
-			rowsAffected, err := res.RowsAffected()
-			if err != nil {
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to confirm targeted project_doc update: %v", err)
-			}
-			if rowsAffected == 0 {
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("target_project_doc_id no longer exists in current project")
-			}
-		} else {
-			rows, err := tx.Query(
-				"SELECT id FROM project_doc WHERE project_id = ? AND COALESCE(doc_type, 'documentation') = ? ORDER BY id LIMIT 2",
-				authorizedProjectId,
-				proposedDocType,
-			)
-			if err != nil {
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to resolve proposal target: %v", err)
-			}
-			defer func() {
-				_ = rows.Close()
-			}()
+	if currentProposalStatus != "pending" {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("proposal %d is not pending (current status: %s)", input.ProposalId, currentProposalStatus)
+	}
 
-			matchingDocIDs := make([]int, 0, 2)
-			for rows.Next() {
-				var docID int
-				if err := rows.Scan(&docID); err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to scan proposal target: %v", err)
-				}
-				matchingDocIDs = append(matchingDocIDs, docID)
-			}
-			if err := rows.Err(); err != nil {
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to read proposal targets: %v", err)
-			}
-
-			switch len(matchingDocIDs) {
-			case 0:
-				language, localizedTitle, err := requiredLocalizedProjectDocTitleWithExecutor(tx, authorizedProjectId, proposedLocalizedTitle)
-				if err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
-				}
-				tree, err := normalizeProjectDocTreeFieldsWithExecutor(tx, authorizedProjectId, "Documentation ("+proposedDocType+")", input.ParentDocId, input.Level, input.Slug, "", "current", 0)
-				if err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
-				}
-				res, err := tx.Exec(
-					"INSERT INTO project_doc (project_id, title, content, doc_type, parent_doc_id, level, slug, path, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-					authorizedProjectId,
-					"Documentation ("+proposedDocType+")",
-					proposedContent,
-					proposedDocType,
-					tree.ParentDocID,
-					tree.Level,
-					tree.Slug,
-					tree.Path,
-					tree.Status,
-				)
-				if err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert project_doc: %v", err)
-				}
-				newGlobalDocID, err := res.LastInsertId()
-				if err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to read inserted project_doc id: %v", err)
-				}
-				if err := upsertProjectDocLocalizedTitle(tx, int(newGlobalDocID), language, localizedTitle); err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert localized project_doc title: %v", err)
-				}
-			case 1:
-				if _, err := tx.Exec(
-					"UPDATE project_doc SET content = ?, doc_type = ? WHERE id = ? AND project_id = ?",
-					proposedContent,
-					proposedDocType,
-					matchingDocIDs[0],
-					authorizedProjectId,
-				); err != nil {
-					return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to update project_doc: %v", err)
-				}
-			default:
-				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf(
-					"proposal %d approval is ambiguous for doc_type %q; resubmit with target_project_doc_id",
-					input.ProposalId,
-					proposedDocType,
-				)
-			}
-		}
-
-		_, err = tx.Exec("UPDATE doc_proposal SET status = ? WHERE id = ? AND project_id = ?", input.Status, globalProposalID, authorizedProjectId)
+	if input.Status == "rejected" {
+		_, err = tx.Exec("UPDATE doc_proposal SET status = 'rejected' WHERE id = ? AND project_id = ?", globalProposalID, authorizedProjectId)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB update error: %v", err)
 		}
-
 		if err := tx.Commit(); err != nil {
-			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to commit approval transaction: %v", err)
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to commit rejection transaction: %v", err)
 		}
-
 		return nil, SetDocProposalStatusOutput{Status: "success"}, nil
 	}
 
-	_, err = db.Exec("UPDATE doc_proposal SET status = ? WHERE id = ? AND project_id = ?", input.Status, globalProposalID, authorizedProjectId)
+	// Status is "approved"
+	var explicitTargetGlobalDocID int
+	if input.TargetProjectDocId < 0 {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("invalid target_project_doc_id: %d", input.TargetProjectDocId)
+	}
+	if input.TargetProjectDocId > 0 {
+		if approvalIntent == "create" {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("create intent cannot specify target_project_doc_id")
+		}
+		globalDocID, err := globalProjectDocIDFromProjectScopedWithExecutor(tx, input.TargetProjectDocId, authorizedProjectId)
+		if err == sql.ErrNoRows {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("target_project_doc_id %d not found in current project", input.TargetProjectDocId)
+		}
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to resolve target_project_doc_id: %v", err)
+		}
+		var existsInProject int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM project_doc WHERE id = ? AND project_id = ?", globalDocID, authorizedProjectId).Scan(&existsInProject); err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
+		if existsInProject == 0 {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("target_project_doc_id %d not found in current project", input.TargetProjectDocId)
+		}
+		explicitTargetGlobalDocID = globalDocID
+	} else if targetProjectDocID.Valid && targetProjectDocID.Int64 > 0 {
+		if approvalIntent == "create" {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("create intent conflicts with existing proposal target_project_doc_id")
+		}
+		var existsInProject int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM project_doc WHERE id = ? AND project_id = ?", targetProjectDocID.Int64, authorizedProjectId).Scan(&existsInProject); err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
+		if existsInProject == 0 {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("target_project_doc_id no longer exists in current project")
+		}
+		explicitTargetGlobalDocID = int(targetProjectDocID.Int64)
+	}
+
+	if explicitTargetGlobalDocID > 0 {
+		res, err := tx.Exec(
+			"UPDATE project_doc SET content = ?, doc_type = ? WHERE id = ? AND project_id = ?",
+			proposedContent,
+			proposedDocType,
+			explicitTargetGlobalDocID,
+			authorizedProjectId,
+		)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to update targeted project_doc: %v", err)
+		}
+		rowsAffected, err := res.RowsAffected()
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to confirm targeted project_doc update: %v", err)
+		}
+		if rowsAffected == 0 {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("target_project_doc_id no longer exists in current project")
+		}
+	} else {
+		if approvalIntent == "update" {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf(
+				"proposal %d approval with update intent requires target_project_doc_id: absent target must not silently overwrite; governed Fixer may explicitly retarget (set target_project_doc_id) or create (set intent='create'), not resubmit boilerplate new proposals",
+				input.ProposalId,
+			)
+		}
+
+		rows, err := tx.Query(
+			"SELECT id FROM project_doc WHERE project_id = ? AND COALESCE(doc_type, 'documentation') = ? ORDER BY id LIMIT 2",
+			authorizedProjectId,
+			proposedDocType,
+		)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to resolve proposal target: %v", err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		matchingDocIDs := make([]int, 0, 2)
+		for rows.Next() {
+			var docID int
+			if err := rows.Scan(&docID); err != nil {
+				return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to scan proposal target: %v", err)
+			}
+			matchingDocIDs = append(matchingDocIDs, docID)
+		}
+		if err := rows.Err(); err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to read proposal targets: %v", err)
+		}
+
+		if approvalIntent != "create" && len(matchingDocIDs) > 0 {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf(
+				"proposal %d approval is ambiguous for doc_type %q: absent target must not silently overwrite; governed Fixer may explicitly retarget (set target_project_doc_id) or create (set intent='create'), not resubmit boilerplate new proposals",
+				input.ProposalId,
+				proposedDocType,
+			)
+		}
+
+		language, localizedTitle, err := requiredLocalizedProjectDocTitleWithExecutor(tx, authorizedProjectId, proposedLocalizedTitle)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
+		}
+		tree, err := normalizeProjectDocTreeFieldsWithExecutor(tx, authorizedProjectId, "Documentation ("+proposedDocType+")", input.ParentDocId, input.Level, input.Slug, "", "current", 0)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, err
+		}
+		res, err := tx.Exec(
+			"INSERT INTO project_doc (project_id, title, content, doc_type, parent_doc_id, level, slug, path, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			authorizedProjectId,
+			"Documentation ("+proposedDocType+")",
+			proposedContent,
+			proposedDocType,
+			tree.ParentDocID,
+			tree.Level,
+			tree.Slug,
+			tree.Path,
+			tree.Status,
+		)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert project_doc: %v", err)
+		}
+		newGlobalDocID, err := res.LastInsertId()
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to read inserted project_doc id: %v", err)
+		}
+		if err := upsertProjectDocLocalizedTitle(tx, int(newGlobalDocID), language, localizedTitle); err != nil {
+			return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to insert localized project_doc title: %v", err)
+		}
+	}
+
+	_, err = tx.Exec("UPDATE doc_proposal SET status = ? WHERE id = ? AND project_id = ?", input.Status, globalProposalID, authorizedProjectId)
 	if err != nil {
 		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("DB update error: %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return &mcp.CallToolResult{IsError: true}, SetDocProposalStatusOutput{}, fmt.Errorf("failed to commit approval transaction: %v", err)
 	}
 
 	return nil, SetDocProposalStatusOutput{Status: "success"}, nil

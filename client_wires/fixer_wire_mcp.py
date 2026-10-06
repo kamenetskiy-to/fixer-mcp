@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -314,6 +316,46 @@ def _resolve_forced_fixer_command_path(command: str, *, base_dir: Path) -> Path:
     return (base_dir / command_path).resolve()
 
 
+# Commands that only wrap the real fixer_mcp payload (the production config
+# launches it as `/usr/bin/env -u VAR /path/fixer_mcp`). Identity and staleness
+# checks must resolve the payload from wrapper arguments, never compare the
+# wrapper itself against the payload.
+_FIXER_MCP_PAYLOAD_WRAPPER_COMMANDS = frozenset({"env", "sh", "bash", "dash", "zsh", "ksh"})
+
+
+def _forced_fixer_payload_path(
+    command: str,
+    args: Sequence[object] = (),
+    *,
+    base_dir: Path,
+) -> Path:
+    """Resolve the actual fixer_mcp payload behind a (possibly wrapped) command.
+
+    A wrapper command (`/usr/bin/env -u VAR /path/fixer_mcp`) carries the real
+    payload as its last path-like argument. Checking the wrapper path itself
+    would compare `/usr/bin/env` against the payload and falsely fail closed on
+    every installed release, so wrapper shapes resolve the payload from args.
+    Non-wrapper commands keep their own path as the payload and never
+    mis-resolve incidental path-like arguments (config files, sockets, ...).
+    """
+    command_text = str(command).strip()
+    command_path = Path(command_text).expanduser() if command_text else Path()
+    target: Path | None = None
+    if command_path.name.lower() in _FIXER_MCP_PAYLOAD_WRAPPER_COMMANDS:
+        for raw in args:
+            text = str(raw).strip()
+            if not text or text.startswith("-"):
+                continue
+            candidate = Path(text).expanduser()
+            if candidate.is_absolute() or any(separator in text for separator in ("/", "\\")):
+                target = candidate
+    if target is None:
+        target = command_path
+    if target.is_absolute():
+        return target.resolve()
+    return (base_dir / target).resolve()
+
+
 def _describe_forced_fixer_resolution(
     *,
     repo_root: Callable[[], Path],
@@ -330,11 +372,14 @@ def _describe_forced_fixer_resolution(
             parsed = json.loads(config_path.read_text(encoding="utf-8"))
             raw_spec = parsed.get("mcpServers", {}).get(FORCED_MCP_SERVER)
             configured_command = raw_spec.get("command") if isinstance(raw_spec, dict) else None
+            configured_args = raw_spec.get("args") if isinstance(raw_spec, dict) else None
         except (OSError, json.JSONDecodeError):
             configured_command = None
+            configured_args = None
+        wrapper_args = [str(item) for item in configured_args] if isinstance(configured_args, list) else []
         if isinstance(configured_command, str) and configured_command.strip():
             checked_paths.append(
-                str(_resolve_forced_fixer_command_path(configured_command, base_dir=config_path.parent))
+                str(_forced_fixer_payload_path(configured_command, wrapper_args, base_dir=config_path.parent))
             )
         checked_paths.append(str((root / "fixer_mcp" / "fixer_mcp").resolve()))
 
@@ -342,6 +387,199 @@ def _describe_forced_fixer_resolution(
     path_text = ", ".join(unique_paths) if unique_paths else "(none)"
     override_text = f"{FIXER_MCP_BINARY_ENV}={override!r}" if override else f"{FIXER_MCP_BINARY_ENV} is unset"
     return f"Checked paths: {path_text}. Env override: {override_text}."
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+STALE_FIXER_MCP_RECONNECT_HINT = (
+    "An already connected MCP process cannot be replaced in place: close and reopen the "
+    "provider client so it re-reads the MCP config and reconnects to the freshly installed "
+    "current binary (stale handshake fail-closed). Then run `fixer doctor` to verify, or use "
+    "get_mcp_binary_restart_state to inspect the live process identity before reconnecting."
+)
+
+
+IDENTITY_CURRENT = "current"
+IDENTITY_IDENTICAL_COPY = "identical_copy"
+IDENTITY_SANCTIONED_OVERRIDE = "sanctioned_override"
+IDENTITY_STALE = "stale"
+IDENTITY_UNVERIFIED_CURRENT_MISSING = "unverified_current_missing"
+IDENTITY_UNVERIFIED_PAYLOAD_MISSING = "unverified_payload_missing"
+
+
+@dataclass(frozen=True)
+class ForcedFixerBinaryIdentity:
+    """Read-only identity verdict for the configured fixer_mcp payload."""
+
+    status: str
+    payload_path: str
+    current_path: str
+    payload_sha256: str
+    current_sha256: str
+    fail_closed: bool
+    message: str
+
+
+def _forced_fixer_binary_identity(
+    payload_path: Path,
+    *,
+    repo_root: Callable[[], Path],
+    environ: dict[str, str] | os._Environ[str] = os.environ,
+) -> ForcedFixerBinaryIdentity:
+    """Classify the configured payload against the current payload (read-only).
+
+    Only a definitive staleness verdict (both payloads exist and differ) fails
+    closed; missing payloads are reported as unverified diagnostics instead of
+    being silently trusted.
+    """
+    current = (repo_root() / "fixer_mcp" / "fixer_mcp").resolve()
+    payload = Path(payload_path).expanduser().resolve()
+    current_text = str(current)
+    payload_text = str(payload)
+    if environ.get(FIXER_MCP_BINARY_ENV, "").strip():
+        return ForcedFixerBinaryIdentity(
+            status=IDENTITY_SANCTIONED_OVERRIDE,
+            payload_path=payload_text,
+            current_path=current_text,
+            payload_sha256="",
+            current_sha256="",
+            fail_closed=False,
+            message=(
+                f"Explicit {FIXER_MCP_BINARY_ENV} override at {payload_text} is a sanctioned "
+                "operator choice; the stale-binary handshake is exempt."
+            ),
+        )
+    if payload == current:
+        return ForcedFixerBinaryIdentity(
+            status=IDENTITY_CURRENT,
+            payload_path=payload_text,
+            current_path=current_text,
+            payload_sha256="",
+            current_sha256="",
+            fail_closed=False,
+            message=f"fixer_mcp payload {payload_text} is the current payload.",
+        )
+    if not current.is_file():
+        return ForcedFixerBinaryIdentity(
+            status=IDENTITY_UNVERIFIED_CURRENT_MISSING,
+            payload_path=payload_text,
+            current_path=current_text,
+            payload_sha256="",
+            current_sha256="",
+            fail_closed=False,
+            message=(
+                f"No current fixer_mcp payload at {current_text}; stale-binary verification is "
+                "unproven, not passed. Build the payload or run `fixer doctor` to verify identity."
+            ),
+        )
+    if not payload.is_file():
+        return ForcedFixerBinaryIdentity(
+            status=IDENTITY_UNVERIFIED_PAYLOAD_MISSING,
+            payload_path=payload_text,
+            current_path=current_text,
+            payload_sha256="",
+            current_sha256="",
+            fail_closed=False,
+            message=(
+                f"Configured fixer_mcp payload {payload_text} is missing; the transport cannot be "
+                f"verified and will fail at process start. Update the mcp_config.json command to "
+                f"{current_text}. {STALE_FIXER_MCP_RECONNECT_HINT}"
+            ),
+        )
+    payload_sha = _file_sha256(payload)
+    current_sha = _file_sha256(current)
+    if payload_sha == current_sha:
+        return ForcedFixerBinaryIdentity(
+            status=IDENTITY_IDENTICAL_COPY,
+            payload_path=payload_text,
+            current_path=current_text,
+            payload_sha256=payload_sha,
+            current_sha256=current_sha,
+            fail_closed=False,
+            message=(
+                f"Configured fixer_mcp payload {payload_text} is byte-identical to the current "
+                f"payload {current_text} (sha256={payload_sha[:12]})."
+            ),
+        )
+    return ForcedFixerBinaryIdentity(
+        status=IDENTITY_STALE,
+        payload_path=payload_text,
+        current_path=current_text,
+        payload_sha256=payload_sha,
+        current_sha256=current_sha,
+        fail_closed=True,
+        message=(
+            f"Forced '{FORCED_MCP_SERVER}' MCP config points at a stale binary: {payload_text} "
+            f"does not match the current payload {current_text} (payload sha256={payload_sha[:12]}, "
+            f"current sha256={current_sha[:12]}). Refusing to launch a stale-schema "
+            f"transport (fail closed). Update the mcp_config.json command to {current_text}. "
+            f"{STALE_FIXER_MCP_RECONNECT_HINT}"
+        ),
+    )
+
+
+def _configured_forced_fixer_payload_path(
+    *,
+    repo_root: Callable[[], Path],
+    environ: dict[str, str] | os._Environ[str] = os.environ,
+) -> Path:
+    """Resolve the configured fixer_mcp payload path without side effects."""
+    root = repo_root()
+    override = environ.get(FIXER_MCP_BINARY_ENV, "").strip()
+    if override:
+        return _resolve_forced_fixer_command_path(override, base_dir=root)
+    config_path = root / "fixer_mcp" / "mcp_config.json"
+    configured_command = ""
+    configured_args: list[object] = []
+    try:
+        parsed = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_spec = parsed.get("mcpServers", {}).get(FORCED_MCP_SERVER)
+        if isinstance(raw_spec, dict):
+            raw_command = raw_spec.get("command")
+            if isinstance(raw_command, str):
+                configured_command = raw_command
+            raw_args = raw_spec.get("args")
+            if isinstance(raw_args, list):
+                configured_args = list(raw_args)
+    except (OSError, json.JSONDecodeError):
+        pass
+    if configured_command.strip():
+        return _forced_fixer_payload_path(configured_command, configured_args, base_dir=config_path.parent)
+    return (root / "fixer_mcp" / "fixer_mcp").resolve()
+
+
+def _verify_forced_fixer_binary_current(
+    command_path: Path,
+    *,
+    args: Sequence[object] = (),
+    base_dir: Path | None = None,
+    repo_root: Callable[[], Path],
+    environ: dict[str, str] | os._Environ[str] = os.environ,
+) -> None:
+    """Refuse to launch a stale fixer_mcp binary behind a fresh config.
+
+    The MCP config can keep pointing at an old installed payload after an
+    update (a 1.0.9 transport once survived every later release). The payload
+    behind the configured command (resolving wrapper shapes such as
+    `/usr/bin/env -u VAR /path/fixer_mcp` from args) must be byte-identical to
+    the current payload; anything older is a stale-schema transport and fails
+    closed with an actionable reconnect instruction. An explicit
+    FIXER_MCP_BINARY override is a sanctioned operator choice and is exempt.
+    """
+    payload = _forced_fixer_payload_path(
+        str(command_path),
+        args,
+        base_dir=base_dir if base_dir is not None else command_path.expanduser().parent,
+    )
+    identity = _forced_fixer_binary_identity(payload, repo_root=repo_root, environ=environ)
+    if identity.fail_closed:
+        raise RuntimeError(identity.message)
 
 
 def _ensure_forced_fixer_server_resolved(
@@ -370,9 +608,9 @@ def _ensure_forced_fixer_server_resolved(
     if not is_path_like:
         return
 
+    cwd = fixer_spec.get("cwd")
+    base_dir = Path(cwd).expanduser() if isinstance(cwd, str) and cwd.strip() else Path.cwd()
     if not command_path.is_absolute():
-        cwd = fixer_spec.get("cwd")
-        base_dir = Path(cwd).expanduser() if isinstance(cwd, str) and cwd.strip() else Path.cwd()
         command_path = base_dir / command_path
     command_path = command_path.resolve()
     if not command_path.is_file() or not os.access(command_path, os.X_OK):
@@ -381,6 +619,15 @@ def _ensure_forced_fixer_server_resolved(
             f"{details} Set {FIXER_MCP_BINARY_ENV} to an executable fixer_mcp binary or build "
             f"{repo_root() / 'fixer_mcp'}."
         )
+    spec_args = fixer_spec.get("args")
+    arg_list: list[object] = list(spec_args) if isinstance(spec_args, list) else []
+    _verify_forced_fixer_binary_current(
+        command_path,
+        args=arg_list,
+        base_dir=base_dir,
+        repo_root=repo_root,
+        environ=environ,
+    )
 
 
 def _with_forced_fixer_timeout_floor(spec: dict[str, object]) -> dict[str, object]:

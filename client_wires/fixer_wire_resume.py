@@ -11,11 +11,12 @@ import re
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from client_wires.backends import SUPPORTED_BACKENDS, available_backend_descriptors, is_codex_backend, normalize_backend_name
 from client_wires.backends.codex_adapter import codex_default_model_for_family, codex_model_family_for_model, codex_model_family_label
 from client_wires import fixer_wire_db
+from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_selectors
 
 
@@ -1613,11 +1614,53 @@ def load_netrunner_resume_summaries(
     return netrunner_summaries
 
 
+def resume_mcp_identity_status(
+    *,
+    repo_root: Callable[[], Path] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> fixer_wire_mcp.ForcedFixerBinaryIdentity:
+    """Read-only stale-identity probe for the resume helper.
+
+    Resuming a durable session re-reads the MCP config; if that config still
+    points at an old installed payload (a 1.0.9 transport once survived every
+    later release), the resumed client would continue against a stale-schema
+    transport. This probe reports the configured payload identity without
+    touching anything.
+    """
+    root = repo_root or (lambda: Path(__file__).resolve().parent.parent)
+    env: dict[str, str] = dict(os.environ) if environ is None else dict(environ)
+    payload = fixer_wire_mcp._configured_forced_fixer_payload_path(repo_root=root, environ=env)
+    return fixer_wire_mcp._forced_fixer_binary_identity(payload, repo_root=root, environ=env)
+
+
+def assert_resume_mcp_config_current(
+    *,
+    repo_root: Callable[[], Path] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> fixer_wire_mcp.ForcedFixerBinaryIdentity:
+    """Fail closed when a resume would attach to a stale fixer_mcp transport.
+
+    Returns the identity verdict unchanged when the configured payload is the
+    current one (or cannot be judged); a definitive stale verdict raises with
+    the actionable reconnect instruction instead of silently resuming.
+    """
+    identity = resume_mcp_identity_status(repo_root=repo_root, environ=environ)
+    if identity.fail_closed:
+        raise RuntimeError(
+            "Refusing to resume a durable session against a stale fixer_mcp transport "
+            f"(fail closed). {identity.message}"
+        )
+    return identity
+
+
 def resolve_latest_fixer_resume_session_id(
     cwd: Path,
     *,
     load_fixer_resume_summaries: Callable[..., list[Any]],
+    verify_resume_mcp_identity: Callable[[], Any] | None = None,
 ) -> str:
+    if verify_resume_mcp_identity is not None:
+        verify_resume_mcp_identity()
     summaries = load_fixer_resume_summaries(cwd, limit=8)
     if not summaries:
         raise RuntimeError("No existing Fixer sessions were found for this project cwd.")
@@ -1666,7 +1709,10 @@ def resolve_netrunner_resume_session_id(
     prompt_resume_session_id: Callable[[int, str], str | None],
     load_netrunner_resume_summaries: Callable[[Path, int], list[Any]],
     select_netrunner_resume_session_interactive: Callable[..., str],
+    verify_resume_mcp_identity: Callable[[], Any] | None = None,
 ) -> str:
+    if verify_resume_mcp_identity is not None:
+        verify_resume_mcp_identity()
     backend = normalize_backend_name(selected_session.cli_backend)
     stored_session_id = selected_session.external_session_id.strip()
     if not is_codex_backend(backend):

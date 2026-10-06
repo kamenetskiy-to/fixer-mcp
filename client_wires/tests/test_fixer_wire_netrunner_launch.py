@@ -6,6 +6,7 @@ except ImportError:  # package-style import
     from ._provider_stubs import provider_stub_path
 
 import dataclasses
+import json
 import sqlite3
 import sys
 import tempfile
@@ -15,7 +16,9 @@ from unittest.mock import patch
 
 from client_wires import fixer_wire
 from client_wires import fixer_wire_hands_context
+from client_wires import fixer_wire_mcp
 from client_wires import fixer_wire_netrunner_launch
+from client_wires import fixer_wire_resume
 from client_wires import fixer_wire_selectors
 from client_wires.backends.antigravity_adapter import AntigravityBackendAdapter
 from client_wires.backends.droid_adapter import DroidBackendAdapter
@@ -34,6 +37,70 @@ class _DummyOption:
         self.value = value
         self.disabled = disabled
         self.is_header = is_header
+
+
+def _make_hermetic_identity_root(base: Path, *, stale: bool = False) -> tuple[Path, dict[str, str]]:
+    """Build a self-contained fixer_mcp payload/config pair for the identity gate.
+
+    The fixture tree is the gate's entire world: its mcp_config.json points at its
+    own payload binary (same-payload when stale=False; a different-bytes binary
+    when stale=True). Nothing outside ``base`` is read, so verdicts cannot depend
+    on HOME, the ambient checkout/staged payload layout, or any real MCP config.
+    """
+    root = base / "identity-root"
+    fixer_dir = root / "fixer_mcp"
+    fixer_dir.mkdir(parents=True)
+    payload = fixer_dir / "fixer_mcp"
+    payload.write_bytes(b"#!/bin/sh\n# hermetic fixture fixer_mcp current payload\n")
+    if stale:
+        stale_payload = base / "stale-payload" / "fixer_mcp"
+        stale_payload.parent.mkdir(parents=True)
+        stale_payload.write_bytes(b"#!/bin/sh\n# hermetic fixture stale fixer_mcp payload (different bytes)\n")
+        command = str(stale_payload)
+    else:
+        command = str(payload)
+    config = {
+        "mcpServers": {
+            fixer_wire.FORCED_MCP_SERVER: {
+                "command": command,
+                "args": [],
+            }
+        }
+    }
+    (fixer_dir / "mcp_config.json").write_text(json.dumps(config), encoding="utf-8")
+    return root, {}
+
+
+class _HermeticIdentityGate:
+    """Fixture-pinned seam for fixer_wire._verify_resume_mcp_config_current.
+
+    The production enforcement is NOT mocked open: the real fail-closed gate
+    (fixer_wire_resume.assert_resume_mcp_config_current, stale-hash check
+    included) executes unchanged — only its inputs (repo root and environment)
+    are pinned to the fixture payload/config pair, so a stale verdict still
+    aborts the launch and no real MCP binary/config is ever consulted.
+    """
+
+    def __init__(self, root: Path, environ: dict[str, str]) -> None:
+        self.root = root
+        self.environ = environ
+        self.calls: list[str] = []
+        self.verdicts: list[fixer_wire_mcp.ForcedFixerBinaryIdentity] = []
+
+    def __call__(self) -> object:
+        self.calls.append("identity-gate")
+        # Record the read-only verdict first so fail-closed raises are auditable,
+        # then run the real enforcement unchanged (it re-derives the same verdict
+        # and raises the production fail-closed error on staleness).
+        verdict = fixer_wire_resume.resume_mcp_identity_status(
+            repo_root=lambda: self.root,
+            environ=self.environ,
+        )
+        self.verdicts.append(verdict)
+        return fixer_wire_resume.assert_resume_mcp_config_current(
+            repo_root=lambda: self.root,
+            environ=self.environ,
+        )
 
 
 class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
@@ -124,12 +191,15 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
         self.assertEqual(state.default_lane, "codex")
         self.assertEqual(
             [lane.provider for lane in state.lanes],
-            ["commandcode", "codex", "claude", "kimi", "antigravity", "grok"],
+            ["pi", "codex", "grok", "antigravity"],
         )
-        self.assertEqual(state.lanes[0].backend, "commandcode")
-        self.assertEqual(state.lanes[2].backend, "claude")
-        self.assertEqual(state.lanes[5].model, "grok-4.6")
-        self.assertEqual(state.lanes[5].reasoning, "default")
+        self.assertEqual(state.lanes[0].backend, "pi")
+        self.assertEqual(state.lanes[0].model, "mimo-v2.6-pro")
+        self.assertEqual(state.lanes[0].reasoning, "high")
+        self.assertEqual(state.lanes[1].model, "gpt-6.1-sol")
+        self.assertEqual(state.lanes[2].model, "grok-4.7")
+        self.assertEqual(state.lanes[3].model, "gemini-3.8-flash")
+        self.assertEqual(state.lanes[3].reasoning, "high")
 
     def test_project_hands_pi_provider_maps_to_the_pi_backend(self) -> None:
         # A permanent `pi` Hands lane reaches the launcher as provider="pi".
@@ -381,6 +451,18 @@ class FixerWireNetrunnerLaunchExtractionTests(unittest.TestCase):
 
 
 class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Hermetic identity fixture for every test in this class: the resume
+        # launch's MCP identity gate judges a fixture payload/config pair, never
+        # the ambient machine (staged payload layouts, real binaries, HOME).
+        self._identity_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._identity_tmp.cleanup)
+        self.identity_root, self.identity_environ = _make_hermetic_identity_root(Path(self._identity_tmp.name))
+        self.identity_gate = _HermeticIdentityGate(self.identity_root, self.identity_environ)
+        patcher = patch.object(fixer_wire, "_verify_resume_mcp_config_current", self.identity_gate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _make_db(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         tmp = tempfile.TemporaryDirectory()
         db_path = Path(tmp.name) / "fixer.db"
@@ -902,6 +984,113 @@ class LaunchNetrunnerResumeFlowTests(unittest.TestCase):
         self.assertFalse(any("codex_apps" in arg for arg in cmd))
         self.assertFalse(any("computer-use.enabled=true" in arg for arg in cmd))
         self.assertFalse(any("computer_use.disabled=false" in arg for arg in cmd))
+
+    def test_launch_netrunner_resume_calls_identity_gate_before_resume(self) -> None:
+        """Focused regression: a resume launch must pass the MCP identity gate first."""
+        tmp, db_path = self._make_db()
+
+        def fake_call(_cmd: list[str], **_kwargs: object) -> int:
+            self.identity_gate.calls.append("subprocess-call")
+            return 0
+
+        try:
+            with (
+                patch.dict(sys.modules, {"client_wires.codex_compat.llm": _fake_codex_main_module(), "client_wires.codex_compat.runtime": _fake_codex_main_module()}),
+                patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
+                patch.object(fixer_wire, "_resolve_project_id", return_value=1),
+                patch.object(
+                    fixer_wire,
+                    "_load_session_rows",
+                    return_value=[
+                        fixer_wire.SessionRow(
+                            session_id=36,
+                            global_session_id=139,
+                            task_description="Resume me",
+                            status="in_progress",
+                            codex_session_id="resume-139",
+                        )
+                    ],
+                ),
+                patch.object(fixer_wire, "_load_available_servers", side_effect=lambda *_a, **_k: self._load_available_servers()),
+                patch.object(fixer_wire, "_load_netrunner_resume_summaries", return_value=[_make_history_summary("resume-139", preview="Existing netrunner")]),
+                patch("client_wires.fixer_wire.subprocess.call", side_effect=fake_call) as mock_call,
+            ):
+                code = fixer_wire._launch_netrunner(
+                    [],
+                    preset_session_id=36,
+                    preset_backend="codex",
+                    preset_model="gpt-5.4",
+                    preset_reasoning="medium",
+                    preset_mcp_names=["playwright"],
+                    dry_run=False,
+                    Option=_DummyOption,
+                    single_select_items=lambda *_a, **_k: "unused",
+                    multi_select_items=lambda *_a, **_k: ["playwright"],
+                )
+        finally:
+            tmp.cleanup()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.identity_gate.calls.count("identity-gate"), 1)
+        self.assertEqual(self.identity_gate.calls, ["identity-gate", "subprocess-call"])
+        self.assertEqual(mock_call.call_count, 1)
+        self.assertEqual([verdict.status for verdict in self.identity_gate.verdicts], [fixer_wire_mcp.IDENTITY_CURRENT])
+        verdict = self.identity_gate.verdicts[0]
+        resolved_root = str(self.identity_root.resolve())
+        self.assertTrue(verdict.payload_path.startswith(resolved_root))
+        self.assertTrue(verdict.current_path.startswith(resolved_root))
+
+    def test_launch_netrunner_resume_stale_identity_fails_closed_without_launch(self) -> None:
+        """Focused regression: a stale payload verdict must abort resume, never fail open."""
+        tmp, db_path = self._make_db()
+        stale_root, stale_environ = _make_hermetic_identity_root(Path(self._identity_tmp.name) / "stale-case", stale=True)
+        stale_gate = _HermeticIdentityGate(stale_root, stale_environ)
+        try:
+            with (
+                patch.dict(sys.modules, {"client_wires.codex_compat.llm": _fake_codex_main_module(), "client_wires.codex_compat.runtime": _fake_codex_main_module()}),
+                patch.object(fixer_wire, "_resolve_fixer_db_path", return_value=db_path),
+                patch.object(fixer_wire, "_resolve_project_id", return_value=1),
+                patch.object(
+                    fixer_wire,
+                    "_load_session_rows",
+                    return_value=[
+                        fixer_wire.SessionRow(
+                            session_id=36,
+                            global_session_id=139,
+                            task_description="Resume me",
+                            status="in_progress",
+                            codex_session_id="resume-139",
+                        )
+                    ],
+                ),
+                patch.object(fixer_wire, "_load_available_servers", side_effect=lambda *_a, **_k: self._load_available_servers()),
+                patch.object(fixer_wire, "_load_netrunner_resume_summaries", return_value=[_make_history_summary("resume-139", preview="Existing netrunner")]),
+                patch.object(fixer_wire, "_verify_resume_mcp_config_current", stale_gate),
+                patch("client_wires.fixer_wire.subprocess.call", return_value=0) as mock_call,
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    fixer_wire._launch_netrunner(
+                        [],
+                        preset_session_id=36,
+                        preset_backend="codex",
+                        preset_model="gpt-5.4",
+                        preset_reasoning="medium",
+                        preset_mcp_names=["playwright"],
+                        dry_run=False,
+                        Option=_DummyOption,
+                        single_select_items=lambda *_a, **_k: "unused",
+                        multi_select_items=lambda *_a, **_k: ["playwright"],
+                    )
+        finally:
+            tmp.cleanup()
+
+        self.assertIn(
+            "Refusing to resume a durable session against a stale fixer_mcp transport (fail closed)",
+            str(caught.exception),
+        )
+        self.assertEqual([verdict.status for verdict in stale_gate.verdicts], [fixer_wire_mcp.IDENTITY_STALE])
+        self.assertEqual(stale_gate.calls, ["identity-gate"])
+        self.assertEqual(mock_call.call_count, 0)
 
     def test_launch_netrunner_keeps_assigned_react_native_guide_available(self) -> None:
         tmp, db_path = self._make_db()

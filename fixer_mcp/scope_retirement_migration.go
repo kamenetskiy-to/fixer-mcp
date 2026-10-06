@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Declared write scopes and their scope leases are fully retired. Legacy
@@ -20,8 +23,167 @@ import (
 // and any failure is returned to the caller as a migration error (fail closed,
 // never silently ignored). The retired waiting state survives only in these
 // rebuild schemas as dated historical enum compatibility for legacy rows.
+//
+// Upgrade safety: an incompatible activation is admitted only when no OLD
+// worker or MCP process identity is still alive (quiescence). A deferred run
+// returns errMigrationDeferredQuiescence without touching a single row and is
+// retried on the next startup; a stopped old PID admits the upgrade, and the
+// upgrade stays safe to repeat. Before the incompatible work runs, a backup
+// copy of the database is taken; when the backup cannot be written the
+// migration fails closed with the diagnostics attached.
 
 const retiredWriteScopeArchiveTable = "retired_write_scope_archive"
+
+// errMigrationDeferredQuiescence marks an admission deferral: active old
+// worker/process identities must stop before an incompatible migration may
+// run. It is not a failure of the migration itself.
+var errMigrationDeferredQuiescence = errors.New("migration deferred: active old worker/process identities must quiesce first")
+
+type migrationProcessIdentityRecord struct {
+	Source   string
+	PID      int
+	Identity string
+}
+
+type migrationQuiescenceAdmission struct {
+	Deferred bool
+	Reason   string
+	Checked  []migrationProcessIdentityRecord
+}
+
+// scopeRetirementWorkPending reports whether any legacy scope surface is
+// still present. Fresh and already-retired databases take this fast path and
+// are never touched (idempotent repeat, archives preserved).
+func scopeRetirementWorkPending() (bool, error) {
+	for _, source := range []struct{ table, column string }{
+		{table: "session", column: "declared_write_scope"},
+		{table: "parallel_wave_worker", column: "declared_write_scope"},
+		{table: "planned_wave_task", column: "declared_write_scope"},
+		{table: "hands_instruction", column: "declared_write_scope_json"},
+		{table: "hands_generation", column: "lease_set_id"},
+		{table: "hands_generation", column: "fencing_token"},
+	} {
+		if dbTableHasColumn(source.table, source.column) {
+			return true, nil
+		}
+	}
+	for _, table := range []string{"parallel_wave_scope_lease", "project_write_lease", "project_write_fence"} {
+		if dbTableExists(table) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// collectMigrationCandidateProcesses gathers every persisted process identity
+// that could still be an active pre-migration process: the MCP binary state
+// identities and worker processes recorded as running. Only exact recorded
+// PIDs are ever considered; nothing is matched by name and nothing is stopped.
+func collectMigrationCandidateProcesses() ([]migrationProcessIdentityRecord, error) {
+	candidates := make([]migrationProcessIdentityRecord, 0, 4)
+	seen := map[string]struct{}{}
+	add := func(source, identity string) {
+		identity = strings.TrimSpace(identity)
+		if identity == "" {
+			return
+		}
+		pid, ok := parseProcessIdentityPID(identity)
+		if !ok {
+			return
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return
+		}
+		seen[identity] = struct{}{}
+		candidates = append(candidates, migrationProcessIdentityRecord{Source: source, PID: pid, Identity: identity})
+	}
+	if dbTableExists("mcp_binary_state") && dbTableHasColumn("mcp_binary_state", "running_process_identity") {
+		rows, err := db.Query(`
+			SELECT COALESCE(running_process_identity, ''), COALESCE(required_by_process_identity, '')
+			FROM mcp_binary_state`)
+		if err != nil {
+			return nil, fmt.Errorf("read mcp_binary_state process identities: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var running, requiredBy string
+			if err := rows.Scan(&running, &requiredBy); err != nil {
+				return nil, fmt.Errorf("scan mcp_binary_state process identities: %w", err)
+			}
+			add("mcp_binary_state.running_process_identity", running)
+			add("mcp_binary_state.required_by_process_identity", requiredBy)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate mcp_binary_state process identities: %w", err)
+		}
+	}
+	if dbTableExists("worker_process") {
+		rows, err := db.Query(`
+			SELECT pid FROM worker_process WHERE status IN ('running', 'launching')`)
+		if err != nil {
+			return nil, fmt.Errorf("read worker_process identities: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var pid int
+			if err := rows.Scan(&pid); err != nil {
+				return nil, fmt.Errorf("scan worker_process identities: %w", err)
+			}
+			add("worker_process.running_pid", fmt.Sprintf("pid:%d:start:0", pid))
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate worker_process identities: %w", err)
+		}
+	}
+	return candidates, nil
+}
+
+// admitMigrationQuiescence checks that no OLD worker or MCP process identity
+// is still alive before an incompatible migration may run. The caller's own
+// PID is excluded (it is this process, not a stale one). Recorded identities
+// whose exact PID is stopped admit the upgrade.
+func admitMigrationQuiescence() (migrationQuiescenceAdmission, error) {
+	candidates, err := collectMigrationCandidateProcesses()
+	if err != nil {
+		return migrationQuiescenceAdmission{}, err
+	}
+	admission := migrationQuiescenceAdmission{Checked: candidates}
+	active := make([]string, 0, 2)
+	for _, candidate := range candidates {
+		if candidate.PID == os.Getpid() {
+			continue
+		}
+		if isProcessAlive(candidate.PID) {
+			active = append(active, fmt.Sprintf("%s (pid %d)", candidate.Source, candidate.PID))
+		}
+	}
+	if len(active) > 0 {
+		admission.Deferred = true
+		admission.Reason = "active old worker/process identities recorded: " + strings.Join(active, ", ") +
+			"; quiescence required before incompatible schema migration (rows untouched)"
+	}
+	return admission, nil
+}
+
+// ensureMigrationBackup writes a one-time backup copy of the connected
+// database before incompatible migration work. When the backup cannot be
+// written the caller must fail closed; the live database is never half-used as
+// its own backup.
+func ensureMigrationBackup() (string, error) {
+	dbPath := absoluteFixerDBPath()
+	backupDir := filepath.Join(filepath.Dir(dbPath), "migration_backups")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return "", fmt.Errorf("create migration backup directory %s: %w", backupDir, err)
+	}
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("pre-scope-retirement-%s.db", time.Now().UTC().Format("20060102T150405.000000000")))
+	if _, err := os.Stat(backupPath); err == nil {
+		return backupPath, nil
+	}
+	if _, err := db.Exec(`VACUUM INTO ?`, backupPath); err != nil {
+		return "", fmt.Errorf("backup database to %s before scope retirement: %w", backupPath, err)
+	}
+	return backupPath, nil
+}
 
 // migrateDeclaredWriteScopeRetirement removes the retired scope data from a
 // database created before the retirement. It is idempotent: every step is
@@ -30,6 +192,9 @@ const retiredWriteScopeArchiveTable = "retired_write_scope_archive"
 // step so an interrupted run never loses or duplicates archived values.
 // Failures are returned to the caller and must surface as migration errors.
 func migrateDeclaredWriteScopeRetirement() error {
+	// The archive table is created unconditionally (idempotent DDL, no rows
+	// touched) so the read-only migration history is always inspectable, exactly
+	// as before the admission gate.
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS ` + retiredWriteScopeArchiveTable + ` (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +205,26 @@ func migrateDeclaredWriteScopeRetirement() error {
 		);
 	`); err != nil {
 		return fmt.Errorf("create %s: %w", retiredWriteScopeArchiveTable, err)
+	}
+	// Admission next: no legacy row is archived, dropped or rewritten before
+	// quiescence is proven. Fresh and already-retired databases never reach the
+	// migration steps at all.
+	pending, err := scopeRetirementWorkPending()
+	if err != nil {
+		return fmt.Errorf("scope retirement pending check: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+	admission, err := admitMigrationQuiescence()
+	if err != nil {
+		return fmt.Errorf("scope retirement quiescence admission: %w", err)
+	}
+	if admission.Deferred {
+		return fmt.Errorf("%w: %s", errMigrationDeferredQuiescence, admission.Reason)
+	}
+	if _, err := ensureMigrationBackup(); err != nil {
+		return fmt.Errorf("scope retirement backup (fail closed): %w", err)
 	}
 
 	type scopeColumn struct {

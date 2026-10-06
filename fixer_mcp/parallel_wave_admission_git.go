@@ -15,16 +15,20 @@ import (
 )
 
 const (
-	parallelWaveStatusCreated             = "created"
-	parallelWaveStatusLaunching           = "launching"
-	parallelWaveStatusRunning             = "running"
-	parallelWaveStatusReviewReady         = "review_ready"
-	parallelWaveStatusPartiallyFailed     = "partially_failed"
-	parallelWaveStatusStopping            = "stopping"
-	parallelWaveStatusStopped             = "stopped"
-	parallelWaveStatusCompleted           = "completed"
-	parallelWaveStatusFailed              = "failed"
-	parallelWaveStatusCleaned             = "cleaned"
+	parallelWaveStatusCreated         = "created"
+	parallelWaveStatusLaunching       = "launching"
+	parallelWaveStatusRunning         = "running"
+	parallelWaveStatusReviewReady     = "review_ready"
+	parallelWaveStatusPartiallyFailed = "partially_failed"
+	parallelWaveStatusStopping        = "stopping"
+	parallelWaveStatusStopped         = "stopped"
+	parallelWaveStatusCompleted       = "completed"
+	parallelWaveStatusFailed          = "failed"
+	parallelWaveStatusCleaned         = "cleaned"
+	// parallelWaveStatusCancelled is the governed terminal outcome of
+	// cancel_netrunner_wave: the wave was explicitly retired or cancelled
+	// with an audit reason and never attests anything.
+	parallelWaveStatusCancelled           = "cancelled"
 	parallelWaveWorkerStatusCreated       = "created"
 	parallelWaveWorkerStatusWorktreeReady = "worktree_ready"
 	parallelWaveWorkerStatusLaunching     = "launching"
@@ -38,21 +42,27 @@ const (
 	parallelWaveWorkerStatusRetryWait     = "retry_wait"
 	parallelWaveWorkerStatusRepairWait    = "repair_wait"
 	parallelWaveWorkerStatusBlocked       = "blocked"
-	defaultParallelWaveWorktreeRoot       = ".codex/netrunner_worktrees"
-	defaultParallelWaveLaunchStartupWait  = 120
-	maxParallelWaveLaunchStartupWait      = explicitLaunchMaxWait
-	parallelWaveWaitFirstReviewReady      = "first_review_ready"
-	parallelWaveWaitAllTerminal           = "all_terminal"
-	parallelWaveCleanupStatusPending      = "pending"
-	parallelWaveCleanupStatusCleaned      = "cleaned"
-	parallelWaveCleanupStatusMissing      = "missing"
-	parallelWaveCleanupStatusFailed       = "failed"
-	parallelWaveReviewPolicyAutomatic     = "automatic"
-	parallelWaveReviewPolicyManual        = "manual"
-	defaultParallelWaveReviewPolicy       = parallelWaveReviewPolicyManual
-	defaultParallelWaveReviewBackend      = "codex"
-	defaultParallelWaveReviewModel        = "gpt-5.6-luna"
-	defaultParallelWaveReviewReasoning    = "high"
+	// parallelWaveWorkerStatusCancelled is the governed terminal worker
+	// outcome of cancel_netrunner_wave (explicit audit reason, no attestation).
+	parallelWaveWorkerStatusCancelled    = "cancelled"
+	defaultParallelWaveWorktreeRoot      = ".codex/netrunner_worktrees"
+	defaultParallelWaveLaunchStartupWait = 120
+	maxParallelWaveLaunchStartupWait     = explicitLaunchMaxWait
+	parallelWaveWaitFirstReviewReady     = "first_review_ready"
+	parallelWaveWaitAllTerminal          = "all_terminal"
+	parallelWaveCleanupStatusPending     = "pending"
+	parallelWaveCleanupStatusCleaned     = "cleaned"
+	parallelWaveCleanupStatusMissing     = "missing"
+	parallelWaveCleanupStatusFailed      = "failed"
+	// parallelWaveCleanupStatusPreserved marks a terminal worktree whose
+	// dirty submodule data was deliberately preserved instead of deleted.
+	parallelWaveCleanupStatusPreserved = "preserved"
+	parallelWaveReviewPolicyAutomatic  = "automatic"
+	parallelWaveReviewPolicyManual     = "manual"
+	defaultParallelWaveReviewPolicy    = parallelWaveReviewPolicyManual
+	defaultParallelWaveReviewBackend   = "codex"
+	defaultParallelWaveReviewModel     = "gpt-5.6-luna"
+	defaultParallelWaveReviewReasoning = "high"
 )
 
 var parallelWaveBranchPattern = regexp.MustCompile(`^fixer/wave-[1-9][0-9]*/session-[1-9][0-9]*$`)

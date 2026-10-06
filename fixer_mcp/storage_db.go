@@ -1079,7 +1079,7 @@ const projectHandsAfterProjectInsertTriggerDDL = `
 				substr(lower(hex(randomblob(2))), 2) || '-' ||
 				substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
 				lower(hex(randomblob(6))),
-				'Руки', 'enabled', 'commandcode', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+				'Руки', 'enabled', 'pi', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 			);
 		END;
 	`
@@ -1257,7 +1257,7 @@ func initProjectWorkroomSchema() error {
 			actor_id TEXT NOT NULL UNIQUE,
 			display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
 			authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
-			default_lane TEXT NOT NULL DEFAULT 'commandcode' CHECK(default_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			default_lane TEXT NOT NULL DEFAULT 'pi' CHECK(default_lane IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
 			next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1274,7 +1274,7 @@ func initProjectWorkroomSchema() error {
 			issuer_principal_id TEXT NOT NULL,
 			instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
 			instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
-			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			requested_lane TEXT NOT NULL CHECK(requested_lane IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
 			risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
 			review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
 			state TEXT NOT NULL CHECK(state IN ('queued', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
@@ -1323,7 +1323,7 @@ func initProjectWorkroomSchema() error {
 			generation INTEGER NOT NULL CHECK(generation > 0),
 			project_id INTEGER NOT NULL,
 			compat_session_id INTEGER,
-			provider TEXT NOT NULL CHECK(provider IN ('codex', 'commandcode', 'claude', 'kimi-code', 'antigravity', 'grok')),
+			provider TEXT NOT NULL CHECK(provider IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
 			model TEXT NOT NULL,
 			reasoning TEXT NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
@@ -1418,10 +1418,24 @@ func initProjectWorkroomSchema() error {
 	}
 	// Scope retirement runs before the Hands grok rebuild so legacy values are
 	// archived first and no migration recreates a scope column or lease table.
+	// Startup migration admission: while an old worker/process identity is
+	// still alive the incompatible activation is deferred (rows untouched) and
+	// retried on a later startup; any other error still fails closed.
 	if err := migrateDeclaredWriteScopeRetirement(); err != nil {
-		return fmt.Errorf("declared write scope retirement: %w", err)
+		if errors.Is(err, errMigrationDeferredQuiescence) {
+			log.Printf("startup migration admission: %v", err)
+		} else {
+			return fmt.Errorf("declared write scope retirement: %w", err)
+		}
 	}
-	return migrateHandsGrokProviderLane()
+	if err := migrateHandsGrokProviderLane(); err != nil {
+		return err
+	}
+	if err := migrateHandsPiProviderLane(); err != nil {
+		return err
+	}
+	_, _ = db.Exec(`UPDATE project_hands SET default_lane = 'pi' WHERE default_lane IN ('commandcode', 'claude', 'kimi-code');`)
+	return nil
 }
 
 // migrateHandsGrokProviderLane widens the Hands provider-lane CHECK constraints
@@ -1634,6 +1648,174 @@ func rebuildGrokLaneTable(ctx context.Context, conn *sql.Conn, tableName string,
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit %s grok lane rebuild: %w", tableName, err)
+	}
+	return nil
+}
+
+// migrateHandsPiProviderLane widens the Hands provider-lane CHECK constraints
+// on databases created before 'pi' became a registered lane.
+func migrateHandsPiProviderLane() (retErr error) {
+	rebuilds := map[string][]string{
+		"hands_generation": {
+			`CREATE TABLE hands_generation_pi_mig (
+				instruction_id TEXT NOT NULL,
+				generation INTEGER NOT NULL CHECK(generation > 0),
+				project_id INTEGER NOT NULL,
+				compat_session_id INTEGER,
+				provider TEXT NOT NULL CHECK(provider IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
+				model TEXT NOT NULL,
+				reasoning TEXT NOT NULL,
+				status TEXT NOT NULL CHECK(status IN ('planned', 'starting', 'running', 'stopped', 'failed', 'lost')),
+				external_session_id TEXT,
+				process_id INTEGER,
+				process_start_identity TEXT,
+				binary_build_id TEXT,
+				binary_epoch INTEGER,
+				launch_mode TEXT NOT NULL DEFAULT 'headless' CHECK(launch_mode = 'headless'),
+				result_envelope_json TEXT CHECK(result_envelope_json IS NULL OR json_valid(result_envelope_json)),
+				started_at TEXT,
+				heartbeat_at TEXT,
+				ended_at TEXT,
+				exit_code INTEGER,
+				stop_reason TEXT,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY(instruction_id, generation),
+				FOREIGN KEY(instruction_id) REFERENCES hands_instruction(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO hands_generation_pi_mig SELECT instruction_id, generation, project_id, compat_session_id, provider, model, reasoning, status, external_session_id, process_id, process_start_identity, binary_build_id, binary_epoch, launch_mode, result_envelope_json, started_at, heartbeat_at, ended_at, exit_code, stop_reason, created_at, updated_at FROM hands_generation;`,
+			`DROP TABLE hands_generation;`,
+			`ALTER TABLE hands_generation_pi_mig RENAME TO hands_generation;`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS hands_generation_one_active_project_idx ON hands_generation(project_id) WHERE status IN ('starting', 'running');`,
+		},
+		"hands_instruction": {
+			`CREATE TABLE hands_instruction_pi_mig (
+				id TEXT PRIMARY KEY,
+				project_id INTEGER NOT NULL,
+				actor_id TEXT NOT NULL,
+				ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+				source_channel_kind TEXT NOT NULL,
+				source_channel_id TEXT NOT NULL,
+				source_message_id TEXT NOT NULL DEFAULT '',
+				issuer_principal_id TEXT NOT NULL,
+				instruction_text TEXT NOT NULL CHECK(length(instruction_text) <= 65536),
+				instruction_envelope_json TEXT NOT NULL CHECK(length(instruction_envelope_json) <= 131072 AND json_valid(instruction_envelope_json)),
+				requested_lane TEXT NOT NULL CHECK(requested_lane IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
+				risk_class TEXT NOT NULL CHECK(risk_class IN ('read_only', 'repository_write', 'unsupported_high_risk')),
+				review_policy TEXT NOT NULL CHECK(review_policy IN ('auto_read_only', 'fixer_required')),
+				state TEXT NOT NULL CHECK(state IN ('queued', 'waiting_for_lease', 'starting', 'running', 'awaiting_review', 'completed', 'cancelled', 'failed', 'abandoned', 'unsupported')),
+				state_reason_code TEXT,
+				state_reason_text TEXT,
+				compat_session_id INTEGER,
+				idempotency_key TEXT NOT NULL,
+				revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				terminal_at TEXT,
+				UNIQUE(project_id, ordinal),
+				UNIQUE(project_id, source_channel_kind, source_channel_id, idempotency_key),
+				FOREIGN KEY(project_id) REFERENCES project_hands(project_id) ON DELETE CASCADE ON UPDATE NO ACTION,
+				FOREIGN KEY(compat_session_id) REFERENCES session(id) ON DELETE SET NULL ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO hands_instruction_pi_mig SELECT id, project_id, actor_id, ordinal, source_channel_kind, source_channel_id, source_message_id, issuer_principal_id, instruction_text, instruction_envelope_json, requested_lane, risk_class, review_policy, state, state_reason_code, state_reason_text, compat_session_id, idempotency_key, revision, created_at, updated_at, terminal_at FROM hands_instruction;`,
+			`DROP TABLE hands_instruction;`,
+			`ALTER TABLE hands_instruction_pi_mig RENAME TO hands_instruction;`,
+			`CREATE INDEX IF NOT EXISTS hands_instruction_project_state_idx ON hands_instruction(project_id, state, ordinal);`,
+		},
+		"project_hands": {
+			`DROP TRIGGER IF EXISTS project_hands_after_project_insert`,
+			`CREATE TABLE project_hands_pi_mig (
+				project_id INTEGER PRIMARY KEY,
+				actor_id TEXT NOT NULL UNIQUE,
+				display_name TEXT NOT NULL DEFAULT 'Руки' CHECK(display_name = 'Руки'),
+				authority_state TEXT NOT NULL DEFAULT 'enabled' CHECK(authority_state IN ('enabled', 'disabled', 'revoked')),
+				default_lane TEXT NOT NULL DEFAULT 'pi' CHECK(default_lane IN ('pi', 'codex', 'grok', 'antigravity', 'commandcode', 'claude', 'kimi-code')),
+				next_instruction_ordinal INTEGER NOT NULL DEFAULT 1 CHECK(next_instruction_ordinal > 0),
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY(project_id) REFERENCES project(id) ON DELETE CASCADE ON UPDATE NO ACTION
+			);`,
+			`INSERT INTO project_hands_pi_mig SELECT project_id, actor_id, display_name, authority_state, default_lane, next_instruction_ordinal, created_at, updated_at FROM project_hands;`,
+			`DROP TABLE project_hands;`,
+			`ALTER TABLE project_hands_pi_mig RENAME TO project_hands;`,
+			projectHandsAfterProjectInsertTriggerDDL,
+		},
+	}
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var originalFK int
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&originalFK); err != nil {
+		return fmt.Errorf("read PRAGMA foreign_keys before pi lane migration: %w", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		restore := `PRAGMA foreign_keys = OFF`
+		if originalFK != 0 {
+			restore = `PRAGMA foreign_keys = ON`
+		}
+		if _, restoreErr := conn.ExecContext(context.Background(), restore); restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore PRAGMA foreign_keys to %d after pi lane migration: %w", originalFK, restoreErr))
+		}
+	}()
+
+	for _, table := range []string{"hands_generation", "hands_instruction", "project_hands"} {
+		tempTable := table + "_pi_mig"
+		var tableSQL string
+		err := conn.QueryRowContext(context.Background(),
+			`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+		).Scan(&tableSQL)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		var tempTableSQL string
+		tempErr := conn.QueryRowContext(context.Background(),
+			`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = ?`, tempTable,
+		).Scan(&tempTableSQL)
+		if tempErr != nil && tempErr != sql.ErrNoRows {
+			return tempErr
+		}
+		if tableSQL == "" && tempTableSQL != "" {
+			if table == "project_hands" {
+				if _, err := conn.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS project_hands_after_project_insert`); err != nil {
+					return fmt.Errorf("clear stale project_hands trigger during recovery: %w", err)
+				}
+			}
+			if _, err := conn.ExecContext(context.Background(), `ALTER TABLE `+tempTable+` RENAME TO `+table); err != nil {
+				return fmt.Errorf("recover %s from interrupted migration: %w", table, err)
+			}
+			if table == "project_hands" {
+				if _, err := conn.ExecContext(context.Background(), projectHandsAfterProjectInsertTriggerDDL); err != nil {
+					return fmt.Errorf("recreate project_hands trigger during recovery: %w", err)
+				}
+			}
+			continue
+		}
+		if tempTableSQL != "" {
+			if _, err := conn.ExecContext(context.Background(), `DROP TABLE `+tempTable); err != nil {
+				return fmt.Errorf("clear stale %s migration table: %w", table, err)
+			}
+		}
+		if tableSQL == "" {
+			continue
+		}
+		if strings.Contains(tableSQL, "'pi'") {
+			continue
+		}
+		namedDDL, ddlErr := collectNamedTableDDL(context.Background(), conn, table)
+		if ddlErr != nil {
+			return fmt.Errorf("collect named schema for %s during pi lane migration: %w", table, ddlErr)
+		}
+		if err := rebuildGrokLaneTable(context.Background(), conn, table, append(rebuilds[table], namedDDL...)); err != nil {
+			return fmt.Errorf("migrate %s for pi lane: %w", table, err)
+		}
 	}
 	return nil
 }

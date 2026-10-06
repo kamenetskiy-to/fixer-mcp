@@ -122,6 +122,26 @@ func TestBuildWorkModesAreExplicitRoles(t *testing.T) {
 			want: []string{"--role fixer", "--fixer-launch new"},
 		},
 		{
+			name: "fixer new with native options",
+			spec: Spec{
+				Kind:           KindWorkroom,
+				ProjectPath:    t.TempDir(),
+				FixerLaunch:    "new",
+				FixerBackend:   "pi",
+				FixerModel:     "mimo-v2.6-pro",
+				FixerReasoning: "high",
+				FixerMCP:       "postgres,redis",
+			},
+			want: []string{
+				"--role fixer",
+				"--fixer-launch new",
+				"--fixer-backend pi",
+				"--fixer-model mimo-v2.6-pro",
+				"--fixer-reasoning high",
+				"--fixer-mcp postgres,redis",
+			},
+		},
+		{
 			name: "fixer unattached",
 			spec: Spec{Kind: KindWorkroom, ProjectPath: t.TempDir(), FixerLaunch: "unattached"},
 			want: []string{"--role fixer", "--fixer-launch unattached"},

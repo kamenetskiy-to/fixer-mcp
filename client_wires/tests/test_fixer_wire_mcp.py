@@ -65,6 +65,11 @@ class FixerWireMcpExtractionTests(unittest.TestCase):
             merged["patched-forced"] = {"command": "forced"}
             return merged
 
+        seen: list[dict[str, dict[str, object]]] = []
+
+        def ensure_resolved(servers: dict[str, dict[str, object]]) -> None:
+            seen.append(dict(servers))
+
         with (
             patch.dict(
                 sys.modules,
@@ -78,6 +83,7 @@ class FixerWireMcpExtractionTests(unittest.TestCase):
             patch.object(fixer_wire, "_inject_research_query_server", side_effect=inject_research) as research,
             patch.object(fixer_wire, "_inject_figma_console_server", side_effect=inject_figma) as figma,
             patch.object(fixer_wire, "_inject_forced_fixer_server", side_effect=inject_forced) as forced,
+            patch.object(fixer_wire, "_ensure_forced_fixer_server_resolved", side_effect=ensure_resolved) as ensured,
         ):
             available, _config_env_vars, _adapter, _ensure_sqlite_scaffold = fixer_wire._load_available_servers(repo_root)
 
@@ -87,6 +93,10 @@ class FixerWireMcpExtractionTests(unittest.TestCase):
         research.assert_called_once()
         figma.assert_called_once()
         forced.assert_called_once()
+        # The fail-closed stale-binary handshake runs on every new AND resumed
+        # launch path, after forced-server injection (and it is facade-patchable).
+        ensured.assert_called_once()
+        self.assertIn("patched-forced", seen[0])
 
 
 class FigmaConsoleFallbackTests(unittest.TestCase):

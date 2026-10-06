@@ -229,6 +229,28 @@ def is_allowed_control_plane_file(rel_path: str) -> bool:
     return False
 
 
+SCRIPTS_ALLOWED_NAMES = {
+    "pi_probe.py",
+}
+
+
+def is_allowed_script_file(rel_path: str) -> bool:
+    """Check if a file from scripts/ is permitted in the release payload."""
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if is_dangerous_name_or_path(normalized):
+        return False
+    parts = normalized.split("/")
+    if any(p.startswith(".") for p in parts):
+        return False
+    if parts[0] == "__pycache__":
+        return False
+    if len(parts) == 1:
+        return parts[0] in SCRIPTS_ALLOWED_NAMES
+    if len(parts) == 2 and parts[0] == "install":
+        return parts[1] in ("install.py", "install.sh")
+    return False
+
+
 def is_allowed_install_script_file(rel_path: str) -> bool:
     """Check if a file from scripts/install/ is permitted in the release payload."""
     normalized = rel_path.replace("\\", "/").strip("/")

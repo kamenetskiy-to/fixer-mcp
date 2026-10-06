@@ -65,7 +65,12 @@ func setupTranscriptPathTestDB(t *testing.T, projectOneCWD string, projectTwoCWD
 			(11, 1, 'p1 commandcode worktree tenth', 'completed', 'commandcode'),
 			(12, 1, 'p1 pi worktree eleventh', 'completed', 'pi'),
 			(13, 1, 'p1 commandcode missing twelfth', 'completed', 'commandcode'),
-			(14, 1, 'p1 pi missing thirteenth', 'completed', 'pi');
+			(14, 1, 'p1 pi missing thirteenth', 'completed', 'pi'),
+			(15, 1, 'p1 pi anchor fourteenth', 'completed', 'pi'),
+			(16, 1, 'p1 pi manifest-contradictory fifteenth', 'completed', 'pi'),
+			(17, 1, 'p1 pi shared-cwd sixteenth', 'completed', 'pi'),
+			(18, 1, 'p1 pi manifest-verified seventeenth', 'completed', 'pi'),
+			(19, 1, 'p1 pi stale-link eighteenth', 'completed', 'pi');
 		INSERT INTO session_external_link (session_id, backend, external_session_id) VALUES
 			(2, 'droid', 'droid-project-two'),
 			(3, 'codex', 'codex-project-one-second'),
@@ -681,12 +686,417 @@ func TestSystem1AndPublicTranscriptLookupsResolveSameFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: public lookup failed: %v", testCase.name, err)
 		}
-		system1Path, diagnostics := resolveSystem1WorkerTranscript(testCase.globalID, 1, testCase.backend, projectCWD)
+		system1Path, diagnostics := resolveSystem1WorkerTranscript(testCase.globalID, testCase.localSessionID, 1, testCase.backend, projectCWD)
 		if out.TranscriptPath != testCase.wantPath || system1Path != testCase.wantPath || out.TranscriptPath != system1Path {
 			t.Fatalf(
 				"%s: public and System1 must resolve the same transcript: public=%q system1=%q want=%q diagnostics=%v",
 				testCase.name, out.TranscriptPath, system1Path, testCase.wantPath, diagnostics,
 			)
 		}
+	}
+}
+
+// TestPiTranscriptHistoryLinksContinuationAttemptsChronologically proves that
+// Pi continuation history is unambiguously linked to the exact external
+// session id: fresh and resumed attempt files are ordered chronologically and
+// a file whose session header contradicts the filename identity is refused as
+// contradictory provenance, never silently included.
+func TestPiTranscriptHistoryLinksContinuationAttemptsChronologically(t *testing.T) {
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() { piSessionTranscriptRoot = originalPiRoot }()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	externalSessionID := "pi-cont-1"
+	sessionDir := filepath.Join(piRoot, piProjectTranscriptDirName(projectCWD))
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir pi session dir: %v", err)
+	}
+
+	writeHeader := func(name string, headerID string) string {
+		path := filepath.Join(sessionDir, name)
+		body := strings.Join([]string{
+			`{"type":"session","version":3,"id":"` + headerID + `","timestamp":"2026-10-05T10-00-00.000Z","cwd":"` + projectCWD + `"}`,
+			`{"type":"message","id":"m1","message":{"role":"user","content":"hi"}}`,
+			"",
+		}, "\n")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write pi transcript fixture: %v", err)
+		}
+		return path
+	}
+
+	attemptOne := writeHeader("2026-10-05T10-00-00-000Z_"+externalSessionID+".jsonl", externalSessionID)
+	attemptTwo := writeHeader("2026-10-05T11-00-00-000Z_"+externalSessionID+".jsonl", externalSessionID)
+	writeHeader("2026-10-05T09-00-00-000Z_other-session.jsonl", "other-session")
+	contradictory := writeHeader("2026-10-05T12-00-00-000Z_"+externalSessionID+".jsonl", "someone-else")
+
+	diagnostics := []string{}
+	history := resolveBackendTranscriptHistory("pi", projectCWD, externalSessionID, &diagnostics)
+	if len(history) != 2 || history[0] != attemptOne || history[1] != attemptTwo {
+		t.Fatalf("expected the two provable attempts in chronological order, got %v", history)
+	}
+	joinedDiagnostics := strings.Join(diagnostics, "\n")
+	if !strings.Contains(joinedDiagnostics, "refusing contradictory provenance") || !strings.Contains(joinedDiagnostics, "someone-else") {
+		t.Fatalf("expected a contradictory-provenance diagnostic for %q, got %v", contradictory, diagnostics)
+	}
+
+	// The full continuation history is read end to end as primary evidence.
+	_, ledger, err := readTranscriptCoverageChunks(history, system1ReaderChunkBytes)
+	if err != nil {
+		t.Fatalf("coverage read over the continuation history failed: %v", err)
+	}
+	if ledger.TotalLines != 4 || ledger.HeadSessionID != externalSessionID {
+		t.Fatalf("expected both attempts covered under one identity, got %+v", ledger)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Durable launcher evidence provenance: a missing or stale external session
+// id must never turn an existing original transcript into missing evidence.
+
+func writeProvenPiTranscript(t *testing.T, piRoot string, sessionCWD string, name string, headerID string, timestamp string) string {
+	t.Helper()
+	path := filepath.Join(piRoot, piProjectTranscriptDirName(sessionCWD), name)
+	body := strings.Join([]string{
+		`{"type":"session","version":3,"id":"` + headerID + `","timestamp":"` + timestamp + `","cwd":"` + sessionCWD + `"}`,
+		`{"type":"message","id":"m1","message":{"role":"user","content":"hi"}}`,
+		"",
+	}, "\n")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir pi session dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write proven pi transcript: %v", err)
+	}
+	return path
+}
+
+func seedParallelWaveWorkerTable(t *testing.T, testDB *sql.DB, rows [][4]string) {
+	t.Helper()
+	if _, err := testDB.Exec(`CREATE TABLE parallel_wave_worker (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		wave_id INTEGER NOT NULL,
+		session_id INTEGER NOT NULL,
+		worktree_path TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL DEFAULT ''
+	);`); err != nil {
+		t.Fatalf("create wave worker table: %v", err)
+	}
+	for _, row := range rows {
+		if _, err := testDB.Exec(
+			`INSERT INTO parallel_wave_worker (wave_id, session_id, worktree_path, created_at) VALUES (?, ?, ?, ?)`,
+			row[0], row[1], row[2], row[3],
+		); err != nil {
+			t.Fatalf("seed wave worker anchor: %v", err)
+		}
+	}
+}
+
+func writeAttemptManifest(t *testing.T, projectCWD string, localSessionID int, lines []string) string {
+	t.Helper()
+	path := attemptManifestPath(projectCWD, localSessionID, "pi")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir attempt manifest dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write attempt manifest: %v", err)
+	}
+	return path
+}
+
+// TestGetNetrunnerTranscriptPathPiRecoversIdentityFromWaveWorkerAnchor proves
+// the missing-external-id cure is repaired, not replaced with a block: the
+// original Pi JSONLs are bound by the DB-recorded per-worker worktree anchor
+// with proven id/cwd/time identity (earlier attempts included, shared-cwd and
+// contradictory files refused), the head is the proven worker head, and the
+// recovered link is persisted so later lookups stay stable.
+func TestGetNetrunnerTranscriptPathPiRecoversIdentityFromWaveWorkerAnchor(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-871", "session-20")
+
+	attemptOne := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T10-00-00-000Z_attempt-one.jsonl", "attempt-one", "2026-10-05T10:00:00.000Z")
+	attemptTwo := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T11-00-00-000Z_attempt-two.jsonl", "attempt-two", "2026-10-05T11:00:00.000Z")
+	// A later shared-cwd session and a contradictory header must never join
+	// this worker's history even though both live in the same Pi store.
+	writeProvenPiTranscript(t, piRoot, projectCWD, "2026-10-05T12-00-00-000Z_shared-cwd-run.jsonl", "shared-cwd-run", "2026-10-05T12:00:00.000Z")
+	writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T13-00-00-000Z_declared-id.jsonl", "someone-else", "2026-10-05T13:00:00.000Z")
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	seedParallelWaveWorkerTable(t, testDB, [][4]string{
+		{"871", "15", ".codex/netrunner_worktrees/wave-871/session-20", "2026-10-05 09:55:00"},
+	})
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 14})
+	if err != nil {
+		t.Fatalf("anchor-recovered lookup failed: %v", err)
+	}
+	if out.GlobalSessionId != 15 || !out.Found || out.TranscriptPath != attemptTwo || out.ExternalSessionId != "attempt-two" {
+		t.Fatalf("expected proven worker head %q recovered, got %+v", attemptTwo, out)
+	}
+	joined := strings.Join(out.SearchDiagnostics, "\n")
+	if !strings.Contains(joined, "recovered from durable launcher evidence") {
+		t.Fatalf("expected recovery diagnostics, got %+v", out.SearchDiagnostics)
+	}
+	if !strings.Contains(joined, "refusing contradictory provenance") {
+		t.Fatalf("expected the contradictory decoy to be diagnosed and refused, got %+v", out.SearchDiagnostics)
+	}
+
+	persisted, err := fetchSessionExternalID(15, "pi")
+	if err != nil {
+		t.Fatalf("fetch persisted pi external id: %v", err)
+	}
+	if persisted != "attempt-two" {
+		t.Fatalf("expected the recovered identity to be persisted, got %q", persisted)
+	}
+
+	head, history, _ := resolveSystem1WorkerTranscriptHistory(15, 14, 1, "pi", projectCWD)
+	if head != attemptTwo {
+		t.Fatalf("expected System1 head %q, got %q", attemptTwo, head)
+	}
+	if len(history) != 2 || history[0] != attemptOne || history[1] != attemptTwo {
+		t.Fatalf("expected both attempts in chronological order with the head last, got %v", history)
+	}
+}
+
+// TestTranscriptProvenanceRefusesUnverifiableManifestClaims keeps the
+// fail-closed contract for corrupted provenance: an attempt manifest that
+// contradicts the original file, or claims an id with no proven file at all,
+// must never bind a transcript (and must never persist an inferred id).
+func TestTranscriptProvenanceRefusesUnverifiableManifestClaims(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-871", "session-21")
+	contradictory := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T10-00-00-000Z_real-run.jsonl", "real-run", "2026-10-05T10:00:00.000Z")
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	manifestLine := func(claim string, entries string) string {
+		return `{"backend":"pi","local_session_id":15,"global_session_id":16,"external_session_id":"` + claim + `","worker_cwd":"` + worktreeCWD + `","attempt_number":1,"transcripts":[` + entries + `]}`
+	}
+
+	// A manifest claim that contradicts the original file is refused.
+	writeAttemptManifest(t, projectCWD, 15, []string{
+		manifestLine("claimed-run", `{"path":"`+contradictory+`","session_id":"real-run","session_cwd":"`+worktreeCWD+`"}`),
+	})
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 15})
+	if err != nil {
+		t.Fatalf("contradictory manifest lookup should not hard-fail: %v", err)
+	}
+	if out.Found || out.TranscriptPath != "" || out.ExternalSessionId != "" {
+		t.Fatalf("expected contradictory manifest provenance to fail closed, got %+v", out)
+	}
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "contradictory provenance") {
+		t.Fatalf("expected contradictory provenance diagnostics, got %+v", out.SearchDiagnostics)
+	}
+
+	// A manifest claim with no proven file at all is refused too.
+	writeAttemptManifest(t, projectCWD, 15, []string{
+		manifestLine("ghost-run", ""),
+	})
+	_, out, err = GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 15})
+	if err != nil {
+		t.Fatalf("ghost manifest lookup should not hard-fail: %v", err)
+	}
+	if out.Found || out.TranscriptPath != "" {
+		t.Fatalf("expected ghost manifest provenance to fail closed, got %+v", out)
+	}
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "no proven transcript file") {
+		t.Fatalf("expected the missing-file claim to be diagnosed, got %+v", out.SearchDiagnostics)
+	}
+
+	persisted, err := fetchSessionExternalID(16, "pi")
+	if err != nil {
+		t.Fatalf("fetch persisted pi external id: %v", err)
+	}
+	if persisted != "" {
+		t.Fatalf("expected no unproven id to be persisted, got %q", persisted)
+	}
+}
+
+// TestTranscriptProvenanceUsesVerifiedManifestEvidence covers the serial
+// launcher path: a verified append-only attempt manifest recovers the
+// identity even without a wave worker anchor.
+func TestTranscriptProvenanceUsesVerifiedManifestEvidence(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-871", "session-22")
+	manifestRun := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T10-00-00-000Z_manifest-run.jsonl", "manifest-run", "2026-10-05T10:00:00.000Z")
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	writeAttemptManifest(t, projectCWD, 17, []string{
+		`{"backend":"pi","local_session_id":17,"global_session_id":18,"external_session_id":"manifest-run","worker_cwd":"` + worktreeCWD + `","attempt_number":1,"transcripts":[{"path":"` + manifestRun + `","session_id":"manifest-run","session_cwd":"` + worktreeCWD + `"}]}`,
+	})
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 17})
+	if err != nil {
+		t.Fatalf("manifest-recovered lookup failed: %v", err)
+	}
+	if out.GlobalSessionId != 18 || !out.Found || out.TranscriptPath != manifestRun || out.ExternalSessionId != "manifest-run" {
+		t.Fatalf("expected verified manifest evidence to resolve %q, got %+v", manifestRun, out)
+	}
+	persisted, err := fetchSessionExternalID(18, "pi")
+	if err != nil {
+		t.Fatalf("fetch persisted pi external id: %v", err)
+	}
+	if persisted != "manifest-run" {
+		t.Fatalf("expected the verified manifest identity to be persisted, got %q", persisted)
+	}
+}
+
+// TestTranscriptProvenanceRefusesSharedProjectCWDAnchor: a wave worker anchor
+// pointing at the shared project cwd can never bind sessions by recency, so
+// an unrelated shared-cwd transcript is never returned as this worker's.
+func TestTranscriptProvenanceRefusesSharedProjectCWDAnchor(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	writeProvenPiTranscript(t, piRoot, projectCWD, "2026-10-05T10-00-00-000Z_shared-cwd-run.jsonl", "shared-cwd-run", "2026-10-05T10:00:00.000Z")
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	seedParallelWaveWorkerTable(t, testDB, [][4]string{
+		{"871", "17", projectCWD, "2026-10-05 09:55:00"},
+	})
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 16})
+	if err != nil {
+		t.Fatalf("shared-cwd anchor lookup should not hard-fail: %v", err)
+	}
+	if out.Found || out.TranscriptPath != "" {
+		t.Fatalf("expected the shared project cwd to refuse binding, got %+v", out)
+	}
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "refusing cwd-only binding") {
+		t.Fatalf("expected the shared-cwd refusal diagnostic, got %+v", out.SearchDiagnostics)
+	}
+}
+
+// TestTranscriptProvenancePrefersProvenWorkerHeadOverStaleLink covers a
+// relaunch whose detection never landed: the persisted link still points at
+// the earlier attempt while the durable evidence proves a later worker head.
+// The proven head and its full history win and the link is refreshed.
+func TestTranscriptProvenancePrefersProvenWorkerHeadOverStaleLink(t *testing.T) {
+	originalDB := db
+	originalRole := authorizedRole
+	originalProjectID := authorizedProjectId
+	originalPiRoot := piSessionTranscriptRoot
+	defer func() {
+		db = originalDB
+		authorizedRole = originalRole
+		authorizedProjectId = originalProjectID
+		piSessionTranscriptRoot = originalPiRoot
+	}()
+
+	_, piRoot := setupTemporaryHomeTranscriptRoots(t)
+	piSessionTranscriptRoot = piRoot
+	projectCWD := filepath.Join(t.TempDir(), "Project-One")
+	worktreeCWD := filepath.Join(projectCWD, ".codex", "netrunner_worktrees", "wave-871", "session-23")
+	staleRun := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T10-00-00-000Z_stale-run.jsonl", "stale-run", "2026-10-05T10:00:00.000Z")
+	freshRun := writeProvenPiTranscript(t, piRoot, worktreeCWD, "2026-10-05T11-00-00-000Z_fresh-run.jsonl", "fresh-run", "2026-10-05T11:00:00.000Z")
+
+	testDB := setupTranscriptPathTestDB(t, projectCWD, filepath.Join(t.TempDir(), "project-two"))
+	defer func() { _ = testDB.Close() }()
+	seedParallelWaveWorkerTable(t, testDB, [][4]string{
+		{"871", "19", ".codex/netrunner_worktrees/wave-871/session-23", "2026-10-05 09:55:00"},
+	})
+	if _, err := testDB.Exec(
+		`INSERT INTO session_external_link (session_id, backend, external_session_id) VALUES (19, 'pi', 'stale-run')`,
+	); err != nil {
+		t.Fatalf("seed stale external link: %v", err)
+	}
+	db = testDB
+	authorizedRole = "fixer"
+	authorizedProjectId = 1
+
+	_, out, err := GetNetrunnerTranscriptPath(context.Background(), nil, GetNetrunnerTranscriptPathInput{SessionId: 18})
+	if err != nil {
+		t.Fatalf("stale-link lookup failed: %v", err)
+	}
+	if out.GlobalSessionId != 19 || !out.Found || out.TranscriptPath != freshRun || out.ExternalSessionId != "fresh-run" {
+		t.Fatalf("expected the proven worker head %q to win, got %+v", freshRun, out)
+	}
+	if !strings.Contains(strings.Join(out.SearchDiagnostics, "\n"), "is stale for this worker") {
+		t.Fatalf("expected the stale-link diagnostic, got %+v", out.SearchDiagnostics)
+	}
+
+	head, history, _ := resolveSystem1WorkerTranscriptHistory(19, 18, 1, "pi", projectCWD)
+	if head != freshRun {
+		t.Fatalf("expected proven head %q, got %q", freshRun, head)
+	}
+	if len(history) != 2 || history[0] != staleRun || history[1] != freshRun {
+		t.Fatalf("expected the full attempt history with the head last, got %v", history)
+	}
+
+	persisted, err := fetchSessionExternalID(19, "pi")
+	if err != nil {
+		t.Fatalf("fetch persisted pi external id: %v", err)
+	}
+	if persisted != "fresh-run" {
+		t.Fatalf("expected the stale link to be refreshed to the proven head, got %q", persisted)
 	}
 }

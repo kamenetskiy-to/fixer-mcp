@@ -31,9 +31,10 @@ import (
 
 const (
 	workTab = iota
+	mcpDocsTab
 	resourcesTab
 	machinesTab
-	tabCount        = 3
+	tabCount        = 4
 	workActionCount = 2
 )
 
@@ -80,6 +81,10 @@ type Model struct {
 	machinesCheckedAt time.Time
 	showRawQuota      bool
 	busy              bool
+
+	mcpDocsSection    int
+	mcpDocsCursorMCP  int
+	mcpDocsCursorDocs int
 }
 
 type launchForm struct {
@@ -105,10 +110,10 @@ type workModeForm struct {
 	handsMCP     string
 	handsDocs    string
 
-	// Native selection state: `keep` reproduces what the channel already had,
-	// `none`/`all` are quick presets, and `custom` is the multi-select overlay.
+	// Native selection state:
 	mcpPreset  string
 	mcpSel     []string
+	mcpAllowed []string
 	mcpPool    []mcpclient.MCPServer
 	mcpTouched bool
 	docPreset  string
@@ -117,22 +122,49 @@ type workModeForm struct {
 	docTouched bool
 
 	// Fixer fields.
-	action       string
-	resumeLabels []string
-	resumeIDs    []string
-	resumeCWDs   []string
-	resumeIdx    int
-	pinnedResume bool
+	action         string
+	resumeLabels   []string
+	resumeIDs      []string
+	resumeCWDs     []string
+	resumeIdx      int
+	pinnedResume   bool
+	fixerHarness   string
+	fixerModel     string
+	fixerReasoning string
 
 	focus int
+}
+
+var fixerHarnesses = []string{"pi", "codex", "grok", "antigravity"}
+
+var fixerModels = map[string][]string{
+	"pi":          {"mimo-v2.6-pro", "mimo-v2.6-flash", "deepseek-v4.1-flash", "gpt-5.6-luna", "claude-opus-5-5"},
+	"codex":       {"gpt-6.1-sol", "gpt-5.6-luna", "gpt-5.6-terra"},
+	"grok":        {"grok-4.7", "grok-4.6"},
+	"antigravity": {"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro"},
+}
+
+func defaultFixerModel(harness string) string {
+	switch harness {
+	case "pi":
+		return "mimo-v2.6-pro"
+	case "codex":
+		return "gpt-6.1-sol"
+	case "grok":
+		return "grok-4.7"
+	case "antigravity", "agy":
+		return "gemini-3.8-flash"
+	default:
+		return "mimo-v2.6-pro"
+	}
 }
 
 func (f *workModeForm) fieldCount() int {
 	if f.kind == launch.KindWorkroom {
 		if f.action == "resume" {
-			return 2
+			return 3
 		}
-		return 1
+		return 5
 	}
 	return 4
 }
@@ -144,6 +176,9 @@ func (f *workModeForm) mcpValue() string {
 	case "custom":
 		return strings.Join(f.mcpSel, ",")
 	default:
+		if len(f.mcpSel) > 0 {
+			return strings.Join(f.mcpSel, ",")
+		}
 		return "keep"
 	}
 }
@@ -159,48 +194,42 @@ func (f *workModeForm) docValue() string {
 		}
 		return strings.Join(ids, ",")
 	default:
+		if len(f.docSel) > 0 {
+			ids := make([]string, 0, len(f.docSel))
+			for _, id := range f.docSel {
+				ids = append(ids, strconv.Itoa(id))
+			}
+			return strings.Join(ids, ",")
+		}
 		return "keep"
 	}
 }
 
 func (f *workModeForm) mcpLabel() string {
-	switch f.mcpPreset {
-	case "none":
-		return "ничего не подключать"
-	case "all":
-		return "все разрешённые проектом"
-	case "custom":
-		return fmt.Sprintf("выбрано %d: %s", len(f.mcpSel), compactText(strings.Join(f.mcpSel, ", "), 40))
-	default:
-		return "как в проекте (keep)" + fmt.Sprintf("  ·  %d доступно", len(f.mcpPool))
+	count := len(f.mcpSel)
+	if count == 0 {
+		return muted.Render("не подключено") + "  ·  [→ для выбора]"
 	}
+	return fmt.Sprintf("подключено %d  ·  [→ для выбора]", count)
 }
 
 func (f *workModeForm) docLabel() string {
-	switch f.docPreset {
-	case "none":
-		return "без документов"
-	case "all":
-		return "все документы проекта"
-	case "custom":
-		return fmt.Sprintf("выбрано %d из %d", len(f.docSel), len(f.docPool))
-	default:
-		return "как в проекте (keep)" + fmt.Sprintf("  ·  %d документов", len(f.docPool))
+	count := len(f.docSel)
+	if count == 0 {
+		return muted.Render("не прикреплено") + "  ·  [→ для выбора]"
 	}
+	return fmt.Sprintf("прикреплено %d из %d  ·  [→ для выбора]", count, len(f.docPool))
 }
 
 // persistableHandsLaneFallback mirrors the hands_instruction CHECK list: when
 // Fixer MCP is unreachable the console still only offers lanes the launcher
-// can persist. It never offers a lane the schema would reject — that is
-// exactly how a hardcoded `pi` crashed the launch.
+// can persist. It never offers a lane the schema would reject.
 func persistableHandsLaneFallback() []mcpclient.Lane {
 	return []mcpclient.Lane{
-		{Provider: "codex"},
-		{Provider: "commandcode"},
-		{Provider: "claude"},
-		{Provider: "kimi-code"},
-		{Provider: "antigravity"},
-		{Provider: "grok"},
+		{Provider: "pi", Model: "mimo-v2.6-pro", Reasoning: "high"},
+		{Provider: "codex", Model: "gpt-6.1-sol", Reasoning: "high"},
+		{Provider: "grok", Model: "grok-4.7", Reasoning: "high"},
+		{Provider: "antigravity", Model: "gemini-3.8-flash", Reasoning: "high"},
 	}
 }
 
@@ -235,6 +264,9 @@ func (f *workModeForm) adopt(snap mcpclient.Snapshot) {
 	// a later refresh must not silently reset that choice.
 	if len(snap.MCPPool) > 0 {
 		f.mcpPool = append([]mcpclient.MCPServer(nil), snap.MCPPool...)
+	}
+	if len(snap.ProjectAllowedMCP) > 0 {
+		f.mcpAllowed = append([]string(nil), snap.ProjectAllowedMCP...)
 	}
 	if !f.mcpTouched {
 		f.mcpSel = append([]string(nil), snap.HandsMCP...)
@@ -428,15 +460,24 @@ func (m Model) refreshQuota() tea.Cmd {
 	}
 }
 
+func (m Model) mcpOptions() mcpclient.Options {
+	return mcpclient.Options{
+		RuntimeRoot: m.opts.RuntimeRoot,
+		ProjectPath: m.project.Path,
+		Environment: os.Environ(),
+	}
+}
+
+type mcpMutationFinishedMsg struct {
+	err error
+	msg string
+}
+
 func (m Model) refreshProjectWork() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.lifecycle, 16*time.Second)
 		defer cancel()
-		return projectWorkMsg(mcpclient.Inspect(ctx, mcpclient.Options{
-			RuntimeRoot: m.opts.RuntimeRoot,
-			ProjectPath: m.project.Path,
-			Environment: os.Environ(),
-		}))
+		return projectWorkMsg(mcpclient.Inspect(ctx, m.mcpOptions()))
 	}
 }
 
@@ -484,6 +525,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setMessage("ошибка: " + value.err.Error())
 		} else {
 			m.setMessage(value.text)
+		}
+		return m, nil
+	case mcpMutationFinishedMsg:
+		m.busy = false
+		if value.err != nil {
+			m.setMessage("ошибка MCP: " + value.err.Error())
+		} else if value.msg != "" {
+			m.setMessage(value.msg)
 		}
 		return m, nil
 	case machineConnectMsg:
@@ -575,29 +624,68 @@ func (m Model) key(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.showHelp = true
 		return m, nil
-	case "tab", "right", "l":
+	case "tab":
+		if m.tab == mcpDocsTab {
+			m.mcpDocsSection = 1 - m.mcpDocsSection
+			return m, nil
+		}
 		return m, m.setTab((m.tab + 1) % tabCount)
-	case "shift+tab", "left":
+	case "right", "l":
+		if m.tab == mcpDocsTab {
+			m.mcpDocsSection = 1 - m.mcpDocsSection
+			return m, nil
+		}
+		return m, m.setTab((m.tab + 1) % tabCount)
+	case "shift+tab":
+		if m.tab == mcpDocsTab {
+			m.mcpDocsSection = 1 - m.mcpDocsSection
+			return m, nil
+		}
+		return m, m.setTab((m.tab + tabCount - 1) % tabCount)
+	case "left":
+		if m.tab == mcpDocsTab {
+			m.mcpDocsSection = 1 - m.mcpDocsSection
+			return m, nil
+		}
 		return m, m.setTab((m.tab + tabCount - 1) % tabCount)
 	case "1":
 		return m, m.setTab(workTab)
 	case "2":
-		return m, m.setTab(resourcesTab)
+		return m, m.setTab(mcpDocsTab)
 	case "3":
+		return m, m.setTab(resourcesTab)
+	case "4":
 		return m, m.setTab(machinesTab)
 	case "/":
 		m.search = &searchState{}
 		return m, nil
 	case "p":
+		if m.tab == mcpDocsTab {
+			if m.mcpDocsSection == 0 {
+				return m.toggleMCPAllowlist()
+			}
+			return m, nil
+		}
 		return m.switchProject(1)
 	case "P":
+		if m.tab == mcpDocsTab {
+			return m, nil
+		}
 		return m.switchProject(-1)
+	case "space", " ", "x":
+		if m.tab == mcpDocsTab {
+			return m.toggleMCPDocsSelection()
+		}
 	case "n":
 		m.form = newLaunchForm(m.project.Path, m.store.Snapshot().LaunchDrafts)
 		m.form.accounts = append([]resources.Account(nil), m.providers.Accounts...)
 		m.form.machines = append([]machines.Machine(nil), m.machines...)
 		return m, nil
 	case "h":
+		if m.tab == mcpDocsTab {
+			m.mcpDocsSection = 1 - m.mcpDocsSection
+			return m, nil
+		}
 		if m.tab == workTab {
 			return m.openWorkMode(launch.KindHands)
 		}
@@ -617,10 +705,29 @@ func (m Model) key(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.move(1)
 	case "home", "g":
+		if m.tab == mcpDocsTab {
+			if m.mcpDocsSection == 0 {
+				m.mcpDocsCursorMCP = 0
+			} else {
+				m.mcpDocsCursorDocs = 0
+			}
+			return m, nil
+		}
 		m.cursor = 0
 	case "end", "G":
+		if m.tab == mcpDocsTab {
+			if m.mcpDocsSection == 0 {
+				m.mcpDocsCursorMCP = max(0, len(m.activeMCPServers())-1)
+			} else {
+				m.mcpDocsCursorDocs = max(0, len(m.projectWork.DocPool)-1)
+			}
+			return m, nil
+		}
 		m.cursor = m.maxCursor()
 	case "enter":
+		if m.tab == mcpDocsTab {
+			return m.toggleMCPDocsSelection()
+		}
 		return m.activate()
 	case "s":
 		if m.tab == resourcesTab {
@@ -653,6 +760,11 @@ func (m Model) maxCursor() int {
 		// Two explicit work actions, then the recent resumable sessions, then
 		// durable local terminal contexts and one final "new launch" action.
 		return workActionCount + len(m.recentSessions()) + len(m.items)
+	case mcpDocsTab:
+		if m.mcpDocsSection == 0 {
+			return max(0, len(m.activeMCPServers())-1)
+		}
+		return max(0, len(m.projectWork.DocPool)-1)
 	case resourcesTab:
 		return max(0, len(m.providers.Providers)+len(m.providers.Accounts)-1)
 	case machinesTab:
@@ -663,6 +775,27 @@ func (m Model) maxCursor() int {
 }
 
 func (m *Model) move(delta int) {
+	if m.tab == mcpDocsTab {
+		if m.mcpDocsSection == 0 {
+			servers := m.activeMCPServers()
+			m.mcpDocsCursorMCP += delta
+			if m.mcpDocsCursorMCP < 0 {
+				m.mcpDocsCursorMCP = 0
+			}
+			if m.mcpDocsCursorMCP >= len(servers) {
+				m.mcpDocsCursorMCP = max(0, len(servers)-1)
+			}
+		} else {
+			m.mcpDocsCursorDocs += delta
+			if m.mcpDocsCursorDocs < 0 {
+				m.mcpDocsCursorDocs = 0
+			}
+			if m.mcpDocsCursorDocs >= len(m.projectWork.DocPool) {
+				m.mcpDocsCursorDocs = max(0, len(m.projectWork.DocPool)-1)
+			}
+		}
+		return
+	}
 	limit := m.maxCursor()
 	m.cursor += delta
 	if m.cursor < 0 {
@@ -732,14 +865,17 @@ func (m Model) openWorkMode(kind string) (tea.Model, tea.Cmd) {
 
 func (m Model) newWorkModeForm(kind string) *workModeForm {
 	form := &workModeForm{
-		kind:      kind,
-		project:   m.project.Path,
-		workspace: "safe",
-		handsMCP:  "keep",
-		handsDocs: "keep",
-		mcpPreset: "keep",
-		docPreset: "keep",
-		action:    "new",
+		kind:           kind,
+		project:        m.project.Path,
+		workspace:      "safe",
+		handsMCP:       "keep",
+		handsDocs:      "keep",
+		mcpPreset:      "keep",
+		docPreset:      "keep",
+		action:         "new",
+		fixerHarness:   "pi",
+		fixerModel:     "mimo-v2.6-pro",
+		fixerReasoning: "high",
 	}
 	// Lane stays empty until Fixer MCP tells us which lanes this project has
 	// registered; guessing here is what produced the `pi` crash.
@@ -761,12 +897,21 @@ func (m Model) workModeKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		form.focus = (form.focus + fields - 1) % fields
 	case "down", "j", "tab":
 		form.focus = (form.focus + 1) % fields
-	case "left", "h", "right", "l", "space":
-		delta := 1
-		if key.String() == "left" || key.String() == "h" {
-			delta = -1
+	case "right", "l":
+		if target, ok := form.pickerTarget(); ok {
+			return m.openHandsPicker(target)
 		}
-		form.cycle(delta)
+		form.cycle(1)
+	case "left", "h":
+		if _, ok := form.pickerTarget(); ok {
+			return m, nil
+		}
+		form.cycle(-1)
+	case "space":
+		if target, ok := form.pickerTarget(); ok {
+			return m.openHandsPicker(target)
+		}
+		form.cycle(1)
 	case "enter":
 		if target, ok := form.pickerTarget(); ok {
 			return m.openHandsPicker(target)
@@ -788,24 +933,40 @@ func (f *workModeForm) cycle(delta int) {
 		case 1:
 			f.lane = cycleValue(f.lane, laneProviders(f.lanes), delta)
 		case 2:
-			f.mcpPreset = cycleValue(f.mcpPreset, []string{"keep", "none", "all"}, delta)
-			f.mcpTouched = true
+			// MCP: no ←/→ cycling; opens picker on → or Enter
 		case 3:
-			f.docPreset = cycleValue(f.docPreset, []string{"keep", "none", "all"}, delta)
-			f.docTouched = true
+			// Docs: no ←/→ cycling; opens picker on → or Enter
 		}
 		return
 	}
 	switch f.focus {
 	case 0:
 		f.action = cycleValue(f.action, []string{"new", "resume", "unattached"}, delta)
-		if f.action != "resume" {
+		if f.focus >= f.fieldCount() {
 			f.focus = 0
 		}
 	case 1:
-		if len(f.resumeLabels) > 0 {
-			f.resumeIdx = (f.resumeIdx + delta + len(f.resumeLabels)) % len(f.resumeLabels)
+		if f.action == "resume" {
+			if len(f.resumeLabels) > 0 {
+				f.resumeIdx = (f.resumeIdx + delta + len(f.resumeLabels)) % len(f.resumeLabels)
+			}
+		} else {
+			f.fixerHarness = cycleValue(f.fixerHarness, fixerHarnesses, delta)
+			f.fixerModel = defaultFixerModel(f.fixerHarness)
 		}
+	case 2:
+		if f.action != "resume" {
+			models := fixerModels[f.fixerHarness]
+			if len(models) > 0 {
+				f.fixerModel = cycleValue(f.fixerModel, models, delta)
+			}
+		}
+	case 3:
+		if f.action != "resume" {
+			f.fixerReasoning = cycleValue(f.fixerReasoning, []string{"high", "medium", "low", "off"}, delta)
+		}
+	case 4:
+		// MCP: no ←/→ cycling; opens picker on → or Enter
 	}
 }
 
@@ -813,13 +974,17 @@ func (m Model) startWorkMode() (tea.Model, tea.Cmd) {
 	form := m.workMode
 	label := "Руки"
 	spec := launch.Spec{
-		Kind:        form.kind,
-		ProjectPath: form.project,
-		Lane:        form.lane,
-		Workspace:   form.workspace,
-		HandsMCP:    form.mcpValue(),
-		HandsDocs:   form.docValue(),
-		FixerLaunch: form.action,
+		Kind:           form.kind,
+		ProjectPath:    form.project,
+		Lane:           form.lane,
+		Workspace:      form.workspace,
+		HandsMCP:       form.mcpValue(),
+		HandsDocs:      form.docValue(),
+		FixerLaunch:    form.action,
+		FixerBackend:   form.fixerHarness,
+		FixerModel:     form.fixerModel,
+		FixerReasoning: form.fixerReasoning,
+		FixerMCP:       form.mcpValue(),
 	}
 	if form.kind == launch.KindWorkroom {
 		label = "Фиксер"
@@ -855,39 +1020,88 @@ func (m Model) startWorkMode() (tea.Model, tea.Cmd) {
 }
 
 func (f *workModeForm) pickerTarget() (string, bool) {
-	if f.kind != launch.KindHands {
-		return "", false
+	if f.kind == launch.KindHands {
+		switch f.focus {
+		case 2:
+			return "mcp", true
+		case 3:
+			return "docs", true
+		default:
+			return "", false
+		}
 	}
-	switch f.focus {
-	case 2:
-		return "mcp", true
-	case 3:
-		return "docs", true
-	default:
-		return "", false
+	if f.kind == launch.KindWorkroom {
+		if f.action == "resume" {
+			if f.focus == 2 {
+				return "mcp", true
+			}
+		} else {
+			if f.focus == 4 {
+				return "mcp", true
+			}
+		}
 	}
+	return "", false
 }
 
-// multiSelectState is the native checkbox overlay used for MCP servers and
-// project documents. It replaces the legacy line-input multi selectors, so
-// arrow keys move a cursor instead of leaking escape sequences.
+type multiSelectItem struct {
+	value     string
+	label     string
+	category  string
+	shortDesc string
+	level     int
+	checked   bool
+	allowed   bool
+}
+
 type multiSelectState struct {
-	target  string
-	title   string
-	values  []string
-	labels  []string
-	checked []bool
-	cursor  int
+	target string
+	title  string
+	items  []multiSelectItem
+	cursor int
 }
 
 func (s *multiSelectState) selectedCount() int {
 	count := 0
-	for _, value := range s.checked {
-		if value {
+	for _, it := range s.items {
+		if it.checked {
 			count++
 		}
 	}
 	return count
+}
+
+func mcpCategoryOrder(category string) int {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "db":
+		return 0
+	case "web-search", "web_search", "websearch", "search":
+		return 1
+	case "design":
+		return 2
+	case "productivity":
+		return 3
+	case "coding", "code":
+		return 4
+	default:
+		return 99
+	}
+}
+
+func sortMCPServers(servers []mcpclient.MCPServer) []mcpclient.MCPServer {
+	out := append([]mcpclient.MCPServer(nil), servers...)
+	sort.SliceStable(out, func(i, j int) bool {
+		catI := mcpCategoryOrder(out[i].Category)
+		catJ := mcpCategoryOrder(out[j].Category)
+		if catI != catJ {
+			return catI < catJ
+		}
+		if out[i].Category != out[j].Category {
+			return out[i].Category < out[j].Category
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 func (m Model) openHandsPicker(target string) (tea.Model, tea.Cmd) {
@@ -902,24 +1116,34 @@ func (m Model) openHandsPicker(target string) (tea.Model, tea.Cmd) {
 			m.setMessage("пул MCP-серверов ещё не получен из MCP — подождите обновления (r)")
 			return m, nil
 		}
-		picker.title = "MCP-серверы для Рук"
+		targetRole := "Рук"
+		if form.kind == launch.KindWorkroom {
+			targetRole = "Fixer"
+		}
+		picker.title = "MCP-серверы для " + targetRole
 		selected := make(map[string]bool, len(form.mcpSel))
 		for _, name := range form.mcpSel {
 			selected[name] = true
 		}
-		for _, server := range form.mcpPool {
+		allowedMap := make(map[string]bool, len(form.mcpAllowed))
+		for _, name := range form.mcpAllowed {
+			allowedMap[name] = true
+		}
+		sortedServers := sortMCPServers(form.mcpPool)
+		for _, server := range sortedServers {
 			if server.Archived {
 				continue
 			}
-			picker.values = append(picker.values, server.Name)
-			label := server.Name
-			if server.ShortDescription != "" {
-				label += " — " + compactText(server.ShortDescription, 64)
-			} else if server.Category != "" {
-				label += " — " + server.Category
-			}
-			picker.labels = append(picker.labels, label)
-			picker.checked = append(picker.checked, selected[server.Name])
+			isSel := selected[server.Name]
+			isAllowed := allowedMap[server.Name] || isSel
+			picker.items = append(picker.items, multiSelectItem{
+				value:     server.Name,
+				label:     server.Name,
+				category:  firstNonEmpty(server.Category, "Other"),
+				shortDesc: server.ShortDescription,
+				checked:   isSel,
+				allowed:   isAllowed,
+			})
 		}
 	case "docs":
 		if len(form.docPool) == 0 {
@@ -932,15 +1156,18 @@ func (m Model) openHandsPicker(target string) (tea.Model, tea.Cmd) {
 			selected[id] = true
 		}
 		for _, doc := range form.docPool {
-			picker.values = append(picker.values, strconv.Itoa(doc.DocID))
-			title := firstNonEmpty(doc.Title, doc.Path, "без названия")
-			picker.labels = append(picker.labels, strings.Repeat("  ", max(0, doc.Level))+compactText(title, 74))
-			picker.checked = append(picker.checked, selected[doc.DocID])
+			picker.items = append(picker.items, multiSelectItem{
+				value:     strconv.Itoa(doc.DocID),
+				label:     firstNonEmpty(doc.Title, doc.Path, "без названия"),
+				shortDesc: doc.Path,
+				level:     doc.Level,
+				checked:   selected[doc.DocID],
+			})
 		}
 	default:
 		return m, nil
 	}
-	if len(picker.values) == 0 {
+	if len(picker.items) == 0 {
 		m.setMessage("нет кандидатов для выбора")
 		return m, nil
 	}
@@ -959,19 +1186,36 @@ func (m Model) multiKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			picker.cursor--
 		}
 	case "down", "j":
-		if picker.cursor < len(picker.values)-1 {
+		if picker.cursor < len(picker.items)-1 {
 			picker.cursor++
 		}
 	case "home", "g":
 		picker.cursor = 0
 	case "end", "G":
-		picker.cursor = len(picker.values) - 1
+		picker.cursor = len(picker.items) - 1
 	case "space", " ", "x":
-		picker.checked[picker.cursor] = !picker.checked[picker.cursor]
+		if picker.cursor >= 0 && picker.cursor < len(picker.items) {
+			it := &picker.items[picker.cursor]
+			it.checked = !it.checked
+			if it.checked && !it.allowed {
+				it.allowed = true
+			}
+		}
+	case "p":
+		if picker.target == "mcp" && picker.cursor >= 0 && picker.cursor < len(picker.items) {
+			it := &picker.items[picker.cursor]
+			it.allowed = !it.allowed
+			if !it.allowed && it.checked {
+				it.checked = false
+			}
+		}
 	case "a":
-		allOn := picker.selectedCount() < len(picker.checked)
-		for i := range picker.checked {
-			picker.checked[i] = allOn
+		allOn := picker.selectedCount() < len(picker.items)
+		for i := range picker.items {
+			picker.items[i].checked = allOn
+			if allOn && !picker.items[i].allowed {
+				picker.items[i].allowed = true
+			}
 		}
 	case "enter":
 		return m.applyPicker()
@@ -986,26 +1230,42 @@ func (m Model) applyPicker() (tea.Model, tea.Cmd) {
 	if picker == nil || form == nil {
 		return m, nil
 	}
-	chosen := make([]string, 0, len(picker.values))
-	for i, checked := range picker.checked {
-		if checked {
-			chosen = append(chosen, picker.values[i])
-		}
-	}
+	var cmds []tea.Cmd
 	switch picker.target {
 	case "mcp":
 		form.mcpTouched = true
+		chosen := make([]string, 0, len(picker.items))
+		allowed := make([]string, 0, len(picker.items))
+		for _, it := range picker.items {
+			if it.checked {
+				chosen = append(chosen, it.value)
+			}
+			if it.allowed {
+				allowed = append(allowed, it.value)
+			}
+		}
 		if len(chosen) == 0 {
 			form.mcpPreset, form.mcpSel = "none", nil
 		} else {
 			form.mcpPreset, form.mcpSel = "custom", chosen
 		}
+		form.mcpAllowed = allowed
+		m.projectWork.ProjectAllowedMCP = allowed
+		opts := m.mcpOptions()
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+			defer cancel()
+			err := mcpclient.SetProjectMCPServers(ctx, opts, allowed)
+			return mcpMutationFinishedMsg{err: err, msg: "MCP allowlist проекта обновлён"}
+		})
 	case "docs":
 		form.docTouched = true
-		ids := make([]int, 0, len(chosen))
-		for _, value := range chosen {
-			if id, err := strconv.Atoi(value); err == nil {
-				ids = append(ids, id)
+		ids := make([]int, 0, len(picker.items))
+		for _, it := range picker.items {
+			if it.checked {
+				if id, err := strconv.Atoi(it.value); err == nil {
+					ids = append(ids, id)
+				}
 			}
 		}
 		if len(ids) == 0 {
@@ -1015,6 +1275,9 @@ func (m Model) applyPicker() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.workMode = form
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
+	}
 	return m, nil
 }
 
@@ -1023,28 +1286,380 @@ func (m Model) multiView() string {
 	var b strings.Builder
 	b.WriteString(accent.Render("  "+picker.title) + muted.Render("  нативный выбор") + "\n\n")
 
-	window := 14
+	window := 16
 	top := 0
 	if picker.cursor >= window {
 		top = picker.cursor - window + 1
 	}
-	end := min(len(picker.values), top+window)
+	end := min(len(picker.items), top+window)
+
+	var lastCat string
 	for i := top; i < end; i++ {
-		prefix := "   "
-		if i == picker.cursor {
-			prefix = selectStyle.Render(" ▸ ")
+		it := picker.items[i]
+		if picker.target == "mcp" {
+			if i == top || it.category != lastCat {
+				b.WriteString(panel.Render(fmt.Sprintf("   ── %s ──", it.category)) + "\n")
+				lastCat = it.category
+			}
+			prefix := "   "
+			if i == picker.cursor {
+				prefix = selectStyle.Render(" ▸ ")
+			}
+			mark := muted.Render("[ ]")
+			if it.checked {
+				mark = good.Render("[x]")
+			}
+			allowMark := muted.Render("[·]")
+			if it.allowed {
+				allowMark = accent.Render("[P]")
+			}
+			desc := ""
+			if it.shortDesc != "" {
+				desc = muted.Render(" — " + compactText(it.shortDesc, 50))
+			}
+			b.WriteString(fmt.Sprintf("%s%s %s %-18s%s\n", prefix, mark, allowMark, it.label, desc))
+		} else {
+			prefix := "   "
+			if i == picker.cursor {
+				prefix = selectStyle.Render(" ▸ ")
+			}
+			mark := muted.Render("[ ]")
+			if it.checked {
+				mark = good.Render("[x]")
+			}
+			indent := strings.Repeat("    ", max(0, it.level))
+			treeGlyph := ""
+			if it.level > 0 {
+				treeGlyph = "└── "
+			}
+			lvlBadge := selectStyle.Render(fmt.Sprintf("[L%d]", it.level))
+			b.WriteString(fmt.Sprintf("%s%s %s%s%s %s\n", prefix, mark, indent, treeGlyph, lvlBadge, compactText(it.label, 60)))
 		}
-		mark := "[ ]"
-		if picker.checked[i] {
-			mark = good.Render("[x]")
+	}
+	if top > 0 || end < len(picker.items) {
+		b.WriteString(muted.Render(fmt.Sprintf("   … показаны %d–%d из %d", top+1, end, len(picker.items))) + "\n")
+	}
+	if picker.target == "mcp" {
+		allowedCount := 0
+		for _, it := range picker.items {
+			if it.allowed {
+				allowedCount++
+			}
 		}
-		b.WriteString(prefix + mark + " " + picker.labels[i] + "\n")
+		b.WriteString("\n" + muted.Render(fmt.Sprintf("   выбрано для канала: %d  ·  в allowlist проекта: %d из %d", picker.selectedCount(), allowedCount, len(picker.items))) + "\n")
+		b.WriteString("\n" + panel.Render("  space/x — канал [x] · p — allowlist [P] · a — все · Enter — готово · Esc — назад") + "\n")
+	} else {
+		b.WriteString("\n" + muted.Render(fmt.Sprintf("   прикреплено документов: %d из %d", picker.selectedCount(), len(picker.items))) + "\n")
+		b.WriteString("\n" + panel.Render("  space/x — вкл/выкл · a — все · Enter — готово · Esc — назад") + "\n")
 	}
-	if top > 0 || end < len(picker.values) {
-		b.WriteString(muted.Render(fmt.Sprintf("   … показаны %d–%d из %d", top+1, end, len(picker.values))) + "\n")
+	return b.String()
+}
+
+func (m Model) activeMCPServers() []mcpclient.MCPServer {
+	var out []mcpclient.MCPServer
+	for _, s := range m.projectWork.MCPPool {
+		if !s.Archived {
+			out = append(out, s)
+		}
 	}
-	b.WriteString("\n" + muted.Render(fmt.Sprintf("   выбрано: %d", picker.selectedCount())) + "\n")
-	b.WriteString("\n" + panel.Render("  space/x — вкл/выкл · a — все · Enter — готово · Esc — назад") + "\n")
+	return sortMCPServers(out)
+}
+
+func (m Model) toggleMCPDocsSelection() (tea.Model, tea.Cmd) {
+	opts := m.mcpOptions()
+	if m.mcpDocsSection == 0 {
+		servers := m.activeMCPServers()
+		if len(servers) == 0 {
+			return m, nil
+		}
+		cursor := m.mcpDocsCursorMCP
+		if cursor < 0 {
+			cursor = 0
+		}
+		if cursor >= len(servers) {
+			cursor = len(servers) - 1
+		}
+		srv := servers[cursor]
+
+		attached := make(map[string]bool, len(m.projectWork.HandsMCP))
+		for _, name := range m.projectWork.HandsMCP {
+			attached[name] = true
+		}
+		allowedMap := make(map[string]bool, len(m.projectWork.ProjectAllowedMCP))
+		for _, name := range m.projectWork.ProjectAllowedMCP {
+			allowedMap[name] = true
+		}
+
+		wasAttached := attached[srv.Name]
+		if wasAttached {
+			delete(attached, srv.Name)
+		} else {
+			attached[srv.Name] = true
+			allowedMap[srv.Name] = true
+		}
+
+		var newHandsMCP []string
+		for _, s := range servers {
+			if attached[s.Name] {
+				newHandsMCP = append(newHandsMCP, s.Name)
+			}
+		}
+		m.projectWork.HandsMCP = newHandsMCP
+
+		var newAllowed []string
+		for _, s := range servers {
+			if allowedMap[s.Name] {
+				newAllowed = append(newAllowed, s.Name)
+			}
+		}
+		m.projectWork.ProjectAllowedMCP = newAllowed
+
+		var cmds []tea.Cmd
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+			defer cancel()
+			err := mcpclient.SetProjectHandsMCPServers(ctx, opts, newHandsMCP)
+			return mcpMutationFinishedMsg{err: err, msg: "MCP-серверы Рук обновлены"}
+		})
+		if !wasAttached {
+			cmds = append(cmds, func() tea.Msg {
+				ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+				defer cancel()
+				err := mcpclient.SetProjectMCPServers(ctx, opts, newAllowed)
+				return mcpMutationFinishedMsg{err: err, msg: "MCP allowlist проекта обновлён"}
+			})
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	docs := m.projectWork.DocPool
+	if len(docs) == 0 {
+		return m, nil
+	}
+	cursor := m.mcpDocsCursorDocs
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(docs) {
+		cursor = len(docs) - 1
+	}
+	targetDoc := docs[cursor]
+
+	attachedDocs := make(map[int]bool, len(m.projectWork.HandsDocs))
+	for _, id := range m.projectWork.HandsDocs {
+		attachedDocs[id] = true
+	}
+	if attachedDocs[targetDoc.DocID] {
+		delete(attachedDocs, targetDoc.DocID)
+	} else {
+		attachedDocs[targetDoc.DocID] = true
+	}
+
+	var newHandsDocs []int
+	for _, d := range docs {
+		if attachedDocs[d.DocID] {
+			newHandsDocs = append(newHandsDocs, d.DocID)
+		}
+	}
+	m.projectWork.HandsDocs = newHandsDocs
+
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+		defer cancel()
+		err := mcpclient.SetProjectHandsDocs(ctx, opts, newHandsDocs)
+		return mcpMutationFinishedMsg{err: err, msg: "Документы Рук обновлены"}
+	}
+}
+
+func (m Model) toggleMCPAllowlist() (tea.Model, tea.Cmd) {
+	servers := m.activeMCPServers()
+	if len(servers) == 0 {
+		return m, nil
+	}
+	cursor := m.mcpDocsCursorMCP
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(servers) {
+		cursor = len(servers) - 1
+	}
+	srv := servers[cursor]
+
+	allowedMap := make(map[string]bool, len(m.projectWork.ProjectAllowedMCP))
+	for _, name := range m.projectWork.ProjectAllowedMCP {
+		allowedMap[name] = true
+	}
+	attached := make(map[string]bool, len(m.projectWork.HandsMCP))
+	for _, name := range m.projectWork.HandsMCP {
+		attached[name] = true
+	}
+
+	wasAllowed := allowedMap[srv.Name]
+	var cmds []tea.Cmd
+	opts := m.mcpOptions()
+
+	if wasAllowed {
+		delete(allowedMap, srv.Name)
+		if attached[srv.Name] {
+			delete(attached, srv.Name)
+			var newHandsMCP []string
+			for _, s := range servers {
+				if attached[s.Name] {
+					newHandsMCP = append(newHandsMCP, s.Name)
+				}
+			}
+			m.projectWork.HandsMCP = newHandsMCP
+			cmds = append(cmds, func() tea.Msg {
+				ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+				defer cancel()
+				err := mcpclient.SetProjectHandsMCPServers(ctx, opts, newHandsMCP)
+				return mcpMutationFinishedMsg{err: err}
+			})
+		}
+	} else {
+		allowedMap[srv.Name] = true
+	}
+
+	var newAllowed []string
+	for _, s := range servers {
+		if allowedMap[s.Name] {
+			newAllowed = append(newAllowed, s.Name)
+		}
+	}
+	m.projectWork.ProjectAllowedMCP = newAllowed
+
+	cmds = append(cmds, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.lifecycle, 10*time.Second)
+		defer cancel()
+		err := mcpclient.SetProjectMCPServers(ctx, opts, newAllowed)
+		return mcpMutationFinishedMsg{err: err, msg: "MCP allowlist проекта обновлён"}
+	})
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) mcpDocsView() string {
+	var b strings.Builder
+	b.WriteString(accent.Render("  MCP-серверы и документы проекта") + muted.Render("  управление контекстом Рук и проекта") + "\n")
+	b.WriteString(muted.Render("  "+m.project.Path) + "\n\n")
+
+	secMCP := "1. MCP-серверы"
+	secDocs := "2. Документы проекта (0-1-2-3)"
+	if m.mcpDocsSection == 0 {
+		secMCP = selectStyle.Render("[" + secMCP + "]")
+		secDocs = muted.Render(" " + secDocs + " ")
+	} else {
+		secMCP = muted.Render(" " + secMCP + " ")
+		secDocs = selectStyle.Render("[" + secDocs + "]")
+	}
+	b.WriteString("  " + secMCP + "    " + secDocs + "\n")
+	b.WriteString(muted.Render("  Tab / ← / → — переключить секцию") + "\n\n")
+
+	if m.mcpDocsSection == 0 {
+		servers := m.activeMCPServers()
+		if len(servers) == 0 {
+			b.WriteString(muted.Render("  пул MCP-серверов пуст или загружается… (нажмите r для обновления)") + "\n")
+		} else {
+			window := 16
+			if m.height > 24 {
+				window = m.height - 12
+			}
+			top := 0
+			if m.mcpDocsCursorMCP >= window {
+				top = m.mcpDocsCursorMCP - window + 1
+			}
+			end := min(len(servers), top+window)
+
+			handsMap := make(map[string]bool, len(m.projectWork.HandsMCP))
+			for _, name := range m.projectWork.HandsMCP {
+				handsMap[name] = true
+			}
+			allowedMap := make(map[string]bool, len(m.projectWork.ProjectAllowedMCP))
+			for _, name := range m.projectWork.ProjectAllowedMCP {
+				allowedMap[name] = true
+			}
+
+			var lastCat string
+			for i := top; i < end; i++ {
+				srv := servers[i]
+				cat := firstNonEmpty(srv.Category, "Other")
+				if i == top || cat != lastCat {
+					b.WriteString(panel.Render(fmt.Sprintf("   ── %s ──", cat)) + "\n")
+					lastCat = cat
+				}
+				prefix := "   "
+				if i == m.mcpDocsCursorMCP {
+					prefix = selectStyle.Render(" ▸ ")
+				}
+				mark := muted.Render("[ ]")
+				if handsMap[srv.Name] {
+					mark = good.Render("[x]")
+				}
+				allowMark := muted.Render("[·]")
+				if allowedMap[srv.Name] {
+					allowMark = accent.Render("[P]")
+				}
+				desc := ""
+				if srv.ShortDescription != "" {
+					desc = muted.Render(" — " + compactText(srv.ShortDescription, 50))
+				}
+				b.WriteString(fmt.Sprintf("%s%s %s %-18s%s\n", prefix, mark, allowMark, srv.Name, desc))
+			}
+			if top > 0 || end < len(servers) {
+				b.WriteString(muted.Render(fmt.Sprintf("   … показаны %d–%d из %d", top+1, end, len(servers))) + "\n")
+			}
+			b.WriteString("\n" + muted.Render(fmt.Sprintf("  выбрано для Рук: %d  ·  в allowlist проекта: %d из %d", len(m.projectWork.HandsMCP), len(m.projectWork.ProjectAllowedMCP), len(servers))) + "\n")
+			b.WriteString(panel.Render("  Space/x/Enter — канал Рук [x] · p — allowlist проекта [P] · r — обновить · Tab — к документам") + "\n")
+		}
+	} else {
+		docs := m.projectWork.DocPool
+		if len(docs) == 0 {
+			b.WriteString(muted.Render("  пул документов пуст или загружается… (нажмите r для обновления)") + "\n")
+		} else {
+			window := 16
+			if m.height > 24 {
+				window = m.height - 12
+			}
+			top := 0
+			if m.mcpDocsCursorDocs >= window {
+				top = m.mcpDocsCursorDocs - window + 1
+			}
+			end := min(len(docs), top+window)
+
+			handsDocsMap := make(map[int]bool, len(m.projectWork.HandsDocs))
+			for _, id := range m.projectWork.HandsDocs {
+				handsDocsMap[id] = true
+			}
+
+			for i := top; i < end; i++ {
+				doc := docs[i]
+				prefix := "   "
+				if i == m.mcpDocsCursorDocs {
+					prefix = selectStyle.Render(" ▸ ")
+				}
+				mark := muted.Render("[ ]")
+				if handsDocsMap[doc.DocID] {
+					mark = good.Render("[x]")
+				}
+				indent := strings.Repeat("    ", max(0, doc.Level))
+				treeGlyph := ""
+				if doc.Level > 0 {
+					treeGlyph = "└── "
+				}
+				lvlBadge := selectStyle.Render(fmt.Sprintf("[L%d]", doc.Level))
+				title := firstNonEmpty(doc.Title, doc.Path, "без названия")
+				pathDesc := ""
+				if doc.Title != "" && doc.Path != "" && doc.Title != doc.Path {
+					pathDesc = muted.Render(" (" + doc.Path + ")")
+				}
+				b.WriteString(fmt.Sprintf("%s%s %s%s%s %s%s\n", prefix, mark, indent, treeGlyph, lvlBadge, compactText(title, 45), pathDesc))
+			}
+			if top > 0 || end < len(docs) {
+				b.WriteString(muted.Render(fmt.Sprintf("   … показаны %d–%d из %d", top+1, end, len(docs))) + "\n")
+			}
+			b.WriteString("\n" + muted.Render(fmt.Sprintf("  прикреплено к Рукам: %d из %d документов", len(m.projectWork.HandsDocs), len(docs))) + "\n")
+			b.WriteString(panel.Render("  Space/x/Enter — прикрепить/открепить к Рукам [x] · r — обновить · Tab — к MCP-серверам") + "\n")
+		}
+	}
 	return b.String()
 }
 
@@ -1081,6 +1696,12 @@ func (m Model) workModeView() string {
 				value = form.resumeLabels[form.resumeIdx]
 			}
 			fields = append(fields, struct{ label, value string }{"Сессия", value})
+			fields = append(fields, struct{ label, value string }{"MCP-серверы", form.mcpLabel()})
+		} else {
+			fields = append(fields, struct{ label, value string }{"Харнесс", form.fixerHarness})
+			fields = append(fields, struct{ label, value string }{"Модель", form.fixerModel})
+			fields = append(fields, struct{ label, value string }{"Рассуждения", form.fixerReasoning})
+			fields = append(fields, struct{ label, value string }{"MCP-серверы", form.mcpLabel()})
 		}
 	}
 	for i, field := range fields {
@@ -1102,7 +1723,7 @@ func (m Model) workModeView() string {
 	if form.kind == launch.KindHands && !form.lanesFromMCP {
 		b.WriteString(muted.Render("  MCP недоступен — показаны только линии, сохраняемые в схеме") + "\n")
 	}
-	b.WriteString("\n" + panel.Render("  Enter — запустить · на MCP/Документах Enter — выбор · ←/→ — keep/none/all · j/k — поле") + "\n")
+	b.WriteString("\n" + panel.Render("  Enter — запустить · на MCP/Документах Enter или → — выбор · ←/→ — значение · j/k — поле") + "\n")
 	return b.String()
 }
 
@@ -1280,6 +1901,9 @@ func (m *Model) setTab(tab int) tea.Cmd {
 	if tab == machinesTab && (changed || m.machinesCheckedAt.IsZero()) {
 		return m.probeMachines()
 	}
+	if (tab == mcpDocsTab || tab == workTab) && changed {
+		return m.refreshProjectWork()
+	}
 	return nil
 }
 
@@ -1294,7 +1918,7 @@ func (m Model) probeMachines() tea.Cmd {
 
 func (m Model) refreshCurrent() tea.Cmd {
 	switch m.tab {
-	case workTab:
+	case workTab, mcpDocsTab:
 		m.busy = true
 		m.refreshSessions()
 		return m.refreshProjectWork()
@@ -1582,6 +2206,8 @@ func (m Model) searchKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func searchTarget(query string) int {
 	query = strings.ToLower(strings.TrimSpace(query))
 	switch {
+	case strings.Contains(query, "mcp"), strings.Contains(query, "doc"), strings.Contains(query, "док"):
+		return mcpDocsTab
 	case strings.Contains(query, "work"), strings.Contains(query, "сесс"), strings.Contains(query, "fixer"):
 		return workTab
 	case strings.Contains(query, "quota"), strings.Contains(query, "лимит"), strings.Contains(query, "account"), strings.Contains(query, "аккаун"):
@@ -1689,6 +2315,8 @@ func (m Model) View() string {
 		switch m.tab {
 		case workTab:
 			b.WriteString(m.workView())
+		case mcpDocsTab:
+			b.WriteString(m.mcpDocsView())
 		case resourcesTab:
 			b.WriteString(m.resourcesView())
 		case machinesTab:
@@ -1719,7 +2347,7 @@ func (m Model) header() string {
 	} else if m.network.State == "configured" {
 		status = "маршрут настроен"
 	}
-	tabs := []string{"Работа", "Ресурсы", "Машины"}
+	tabs := []string{"Работа", "MCP и документы", "Ресурсы", "Машины"}
 	var rendered []string
 	for i, tab := range tabs {
 		label := fmt.Sprintf("%d %s", i+1, tab)
@@ -2265,7 +2893,7 @@ func (m Model) confirmView() string {
 
 func (m Model) helpView() string {
 	return accent.Render("  Помощь") + "\n\n" +
-		"  1/2/3      Работа / Ресурсы / Машины\n" +
+		"  1/2/3/4    Работа / MCP и документы / Ресурсы / Машины\n" +
 		"  h / f      открыть Руки / Фиксер для текущего проекта\n" +
 		"  n          новый локальный запуск (не MCP-сессия)\n" +
 		"  p/P        переключить сохранённый проект\n" +
@@ -2282,6 +2910,8 @@ func (m Model) footer() string {
 	switch m.tab {
 	case workTab:
 		return "  ↑/↓ move · Enter открыть · h Руки · f Фиксер · n локальный запуск · ? help · q quit"
+	case mcpDocsTab:
+		return "  ↑/↓ move · Tab/←/→ секция · Space/Enter вкл/выкл · p allowlist · r refresh · ? help · q quit"
 	case resourcesTab:
 		return "  ↑/↓ move · Enter/s глобальный аккаунт · r обновить cml · ? help · q quit"
 	case machinesTab:

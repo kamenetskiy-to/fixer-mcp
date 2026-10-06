@@ -53,6 +53,11 @@ type Spec struct {
 	FixerLaunch string
 	// FixerSession names the session FixerLaunch=resume resumes.
 	FixerSession string
+	// FixerBackend, FixerModel, FixerReasoning, FixerMCP are native Fixer launch choices.
+	FixerBackend   string
+	FixerModel     string
+	FixerReasoning string
+	FixerMCP       string
 }
 
 type Command struct {
@@ -200,13 +205,30 @@ func workModeArgs(spec Spec, wire string) ([]string, error) {
 		switch strings.ToLower(strings.TrimSpace(spec.FixerLaunch)) {
 		case "new", "unattached":
 			action := strings.ToLower(strings.TrimSpace(spec.FixerLaunch))
-			return []string{wire, "--role", "fixer", "--fixer-launch", action}, nil
+			args := []string{wire, "--role", "fixer", "--fixer-launch", action}
+			if b := strings.TrimSpace(spec.FixerBackend); b != "" {
+				args = append(args, "--fixer-backend", b)
+			}
+			if m := strings.TrimSpace(spec.FixerModel); m != "" {
+				args = append(args, "--fixer-model", m)
+			}
+			if r := strings.TrimSpace(spec.FixerReasoning); r != "" {
+				args = append(args, "--fixer-reasoning", r)
+			}
+			if mcp := strings.TrimSpace(spec.FixerMCP); mcp != "" {
+				args = append(args, "--fixer-mcp", mcp)
+			}
+			return args, nil
 		case "resume":
 			session := strings.TrimSpace(spec.FixerSession)
 			if session == "" {
 				return nil, errors.New("Фиксер: для resume нужен id сессии")
 			}
-			return []string{wire, "--role", "fixer", "--fixer-launch", "resume", "--fixer-session-id", session}, nil
+			args := []string{wire, "--role", "fixer", "--fixer-launch", "resume", "--fixer-session-id", session}
+			if mcp := strings.TrimSpace(spec.FixerMCP); mcp != "" {
+				args = append(args, "--fixer-mcp", mcp)
+			}
+			return args, nil
 		default:
 			return nil, errors.New("Фиксер: не выбрано действие (new/resume/unattached)")
 		}

@@ -1565,6 +1565,22 @@ type GetMCPBinaryRestartStateInput struct{}
 type GetMCPBinaryRestartStateOutput struct {
 	Status string                `json:"status"`
 	State  MCPBinaryRestartState `json:"state"`
+	// RuntimeIdentity is the ACTUAL process answering this call right now,
+	// reported on every health call. State holds only the stored
+	// required/confirmed bookkeeping identities, which may describe a
+	// long-dead process and are never caller proof.
+	RuntimeIdentity RuntimeProcessIdentity `json:"runtime_identity"`
+	// StoredStatePresent is false on an empty DB (epoch 0): that means no
+	// restart bookkeeping was recorded yet, NOT that nothing is running.
+	StoredStatePresent bool `json:"stored_state_present"`
+	// StaleStoredProcessIdentity is true when the stored running identity
+	// belongs to a different (typically already dead) process than the caller.
+	StaleStoredProcessIdentity bool `json:"stale_stored_process_identity"`
+	// StoredProcessIsRunning reports whether the stored process identity is
+	// still a live foreign process (for example an old binary left connected
+	// after an update).
+	StoredProcessIsRunning bool   `json:"stored_process_is_running"`
+	StateSummary           string `json:"state_summary"`
 }
 
 type SetMCPBinaryRestartStateInput struct {
@@ -1637,9 +1653,35 @@ func GetMCPBinaryRestartState(ctx context.Context, req *mcp.CallToolRequest, inp
 	}
 	state, err := fetchMCPBinaryRestartState(authorizedProjectId)
 	if err != nil {
-		return &mcp.CallToolResult{IsError: true}, GetMCPBinaryRestartStateOutput{}, fmt.Errorf("DB query error: %v", err)
+		return &mcp.CallToolResult{IsError: true}, GetMCPBinaryRestartStateOutput{}, schemaEraAwareRestartStateError(err)
 	}
-	return nil, GetMCPBinaryRestartStateOutput{Status: "success", State: state}, nil
+	present := false
+	if err := db.QueryRow(`SELECT 1 FROM mcp_binary_state WHERE project_id = ?`, authorizedProjectId).Scan(new(int)); err == nil {
+		present = true
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return &mcp.CallToolResult{IsError: true}, GetMCPBinaryRestartStateOutput{}, schemaEraAwareRestartStateError(err)
+	}
+	runtimeIdentity := collectRuntimeProcessIdentity()
+	staleStored := present && strings.TrimSpace(state.RunningProcessIdentity) != "" && state.RunningProcessIdentity != mcpProcessIdentity
+	storedRunning := false
+	if staleStored {
+		if pid, ok := parseProcessIdentityPID(state.RunningProcessIdentity); ok && pid != os.Getpid() {
+			storedRunning = isProcessAlive(pid)
+		}
+	}
+	stateSummary := "restart bookkeeping recorded for the stored identities; runtime_identity is the live caller"
+	if !present {
+		stateSummary = "no restart bookkeeping recorded (epoch 0); runtime_identity is the live caller and is running"
+	}
+	return nil, GetMCPBinaryRestartStateOutput{
+		Status:                     "success",
+		State:                      state,
+		RuntimeIdentity:            runtimeIdentity,
+		StoredStatePresent:         present,
+		StaleStoredProcessIdentity: staleStored,
+		StoredProcessIsRunning:     storedRunning,
+		StateSummary:               stateSummary,
+	}, nil
 }
 
 func SetMCPBinaryRestartState(ctx context.Context, req *mcp.CallToolRequest, input SetMCPBinaryRestartStateInput) (*mcp.CallToolResult, SetMCPBinaryRestartStateOutput, error) {

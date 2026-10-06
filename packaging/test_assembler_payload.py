@@ -10,6 +10,7 @@ import unittest
 from packaging.allowlist import (
     is_allowed_bin_file,
     is_allowed_control_plane_file,
+    is_allowed_script_file,
     is_dangerous_name_or_path,
 )
 from packaging.archive import safe_extract
@@ -48,6 +49,12 @@ class TestFixerctlPackaging(unittest.TestCase):
         self.assertFalse(is_allowed_control_plane_file("main.go"))
         self.assertFalse(is_allowed_control_plane_file("go.mod"))
         self.assertFalse(is_allowed_control_plane_file("fixerctl.log"))
+
+        # Verify scripts allowlist includes pi_probe.py
+        self.assertTrue(is_allowed_script_file("pi_probe.py"))
+        self.assertTrue(is_allowed_script_file("install/install.py"))
+        self.assertFalse(is_allowed_script_file("arbitrary.py"))
+        self.assertFalse(is_allowed_script_file(".env"))
 
     def test_installer_component_list_includes_release_surface(self):
         """Verify the managed install component list includes required trees."""

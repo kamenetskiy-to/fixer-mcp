@@ -22,6 +22,7 @@ from packaging.allowlist import (
     is_allowed_installer_file,
     is_allowed_install_script_file,
     is_allowed_packaging_file,
+    is_allowed_script_file,
     is_allowed_skill_file,
 )
 from packaging.syntax import (
@@ -277,7 +278,7 @@ class ReleaseAssembler:
         self.platform_id = platform_id or detect_host_platform()
         self.changelog = changelog or f"Fixer MCP release {self.version} for {self.platform_id}"
 
-    def build_go_binary(self, target_binary_path: str) -> None:
+    def build_go_binary(self, target_binary_path: str, source_revision: Optional[str] = None) -> None:
         """Compile the Fixer MCP Go server binary without host path leakage.
 
         The target platform decides GOOS/GOARCH, so a Linux release can be
@@ -289,11 +290,17 @@ class ReleaseAssembler:
         build_env["GOOS"] = target_goos
         build_env["GOARCH"] = target_goarch
         build_env["CGO_ENABLED"] = "0"
+        rev = source_revision if source_revision is not None else get_git_revision(self.repo_root)
+        ldflags = (
+            f"-s -w "
+            f"-X main.fixerMCPReleaseVersion={self.version} "
+            f"-X main.fixerMCPSourceRevision={rev}"
+        )
         cmd = [
             "go",
             "build",
             "-trimpath",
-            "-ldflags=-s -w",
+            f"-ldflags={ldflags}",
             "-o",
             target_binary_path,
             ".",
@@ -382,9 +389,12 @@ class ReleaseAssembler:
             os.makedirs(bin_stage, exist_ok=True)
             os.makedirs(control_plane_stage, exist_ok=True)
 
+            # Compute canonical source revision once so binary provenance and descriptor match exactly
+            source_revision = get_git_revision(self.repo_root)
+
             # 1. Build and stage fixer_mcp binary
             binary_dest = os.path.join(fixer_mcp_stage, "fixer_mcp")
-            self.build_go_binary(binary_dest)
+            self.build_go_binary(binary_dest, source_revision=source_revision)
             assert_not_dangerous("fixer_mcp/fixer_mcp")
 
             # 1b. Build and stage the unified console. Keep fixerctl as a
@@ -504,14 +514,14 @@ class ReleaseAssembler:
                     os.makedirs(os.path.dirname(dest_file), exist_ok=True)
                     shutil.copy2(src_abs, dest_file)
 
-            # 8. Collect and stage scripts/install for standalone payload bootstrap
-            scripts_install_stage = os.path.join(staging_temp, "scripts", "install")
-            scripts_install_src = os.path.join(self.repo_root, "scripts", "install")
-            if os.path.isdir(scripts_install_src):
-                install_script_files = collect_allowed_files(scripts_install_src, is_allowed_install_script_file)
-                for src_abs, rel_path in install_script_files:
-                    assert_not_dangerous(f"scripts/install/{rel_path}")
-                    dest_file = os.path.join(scripts_install_stage, rel_path)
+            # 8. Collect and stage allowed scripts (e.g. scripts/pi_probe.py, scripts/install) for standalone payload
+            scripts_stage = os.path.join(staging_temp, "scripts")
+            scripts_src = os.path.join(self.repo_root, "scripts")
+            if os.path.isdir(scripts_src):
+                script_files = collect_allowed_files(scripts_src, is_allowed_script_file)
+                for src_abs, rel_path in script_files:
+                    assert_not_dangerous(f"scripts/{rel_path}")
+                    dest_file = os.path.join(scripts_stage, rel_path)
                     os.makedirs(os.path.dirname(dest_file), exist_ok=True)
                     shutil.copy2(src_abs, dest_file)
                     os.chmod(dest_file, 0o755)
@@ -532,7 +542,6 @@ class ReleaseAssembler:
             )
 
             # 11. Create and validate format=1 descriptor
-            source_revision = get_git_revision(self.repo_root)
             min_os = "macOS 12.0" if self.platform_id.startswith("darwin_") else "Linux (glibc 2.31+)"
             descriptor = create_release_descriptor(
                 version=self.version,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -347,6 +348,128 @@ def _resolve_fixer_db_path(cwd: Path, *, repo_root: Path) -> Path:
     _ensure_state_parent(preferred)
     _migrate_stray_bare_db(preferred, cwd=cwd, repo_root=repo_root)
     return preferred
+
+
+def _resolve_fixer_db_path_readonly(cwd: Path, *, repo_root: Path) -> tuple[Path, str]:
+    """Side-effect-free mirror of :func:`_resolve_fixer_db_path`.
+
+    Diagnostics must never migrate a stray or touch either database: this
+    returns the path the launcher WOULD pick together with its authority
+    source, leaving both databases exactly as they are.
+    """
+    from_env = os.environ.get(FIXER_DB_PATH_ENV)
+    if from_env and from_env.strip():
+        env_path = Path(from_env.strip()).expanduser()
+        if not env_path.is_absolute():
+            env_path = repo_root / env_path
+        return env_path.resolve(), "explicit_override"
+    project_db = (repo_root / "fixer_mcp" / PRIMARY_FIXER_DB_FILENAME).resolve()
+    if project_db.is_file():
+        return project_db, "checkout_project"
+    for candidate in _host_canonical_state_db_candidates():
+        if candidate.is_file():
+            return candidate, "host_canonical"
+    return _host_canonical_state_db_candidates()[0], "host_canonical"
+
+
+def _db_fingerprint(path: Path) -> dict[str, Any]:
+    """Read-only content fingerprint of one database (never writes to it)."""
+    resolved = path.expanduser().resolve()
+    fingerprint: dict[str, Any] = {"path": str(resolved), "exists": resolved.is_file()}
+    if not resolved.is_file():
+        return fingerprint
+    fingerprint["size_bytes"] = resolved.stat().st_size
+    schema_parts: list[str] = []
+    counts: dict[str, int | None] = {}
+    try:
+        conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True, timeout=WIRE_DB_BUSY_TIMEOUT_MS / 1000)
+        try:
+            for name, ddl in conn.execute(
+                "SELECT COALESCE(name, ''), COALESCE(sql, '') FROM sqlite_master ORDER BY type, name"
+            ):
+                schema_parts.append(f"{name}\0{ddl or ''}")
+            for table in ("project", "session", "backlog_item", "hands_instruction"):
+                try:
+                    counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except sqlite3.Error:
+                    counts[table] = None
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        fingerprint["read_error"] = f"{type(exc).__name__}: {exc}"
+        return fingerprint
+    fingerprint["schema_sha256"] = hashlib.sha256("\n".join(schema_parts).encode("utf-8")).hexdigest()[:16]
+    fingerprint["counts"] = counts
+    return fingerprint
+
+
+def _fingerprint_divergence(
+    left_name: str,
+    left: dict[str, Any],
+    right_name: str,
+    right: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+    if left.get("schema_sha256") != right.get("schema_sha256"):
+        lines.append(
+            f"schema divergence: {left_name}={left.get('schema_sha256')} {right_name}={right.get('schema_sha256')}"
+        )
+    left_counts = left.get("counts") or {}
+    right_counts = right.get("counts") or {}
+    for table in ("project", "session", "backlog_item", "hands_instruction"):
+        if left_counts.get(table) != right_counts.get(table):
+            lines.append(
+                f"data divergence in {table}: {left_name}={left_counts.get(table)} {right_name}={right_counts.get(table)}"
+            )
+    return lines
+
+
+def describe_db_authority(cwd: Path, *, repo_root: Path) -> dict[str, Any]:
+    """Explicit DB authority plus accidental-split diagnostics.
+
+    The host canonical state database is the default authority; an intentional
+    ``FIXER_DB_PATH`` override (tests/dev/probes) is sanctioned and respected.
+    A bare ``fixer.db`` next to the cwd or checkout while another database is
+    live is an accidental per-cwd split: both databases are preserved verbatim
+    and reported with separate fingerprints and data/canon divergence. Nothing
+    is merged, no IDs are rewritten, and no checkout history is deleted.
+    """
+    effective, source = _resolve_fixer_db_path_readonly(cwd, repo_root=repo_root)
+    stray = _find_stray_bare_db(cwd, repo_root=repo_root)
+    host_canonical = next(
+        (candidate for candidate in _host_canonical_state_db_candidates() if candidate.is_file()),
+        None,
+    )
+    fingerprints: dict[str, dict[str, Any]] = {"effective": _db_fingerprint(effective)}
+    divergence: list[str] = []
+    accidental_split = False
+    if stray is not None and stray != effective:
+        stray_fingerprint = _db_fingerprint(stray)
+        fingerprints["stray"] = stray_fingerprint
+        accidental_split = True
+        divergence.extend(
+            _fingerprint_divergence("effective", fingerprints["effective"], "stray", stray_fingerprint)
+        )
+    if host_canonical is not None and host_canonical != effective and host_canonical != stray:
+        canonical_fingerprint = _db_fingerprint(host_canonical)
+        fingerprints["host_canonical"] = canonical_fingerprint
+        divergence.extend(
+            _fingerprint_divergence(
+                "effective", fingerprints["effective"], "host_canonical", canonical_fingerprint
+            )
+        )
+    return {
+        "effective_db": str(effective),
+        "effective_source": source,
+        "sanctioned_override": source == "explicit_override",
+        "host_canonical_db": str(host_canonical) if host_canonical is not None else "",
+        "stray_db": str(stray) if stray is not None else "",
+        "accidental_split": accidental_split,
+        "fingerprints": fingerprints,
+        "data_divergence": divergence,
+        "preserved": True,
+        "note": "both databases preserved verbatim; no merge, no ID rewrites, no history deletion",
+    }
 
 
 def _default_project_name(cwd: Path) -> str:

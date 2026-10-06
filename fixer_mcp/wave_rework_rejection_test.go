@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -550,5 +553,669 @@ func TestFailedWaveWorkerRequeuesViaSetSessionStatusWithReason(t *testing.T) {
 		if historicalStatus != workerStatusExited {
 			t.Fatalf("historical process row must stay terminal, got %q", historicalStatus)
 		}
+	}
+}
+
+// Regression for host feedback 117 (race 2, wave 869): on a partially_failed wave,
+// a worker session that reached review while the worker row was still running
+// must be atomically requeued by set_session_status(pending) for rework.
+// The requeue must terminate any live running process, clear worker_process linkage
+// and due counts, preserve the raw report in session.report, deliver the updated task,
+// and not be falsely failed by subsequent wait loops.
+func TestPartiallyFailedWaveWorkerInReviewRequeuesAtomicallyAndClearsRunningProcess(t *testing.T) {
+	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
+	defer func() {
+		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
+	}()
+	DefaultQuotaGate = nil
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	// Create wave with two sessions
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 2},
+		BaseRef:    "HEAD",
+		Reason:     "partially failed wave rework test",
+	})
+	if err != nil {
+		t.Fatalf("create test wave: %v", err)
+	}
+	markTestWaveRunningWithWorktrees(t, testDB, repoDir, created)
+
+	worker1 := created.Workers[0]
+	worker2 := created.Workers[1]
+	globalSession2, _ := globalSessionIDFromProjectScoped(worker2.SessionId, 1)
+
+	// Worker 1 failed previously; wave is in partially_failed status
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?, terminal_outcome = ?, failure_reason = 'compilation failed', terminal_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		parallelWaveWorkerStatusFailed,
+		parallelWaveWorkerStatusFailed,
+		worker1.Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshParallelWaveAggregateStatus(created.WaveId, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 2 session reached review and has a report, but worker row is STILL 'running'
+	testReport := `{"files_changed":["a.go"],"commands_run":["go test"],"checks_run":["pass"],"blockers":[]}`
+	if _, err := testDB.Exec("UPDATE session SET status = 'review', report = ? WHERE id = ?", testReport, globalSession2); err != nil {
+		t.Fatal(err)
+	}
+	// Record an active mock process for worker 2
+	procRes, err := testDB.Exec(
+		`INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status, parallel_wave_id, parallel_wave_worker_id, updated_at)
+		 VALUES (1, ?, 99999, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		globalSession2, workerStatusRunning, created.WaveId, worker2.Id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	procID, _ := procRes.LastInsertId()
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?, worker_process_id = ?, retry_attempt_count = 2, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		parallelWaveWorkerStatusRunning, int(procID), worker2.Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fixer appends instructions to session 2
+	if _, _, err := UpdateTask(context.Background(), nil, UpdateTaskInput{
+		SessionId:           worker2.SessionId,
+		AppendedDescription: "Rework: fix race condition in wave worker",
+	}); err != nil {
+		t.Fatalf("update_task failed: %v", err)
+	}
+
+	// Fixer rejects review delivery and sends worker 2 back for rework
+	callRes, out, err := SetSessionStatus(context.Background(), nil, SetSessionStatusInput{
+		SessionId: worker2.SessionId,
+		Status:    "pending",
+		Reason:    "rework required: fix race condition",
+	})
+	if err != nil {
+		t.Fatalf("set_session_status(pending) for review rework must succeed: %v", err)
+	}
+	if callRes != nil && callRes.IsError {
+		t.Fatalf("set_session_status returned error: %+v", callRes)
+	}
+	if out.NewStatus != "pending" || out.PreviousStatus != "review" {
+		t.Fatalf("unexpected output: %+v", out)
+	}
+
+	// Assertions on database state after requeue:
+	// 1. parallel_wave_worker row must be in retry_wait with 0 attempts and cleared linkage
+	var (
+		wStatus         string
+		wAttempts       int
+		wLinkageCleared bool
+		wTermCleared    bool
+		wRetryCause     string
+	)
+	if err := testDB.QueryRow(
+		`SELECT status, retry_attempt_count, worker_process_id IS NULL, terminal_at IS NULL, retry_cause
+		 FROM parallel_wave_worker WHERE id = ?`,
+		worker2.Id,
+	).Scan(&wStatus, &wAttempts, &wLinkageCleared, &wTermCleared, &wRetryCause); err != nil {
+		t.Fatal(err)
+	}
+	if wStatus != parallelWaveWorkerStatusRetryWait {
+		t.Fatalf("worker 2 status must be retry_wait, got %q", wStatus)
+	}
+	if wAttempts != 0 {
+		t.Fatalf("worker 2 retry_attempt_count must be reset to 0, got %d", wAttempts)
+	}
+	if !wLinkageCleared {
+		t.Fatalf("worker 2 worker_process_id must be NULL")
+	}
+	if !wTermCleared {
+		t.Fatalf("worker 2 terminal_at must be NULL")
+	}
+	if wRetryCause != "rework" {
+		t.Fatalf("worker 2 retry_cause must be 'rework', got %q", wRetryCause)
+	}
+
+	// 2. Old worker_process row must be marked stopped with stop_reason = 'rework requested'
+	var procStatus, procStopReason string
+	if err := testDB.QueryRow(
+		`SELECT status, stop_reason FROM worker_process WHERE id = ?`,
+		procID,
+	).Scan(&procStatus, &procStopReason); err != nil {
+		t.Fatal(err)
+	}
+	if procStatus != workerStatusStopped {
+		t.Fatalf("worker_process row status must be stopped, got %q", procStatus)
+	}
+	if procStopReason != "rework requested" {
+		t.Fatalf("worker_process stop_reason must be 'rework requested', got %q", procStopReason)
+	}
+
+	// 3. Raw old report in session table must be preserved
+	var savedReport string
+	if err := testDB.QueryRow("SELECT report FROM session WHERE id = ?", globalSession2).Scan(&savedReport); err != nil {
+		t.Fatal(err)
+	}
+	if savedReport != testReport {
+		t.Fatalf("raw old report must be preserved, got %q", savedReport)
+	}
+
+	// 4. Session task description must contain appended instructions
+	var savedTask string
+	if err := testDB.QueryRow("SELECT task_description FROM session WHERE id = ?", globalSession2).Scan(&savedTask); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(savedTask, "Rework: fix race condition in wave worker") {
+		t.Fatalf("task description must have updated instructions, got %q", savedTask)
+	}
+
+	// 5. Subsequent wait inspection must NOT mark the worker failed on the old process
+	normalizedRepoDir, err := normalizeProjectCWD(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshedWorker2 := testWaveWorkerBySession(t, wave, worker2.SessionId)
+	cand, terminal, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, refreshedWorker2)
+	if err != nil {
+		t.Fatalf("inspect worker 2: %v", err)
+	}
+	if terminal {
+		t.Fatalf("requeued worker 2 must not be terminal before retry launch, got candidate: %+v", cand)
+	}
+
+	// 6. Retry scheduler relaunches worker 2 in its recorded worktree
+	var capturedArgs [][]string
+	installFakeWaveWorkerLauncher(t, "", &capturedArgs)
+	if err := processParallelWaveWorkerRetries(context.Background(), normalizedRepoDir, wave, time.Second); err != nil {
+		t.Fatalf("relaunch rework worker: %v", err)
+	}
+	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaunchedWorker2 := testWaveWorkerBySession(t, wave, worker2.SessionId)
+	if relaunchedWorker2.Status != parallelWaveWorkerStatusRunning || relaunchedWorker2.RetryAttemptCount != 1 {
+		t.Fatalf("reworked worker must reach running with attempt 1, got %+v", relaunchedWorker2)
+	}
+}
+
+// Regression for host feedback 116 (race 1): interrupted serial launch leaves some
+// workers in 'worktree_ready' and an in-flight worker in 'launching' with missing FK.
+// Wait must not falsely fail worktree_ready workers with 'worker process linkage missing'
+// and must not majority-pause; missing durable worker_process rows must be recovered atomically;
+// and worktree_ready workers must be claimed and launched without duplicates.
+func TestInterruptedSerialLaunchWithWorktreeReadyWorkersRecoversAndRelaunchesWithoutDuplicates(t *testing.T) {
+	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
+	defer func() {
+		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
+	}()
+	DefaultQuotaGate = nil
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+
+	// Seed 3 extra sessions to have 5 workers total
+	for i := 3; i <= 5; i++ {
+		if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task', 'pending')`); err != nil {
+			t.Fatalf("seed session %d: %v", i, err)
+		}
+	}
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 2, 3, 4, 5},
+		BaseRef:    "HEAD",
+		Reason:     "interrupted serial launch test",
+	})
+	if err != nil {
+		t.Fatalf("create test wave: %v", err)
+	}
+
+	// Prepare worktrees for all 5 workers
+	normalizedRepoDir, err := normalizeProjectCWD(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range created.Workers {
+		absWorktreePath, err := resolveParallelWaveWorktreePath(repoDir, worker.WorktreePath)
+		if err != nil {
+			t.Fatalf("resolve worker worktree: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(absWorktreePath), 0o755); err != nil {
+			t.Fatalf("prepare worktree parent: %v", err)
+		}
+		runGitTestCommand(t, repoDir, "worktree", "add", "-b", worker.BranchName, absWorktreePath, created.BaseSha)
+		if _, err := testDB.Exec("UPDATE parallel_wave_worker SET status = ? WHERE id = ?", parallelWaveWorkerStatusWorktreeReady, worker.Id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Simulate interrupted serial launch:
+	// Worker 1: running with valid worker_process
+	// Worker 2: in 'launching' with unlinked worker_process_id (0/NULL), but worker_process row exists (like session 695 / process 4200), and session in 'review'
+	// Workers 3, 4, 5: untouched in 'worktree_ready'
+	globalSession1, _ := globalSessionIDFromProjectScoped(created.Workers[0].SessionId, 1)
+	globalSession2, _ := globalSessionIDFromProjectScoped(created.Workers[1].SessionId, 1)
+
+	// Worker 1 process
+	proc1, err := testDB.Exec(
+		`INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status, parallel_wave_id, parallel_wave_worker_id, updated_at)
+		 VALUES (1, ?, 11111, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		globalSession1, workerStatusRunning, created.WaveId, created.Workers[0].Id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc1ID, _ := proc1.LastInsertId()
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker SET status = ?, worker_process_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		parallelWaveWorkerStatusRunning, int(proc1ID), created.Workers[0].Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 2: process 4200 exists in worker_process with exact matching identity,
+	// but parallel_wave_worker.worker_process_id is NULL and status is 'launching',
+	// and session is in 'review' with a report.
+	proc2, err := testDB.Exec(
+		`INSERT INTO worker_process (id, project_id, session_id, pid, launch_epoch, status, parallel_wave_id, parallel_wave_worker_id, updated_at)
+		 VALUES (4200, 1, ?, 22222, 1, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		globalSession2, workerStatusExited, created.WaveId, created.Workers[1].Id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = proc2
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker SET status = ?, worker_process_id = NULL, launch_epoch = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		parallelWaveWorkerStatusLaunching, created.Workers[1].Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testDB.Exec(
+		"UPDATE session SET status = 'review', report = '{\"files_changed\":[\"b.go\"],\"commands_run\":[\"go test\"],\"checks_run\":[\"ok\"],\"blockers\":[]}' WHERE id = ?",
+		globalSession2,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Workers 3, 4, 5 stay in worktree_ready
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. inspectParallelWaveWorkerForWait for workers 3, 4, 5 must NOT fail them!
+	for _, w := range wave.Workers[2:] {
+		cand, term, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, w)
+		if err != nil {
+			t.Fatalf("inspect worktree_ready worker %d failed: %v", w.SessionId, err)
+		}
+		if term {
+			t.Fatalf("worktree_ready worker %d must be non-terminal (queued never started), got: %+v", w.SessionId, cand)
+		}
+	}
+
+	// 2. inspectParallelWaveWorkerForWait for worker 2 must recover process 4200 atomically
+	// and transition cleanly to review_ready
+	cand2, term2, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, wave.Workers[1])
+	if err != nil {
+		t.Fatalf("inspect worker 2: %v", err)
+	}
+	if !term2 || cand2.TerminalCondition != "review_ready" {
+		t.Fatalf("worker 2 must recover process and reach review_ready, got term=%v cond=%q", term2, cand2.TerminalCondition)
+	}
+	var recoveredPID int
+	if err := testDB.QueryRow("SELECT worker_process_id FROM parallel_wave_worker WHERE id = ?", wave.Workers[1].Id).Scan(&recoveredPID); err != nil {
+		t.Fatal(err)
+	}
+	if recoveredPID != 4200 {
+		t.Fatalf("expected recovered worker_process_id=4200, got %d", recoveredPID)
+	}
+
+	// 3. scheduleWorktreeReadyWaveWorkers claims and launches workers 3, 4, 5
+	var capturedArgs [][]string
+	installFakeWaveWorkerLauncher(t, "", &capturedArgs)
+	if err := scheduleWorktreeReadyWaveWorkers(context.Background(), normalizedRepoDir, wave, 1, 5*time.Second); err != nil {
+		t.Fatalf("scheduleWorktreeReadyWaveWorkers failed: %v", err)
+	}
+
+	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range wave.Workers[2:] {
+		if w.Status != parallelWaveWorkerStatusRunning {
+			t.Fatalf("worktree_ready worker %d must have been launched, got status %q", w.SessionId, w.Status)
+		}
+		if w.WorkerProcessId <= 0 {
+			t.Fatalf("worker %d must have valid worker_process_id after launch", w.SessionId)
+		}
+	}
+
+	// Calling scheduleWorktreeReadyWaveWorkers again must be an idempotent no-op (no duplicate launches)
+	launchCountBefore := len(capturedArgs)
+	if err := scheduleWorktreeReadyWaveWorkers(context.Background(), normalizedRepoDir, wave, 1, 5*time.Second); err != nil {
+		t.Fatalf("second scheduleWorktreeReadyWaveWorkers failed: %v", err)
+	}
+	if len(capturedArgs) != launchCountBefore {
+		t.Fatalf("subsequent schedule call must not double launch workers, had %d, now %d", launchCountBefore, len(capturedArgs))
+	}
+
+	// Wave must not be in majority pause
+	if err := refreshParallelWaveAggregateStatus(created.WaveId, 1); err != nil {
+		t.Fatal(err)
+	}
+	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wave.ControlState == parallelWaveControlPausedForArchitect {
+		t.Fatalf("interrupted launch must not cause wave majority pause: %s", wave.ControlReason)
+	}
+}
+
+// Regression for host feedback 116 (race 1 WIP metadata recovery): when serial launch
+// is interrupted after the launcher writes worker_metadata-*.json and headless/launcher logs,
+// but before worker_process row is persisted or linked to parallel_wave_worker,
+// wait inspection and scheduling must recover the matching identity plus metadata atomically
+// from disk artifacts without binding arbitrary processes.
+func TestInterruptedLaunchWIPMetadataRecovery(t *testing.T) {
+	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
+	defer func() {
+		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
+	}()
+	DefaultQuotaGate = nil
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 2},
+		BaseRef:    "HEAD",
+		Reason:     "WIP metadata recovery test",
+	})
+	if err != nil {
+		t.Fatalf("create test wave: %v", err)
+	}
+
+	normalizedRepoDir, err := normalizeProjectCWD(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker1 := created.Workers[0]
+	globalSession1, err := globalSessionIDFromProjectScoped(worker1.SessionId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	absWorktreePath, err := resolveParallelWaveWorktreePath(repoDir, worker1.WorktreePath)
+	if err != nil {
+		t.Fatalf("resolve worker worktree: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(absWorktreePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repoDir, "worktree", "add", "-b", worker1.BranchName, absWorktreePath, created.BaseSha)
+
+	// Simulate interrupted launch:
+	// Worker 1 is in 'launching', worker_process_id is NULL, worker_metadata_path is empty.
+	// But the launcher has already created the artifact dir and written worker_metadata-*.json,
+	// headless-*.log, and launcher-*.log on disk.
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker
+		 SET status = ?, worker_process_id = NULL, worker_metadata_path = '', headless_log_path = '', launcher_log_path = '', updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		parallelWaveWorkerStatusLaunching, worker1.Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	artifactDir := filepath.Join(normalizedRepoDir, ".codex", "netrunner_wave_artifacts", fmt.Sprintf("wave-%d", created.WaveId), fmt.Sprintf("session-%d", worker1.SessionId))
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaFile := filepath.Join(artifactDir, "worker_metadata-12345.json")
+	headlessFile := filepath.Join(artifactDir, "headless-codex-12345.log")
+	launcherFile := filepath.Join(artifactDir, "launcher-12345.log")
+	metaJSON := fmt.Sprintf(`{"worker_pid": %d, "session_id": %d, "backend": "codex", "headless_log_path": %q}`, os.Getpid(), globalSession1, headlessFile)
+	if err := os.WriteFile(metaFile, []byte(metaJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(headlessFile, []byte("headless output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcherFile, []byte("launcher output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. inspectParallelWaveWorkerForWait must recover the matching process and metadata atomically from disk artifacts
+	// Since process is alive (os.Getpid()), it must be running and non-terminal.
+	cand, term, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, wave.Workers[0])
+	if err != nil {
+		t.Fatalf("inspect worker 1: %v", err)
+	}
+	if term {
+		t.Fatalf("active recovered worker must be non-terminal while running, got term=%v cond=%q", term, cand.TerminalCondition)
+	}
+
+	var (
+		recoveredPID      int
+		recoveredStatus   string
+		recoveredMetaPath string
+		recoveredHeadless string
+		recoveredLauncher string
+	)
+	if err := testDB.QueryRow(
+		`SELECT COALESCE(worker_process_id, 0), status, worker_metadata_path, headless_log_path, launcher_log_path
+		 FROM parallel_wave_worker WHERE id = ?`,
+		worker1.Id,
+	).Scan(&recoveredPID, &recoveredStatus, &recoveredMetaPath, &recoveredHeadless, &recoveredLauncher); err != nil {
+		t.Fatal(err)
+	}
+	if recoveredPID <= 0 {
+		t.Fatalf("worker 1 worker_process_id must be recovered from WIP metadata, got %d", recoveredPID)
+	}
+	if recoveredStatus != parallelWaveWorkerStatusRunning {
+		t.Fatalf("worker 1 status must be running, got %q", recoveredStatus)
+	}
+	if recoveredMetaPath != metaFile {
+		t.Fatalf("expected worker_metadata_path %q, got %q", metaFile, recoveredMetaPath)
+	}
+	if recoveredHeadless != headlessFile {
+		t.Fatalf("expected headless_log_path %q, got %q", headlessFile, recoveredHeadless)
+	}
+	if recoveredLauncher != launcherFile {
+		t.Fatalf("expected launcher_log_path %q, got %q", launcherFile, recoveredLauncher)
+	}
+
+	// Verify worker_process row exists with pid os.Getpid()
+	var procPID int
+	var procSessionID int
+	if err := testDB.QueryRow("SELECT pid, session_id FROM worker_process WHERE id = ?", recoveredPID).Scan(&procPID, &procSessionID); err != nil {
+		t.Fatal(err)
+	}
+	if procPID != os.Getpid() || procSessionID != globalSession1 {
+		t.Fatalf("expected recovered process pid %d session %d, got pid %d session %d", os.Getpid(), globalSession1, procPID, procSessionID)
+	}
+	if cand.Worker.WorkerProcessId != recoveredPID {
+		t.Fatalf("candidate worker must have recovered process id %d, got %d", recoveredPID, cand.Worker.WorkerProcessId)
+	}
+
+	// 2. When session reaches review, worker reaches review_ready
+	if _, err := testDB.Exec(
+		"UPDATE session SET status = 'review', report = '{\"files_changed\":[\"a.go\"],\"commands_run\":[\"go test\"],\"checks_run\":[\"pass\"],\"blockers\":[]}' WHERE id = ?",
+		globalSession1,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Mark process stopped/exited so wait inspection can finalize review
+	if _, err := testDB.Exec(
+		"UPDATE worker_process SET status = ?, pid = 0, stop_reason = 'process exited', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		workerStatusExited, recoveredPID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candReview, termReview, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, wave.Workers[0])
+	if err != nil {
+		t.Fatalf("inspect worker 1 review: %v", err)
+	}
+	if !termReview || candReview.TerminalCondition != "review_ready" {
+		t.Fatalf("worker 1 must reach review_ready, got term=%v cond=%q", termReview, candReview.TerminalCondition)
+	}
+}
+
+// Regression for host feedback 116 (race 1 queued vs dead spawned): correctly distinguish
+// queued workers that never started (worktree_ready or unspawned launching) from dead spawned
+// workers (process started, failed, and exited). Queued workers are safely scheduled/relaunched;
+// dead spawned workers are finalized as failed and never falsely treated as unstarted.
+func TestInterruptedLaunchDistinguishesQueuedNeverStartedFromDeadSpawned(t *testing.T) {
+	originalDB, originalRole, originalProjectID, originalExecCommand := db, authorizedRole, authorizedProjectId, execCommand
+	originalQuotaGate := DefaultQuotaGate
+	defer func() {
+		db, authorizedRole, authorizedProjectId, execCommand = originalDB, originalRole, originalProjectID, originalExecCommand
+		DefaultQuotaGate = originalQuotaGate
+	}()
+	DefaultQuotaGate = nil
+
+	repoDir := setupCleanGitRepo(t)
+	testDB := setupParallelWaveTestDB(t, repoDir)
+	defer testDB.Close()
+	db, authorizedRole, authorizedProjectId = testDB, "fixer", 1
+
+	// Seed 3 sessions: worker 1 (queued never started), worker 2 (dead spawned), worker 3 (stalled launching)
+	for i := 3; i <= 3; i++ {
+		if _, err := testDB.Exec(`INSERT INTO session (project_id, task_description, status) VALUES (1, 'Task 3', 'pending')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, created, err := CreateNetrunnerWave(context.Background(), nil, CreateNetrunnerWaveInput{
+		SessionIds: []int{1, 2, 3},
+		BaseRef:    "HEAD",
+		Reason:     "queued vs dead spawned test",
+	})
+	if err != nil {
+		t.Fatalf("create test wave: %v", err)
+	}
+
+	normalizedRepoDir, err := normalizeProjectCWD(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range created.Workers {
+		absWorktreePath, err := resolveParallelWaveWorktreePath(repoDir, worker.WorktreePath)
+		if err != nil {
+			t.Fatalf("resolve worker worktree: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(absWorktreePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitTestCommand(t, repoDir, "worktree", "add", "-b", worker.BranchName, absWorktreePath, created.BaseSha)
+	}
+
+	// Worker 1: worktree_ready (queued never started)
+	if _, err := testDB.Exec("UPDATE parallel_wave_worker SET status = ? WHERE id = ?", parallelWaveWorkerStatusWorktreeReady, created.Workers[0].Id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 2: dead spawned (process was spawned, exited with failure, session stayed pending)
+	globalSession2, _ := globalSessionIDFromProjectScoped(created.Workers[1].SessionId, 1)
+	procRes, err := testDB.Exec(
+		`INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, status, stop_reason, parallel_wave_id, parallel_wave_worker_id, updated_at)
+		 VALUES (1, ?, 44444, 1, ?, 'process exited', ?, ?, CURRENT_TIMESTAMP)`,
+		globalSession2, workerStatusExited, created.WaveId, created.Workers[1].Id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc2ID, _ := procRes.LastInsertId()
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker SET status = ?, worker_process_id = ?, launch_epoch = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		parallelWaveWorkerStatusRunning, int(proc2ID), created.Workers[1].Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker 3: stalled launching with no process and no WIP metadata, older than deferredLaunchTimeout
+	oldTime := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := testDB.Exec(
+		`UPDATE parallel_wave_worker SET status = ?, worker_process_id = NULL, updated_at = ? WHERE id = ?`,
+		parallelWaveWorkerStatusLaunching, oldTime, created.Workers[2].Id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	wave, err := fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Worker 1 must be non-terminal (queued never started)
+	cand1, term1, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, wave.Workers[0])
+	if err != nil {
+		t.Fatalf("inspect worker 1: %v", err)
+	}
+	if term1 {
+		t.Fatalf("queued worker 1 must stay non-terminal, got %+v", cand1)
+	}
+
+	// 2. Worker 2 must be terminal failed (dead spawned), NOT treated as queued
+	cand2, term2, err := inspectParallelWaveWorkerForWait(normalizedRepoDir, wave, wave.Workers[1])
+	if err != nil {
+		t.Fatalf("inspect worker 2: %v", err)
+	}
+	if !term2 || cand2.TerminalCondition != "failed" {
+		t.Fatalf("dead spawned worker 2 must reach terminal condition 'failed', got term=%v cond=%q", term2, cand2.TerminalCondition)
+	}
+
+	// 3. Worker 3 (stalled launching) must be recovered back to worktree_ready by scheduleWorktreeReadyWaveWorkers
+	var capturedArgs [][]string
+	installFakeWaveWorkerLauncher(t, "", &capturedArgs)
+	if err := scheduleWorktreeReadyWaveWorkers(context.Background(), normalizedRepoDir, wave, 1, 5*time.Second); err != nil {
+		t.Fatalf("scheduleWorktreeReadyWaveWorkers failed: %v", err)
+	}
+
+	wave, err = fetchNetrunnerWaveSnapshot(created.WaveId, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Worker 1 and Worker 3 should now be launched to running
+	w1 := testWaveWorkerBySession(t, wave, created.Workers[0].SessionId)
+	w3 := testWaveWorkerBySession(t, wave, created.Workers[2].SessionId)
+	if w1.Status != parallelWaveWorkerStatusRunning || w1.WorkerProcessId <= 0 {
+		t.Fatalf("worker 1 must be launched to running, got status=%q proc=%d", w1.Status, w1.WorkerProcessId)
+	}
+	if w3.Status != parallelWaveWorkerStatusRunning || w3.WorkerProcessId <= 0 {
+		t.Fatalf("worker 3 must be recovered and launched to running, got status=%q proc=%d", w3.Status, w3.WorkerProcessId)
 	}
 }

@@ -110,6 +110,7 @@ type Snapshot struct {
 
 	// Native selection pools for the work screens.
 	MCPPool           []MCPServer
+	ProjectAllowedMCP []string
 	HandsMCP          []string
 	DocPool           []ProjectDoc
 	HandsDocs         []int
@@ -235,11 +236,23 @@ func Inspect(ctx context.Context, opts Options) Snapshot {
 // canonical document tree and the documents currently proposed for Руки.
 // Individual failures are ignored so one broken view cannot blank the screen.
 func (result *Snapshot) loadSelectionPools(client *stdioClient) {
+	var allMCP struct {
+		Servers []MCPServer `json:"servers"`
+	}
+	if err := client.callTool("list_mcp_servers", map[string]any{"include_all": true}, &allMCP); err == nil && len(allMCP.Servers) > 0 {
+		result.MCPPool = allMCP.Servers
+	}
 	var projectMCP struct {
 		Servers []MCPServer `json:"servers"`
 	}
 	if err := client.callTool("get_project_mcp_servers", map[string]any{}, &projectMCP); err == nil {
-		result.MCPPool = projectMCP.Servers
+		if len(result.MCPPool) == 0 {
+			result.MCPPool = projectMCP.Servers
+		}
+		result.ProjectAllowedMCP = make([]string, 0, len(projectMCP.Servers))
+		for _, s := range projectMCP.Servers {
+			result.ProjectAllowedMCP = append(result.ProjectAllowedMCP, s.Name)
+		}
 	}
 	var handsMCP struct {
 		Names []string `json:"mcp_server_names"`
@@ -265,6 +278,54 @@ func (result *Snapshot) loadSelectionPools(client *stdioClient) {
 	if err := client.callTool("list_hands_instructions", map[string]any{"limit": 5}, &instructions); err == nil {
 		result.HandsInstructions = instructions.Instructions
 	}
+}
+
+func callFixerTool(ctx context.Context, opts Options, toolName string, args map[string]any, out any) error {
+	client, err := start(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer client.close()
+	if err := client.initialize(); err != nil {
+		return err
+	}
+	var auth struct {
+		Status string `json:"status"`
+	}
+	if err := client.callTool("assume_role", map[string]any{"role": "fixer", "cwd": opts.ProjectPath}, &auth); err != nil {
+		return fmt.Errorf("MCP project binding: %w", err)
+	}
+	if auth.Status != "success" {
+		return errors.New("MCP project binding was not accepted")
+	}
+	return client.callTool(toolName, args, out)
+}
+
+func SetProjectMCPServers(ctx context.Context, opts Options, names []string) error {
+	var out struct {
+		Status string `json:"status"`
+	}
+	return callFixerTool(ctx, opts, "set_project_mcp_servers", map[string]any{
+		"mcp_server_names": names,
+	}, &out)
+}
+
+func SetProjectHandsMCPServers(ctx context.Context, opts Options, names []string) error {
+	var out struct {
+		Status string `json:"status"`
+	}
+	return callFixerTool(ctx, opts, "set_project_hands_mcp_servers", map[string]any{
+		"mcp_server_names": names,
+	}, &out)
+}
+
+func SetProjectHandsDocs(ctx context.Context, opts Options, docIDs []int) error {
+	var out struct {
+		Status string `json:"status"`
+	}
+	return callFixerTool(ctx, opts, "set_project_hands_docs", map[string]any{
+		"project_doc_ids": docIDs,
+	}, &out)
 }
 
 // listFixerSessions reads recent Fixer sessions through the wire's read-only

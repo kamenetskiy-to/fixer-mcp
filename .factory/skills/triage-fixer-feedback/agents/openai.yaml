@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage Fixer Feedback"
+  short_description: "Find actionable cross-project Fixer MCP feedback and plan fixes"
+  default_prompt: "Use $triage-fixer-feedback to triage only current Fixer MCP feedback and prepare a source-attributed fix map."

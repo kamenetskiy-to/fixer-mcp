@@ -31,12 +31,12 @@ def _build_autonomous_netrunner_prompt(
         how_to_lines.append(f"- {name}: {guidance}")
     completion_lines = (
         [
-            "When the work is finished, submit the mandatory doc proposal and completion report, then stop without waking the Fixer from this worker.",
+            "When the work is finished, submit a doc proposal only if there is real canonical doc impact (explicit no-impact completion is allowed for verification/code-only work), submit the mandatory completion report, then stop without waking the Fixer from this worker.",
             "Do not call fixer_mcp.wake_fixer_autonomous for this wave-lifecycle worker; the wave-level wait/reviewer lifecycle is the completion signal.",
         ]
         if suppress_autonomous_wake
         else [
-            "When the work is finished and you have submitted your mandatory doc proposal and completion report, call the fixer_mcp tool `wake_fixer_autonomous` with the completed session id and a concise handoff summary.",
+            "When the work is finished, submit a doc proposal only if there is real canonical doc impact (explicit no-impact completion is allowed for verification/code-only work), submit the mandatory completion report, and then call the fixer_mcp tool `wake_fixer_autonomous` with the completed session id and a concise handoff summary.",
         ]
     )
     fixer_session_lines = (
@@ -115,7 +115,7 @@ def _build_wave_netrunner_prompt(
         "- Do not call fixer_mcp.wake_fixer_autonomous for this wave worker; the future wave-level wait loop resumes the Fixer.",
         *_implementation_test_discipline_lines(),
         "If the operator needs an out-of-band status update, use `fixer_mcp.send_operator_telegram_notification`; do not rely on a separate `telegram_notify` MCP for routine Fixer flows.",
-        "When the work is finished, submit the mandatory doc proposal and completion report, then stop without waking the Fixer from this worker.",
+        "When the work is finished, submit a doc proposal only if there is real canonical doc impact (explicit no-impact completion is allowed for verification/code-only work), submit the mandatory completion report, then stop without waking the Fixer from this worker.",
         "Use this compatibility session ID for checkout unless Architect explicitly overrides.",
     ]
     return "\n".join(lines)

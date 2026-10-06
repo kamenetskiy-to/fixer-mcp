@@ -278,8 +278,38 @@ def test_commandcode_manifest_validates_and_contains_mimo26_routes() -> None:
     assert manifest.reasoning.options == ["low", "medium", "high", "xhigh", "max"]
 
 
-def test_pi_adapter_resolves_gpt6_routes_and_preserves_mimo26() -> None:
+def test_pi_adapter_resolves_gpt6_routes_and_preserves_mimo26(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_config = {
+        "providers": {
+            "commandcode-team": {
+                "baseUrl": "https://api.commandcode.ai/provider/v1",
+                "api": "openai-completions",
+                "models": [
+                    {"id": "xiaomi/mimo-v2.6-pro"},
+                    {"id": "xiaomi/mimo-v2.6-flash"},
+                ],
+            },
+            "cmd-test": {
+                "baseUrl": "https://api.commandcode.ai/provider/v1",
+                "api": "openai-completions",
+                "models": [
+                    {"id": "xiaomi/mimo-v2.6-pro"},
+                    {"id": "xiaomi/mimo-v2.6-flash"},
+                ],
+            },
+        }
+    }
+    (tmp_path / "models.json").write_text(json.dumps(models_config), encoding="utf-8")
+    monkeypatch.setenv("PI_AGENT_HOME", str(tmp_path))
+
     adapter = PiBackendAdapter()
+
+    expected_normalized = {
+        "commandcode/xiaomi/mimo-v2.6-pro": "mimo-v2.6-pro",
+        "mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
+    }
 
     for route in (
         "openai-codex/gpt-6-sol",
@@ -289,6 +319,23 @@ def test_pi_adapter_resolves_gpt6_routes_and_preserves_mimo26() -> None:
         "opencode-personal/mimo-v2.6-pro",
         "commandcode/xiaomi/mimo-v2.6-flash",
         "commandcode/xiaomi/mimo-v2.6-pro",
+        "commandcode-team/xiaomi/mimo-v2.6-pro",
+        "cmd-test/xiaomi/mimo-v2.6-flash",
     ):
         assert route in adapter.model_options
-        assert adapter.normalize_model(route) == route
+        expected = expected_normalized.get(route, route)
+        assert adapter.normalize_model(route) == expected
+
+    # Verify generic default internal ID resolution (not mapped to private operator ID)
+    assert adapter._internal_model_id("commandcode/xiaomi/mimo-v2.6-pro") == "commandcode/xiaomi/mimo-v2.6-pro"
+    assert adapter._internal_model_id("commandcode/xiaomi/mimo-v2.6-flash") == "commandcode/xiaomi/mimo-v2.6-flash"
+    assert adapter._internal_model_id("mimo-v2.6-pro") == "commandcode/xiaomi/mimo-v2.6-pro"
+
+    # Verify explicitly registered named routes are preserved
+    assert adapter._internal_model_id("commandcode-team/xiaomi/mimo-v2.6-pro") == "commandcode-team/xiaomi/mimo-v2.6-pro"
+    assert adapter._internal_model_id("cmd-test/xiaomi/mimo-v2.6-flash") == "cmd-test/xiaomi/mimo-v2.6-flash"
+
+    # Unconfigured named route must fail closed
+    assert "commandcode-unknown/xiaomi/mimo-v2.6-pro" not in adapter.model_options
+    with pytest.raises(RuntimeError, match="Unsupported model"):
+        adapter.normalize_model("commandcode-unknown/xiaomi/mimo-v2.6-pro")

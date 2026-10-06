@@ -148,18 +148,16 @@ def load_project_hands_state(
             )
 
     lanes = (
-        ProjectHandsLane("commandcode", "commandcode/zai-org/glm-5.3-flash", "medium"),
-        ProjectHandsLane("codex", "gpt-5.6-luna", "high"),
-        ProjectHandsLane("claude", "kimi/k3", "high"),
-        ProjectHandsLane("kimi", "kimi-k3-256k", "default"),
-        ProjectHandsLane("antigravity", "Gemini 3.7 Flash", "medium"),
-        ProjectHandsLane("grok", "grok-4.6", "default"),
+        ProjectHandsLane("pi", "mimo-v2.6-pro", "high"),
+        ProjectHandsLane("codex", "gpt-6.1-sol", "high"),
+        ProjectHandsLane("grok", "grok-4.7", "high"),
+        ProjectHandsLane("antigravity", "gemini-3.8-flash", "high"),
     )
     return ProjectHandsState(
         project_id=project_id,
         display_name=str(actor_row[0] or "Руки"),
         authority_state=str(actor_row[1] or "disabled"),
-        default_lane=_canonical_hands_provider(str(actor_row[2] or "commandcode")),
+        default_lane=_canonical_hands_provider(str(actor_row[2] or "pi")),
         lanes=lanes,
     )
 

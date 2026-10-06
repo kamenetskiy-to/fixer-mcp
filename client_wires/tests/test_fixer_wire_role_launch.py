@@ -894,3 +894,44 @@ class LaunchOverseerFlowTests(unittest.TestCase):
         command = mock_call.call_args.args[0]
         self.assertEqual(command[:3], ["droid", "--resume", "droid-overseer-7"])
         self.assertEqual(mock_call.call_args.kwargs["cwd"], str(cwd))
+
+    def test_launch_fixer_presets_bypass_interactive_prompts(self) -> None:
+        callbacks = replace(
+            fixer_wire._role_launch_callbacks(),
+            assert_project_is_registered=lambda _cwd: None,
+            select_fixer_launch_action_interactive=lambda *_a, **_k: fixer_wire.FIXER_LAUNCH_NEW,
+            load_available_servers=lambda _cwd, **_k: (
+                {
+                    fixer_wire.FORCED_MCP_SERVER: {"command": "fixer-mcp"},
+                    "tavily": {"command": "tavily"},
+                },
+                {},
+                None,
+                None,
+            ),
+            launch_fresh_role_session=Mock(return_value=0),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp).resolve()
+            code = fixer_wire_role_launch.launch_fixer(
+                [],
+                launch_cwd=cwd,
+                dry_run=True,
+                preset_resume_latest=False,
+                preset_resume_session_id=None,
+                preset_backend="pi",
+                preset_model="mimo-v2.6-pro",
+                preset_reasoning="high",
+                preset_mcp="tavily",
+                Option=_DummyOption,
+                single_select_items=lambda *_a, **_k: None,
+                callbacks=callbacks,
+            )
+
+        self.assertEqual(code, 0)
+        callbacks.launch_fresh_role_session.assert_called_once()
+        kwargs = callbacks.launch_fresh_role_session.call_args.kwargs
+        self.assertEqual(kwargs["preset_backend"], "pi")
+        self.assertEqual(kwargs["preset_model"], "mimo-v2.6-pro")
+        self.assertEqual(kwargs["preset_reasoning"], "high")
+        self.assertEqual(kwargs["selected_mcp_names"], [fixer_wire.FORCED_MCP_SERVER, "tavily"])

@@ -73,27 +73,38 @@ Attached per wave at `create_netrunner_wave` / `launch_netrunner_wave` as
 
 ## Reader output parsing
 
-The transcript reader is still the approved one-shot `cmd` Flash call (never a
-nested Netrunner). The worker transcript is resolved by the recorded external
-session id only — CommandCode under `~/.commandcode/projects/<slug>/<id>.jsonl`,
-Pi under `~/.pi/agent/sessions/<dir>/<timestamp>_<id>.jsonl` — through the same
-lookup the public `get_netrunner_transcript_path` tool reports; an unresolved
-transcript is a visible diagnostic, never another session's file. Its stdout is
-parsed strictly:
+The transcript reader is Pi on the Architect's existing CommandCode Flash
+subscription, never a nested implementation Netrunner or a direct `cmd`
+reader. The portable route is `commandcode/xiaomi/mimo-v2.6-flash` using the
+already configured generic subscription; configuration and auth are reused,
+not replaced with a new paid API. Explicit named MiMo subscription routes for
+implementation workers are validated against actual configured Pi inventory,
+not hardcoded operator/account identifiers.
 
-- `cmd --print --output-format json` emits a JSONL event stream
-  (`{"type":"event","event":{...}}` lines and a terminal
-  `{"type":"result",...}` line). For a recognized event stream only the
-  terminal **successful** `result.finalText` is the overview; the fallback is
-  `run_end.result.finalText` when the terminal line is missing or empty.
-- A `subtype:"error"` result, a `run_error`, or `max_turns` turn-limit
-  truncation is recognized and fails closed — a truncated or failed run is
-  never presented as a complete overview.
-- A recognized event stream without a final overview fails closed. The event
-  stream, intermediate text, thinking, and tool output are never sent to the
-  judge.
-- Legitimate existing single-document JSON results (`result`/`text`/`output`/
-  `response`/`message`/`content` fields) and plain-text results stay supported.
+Fresh/resumed Pi runs register exact header IDs, cwd/time/attempt evidence and
+an append-only attempt manifest. Recovery uses those durable launch anchors
+when an old launcher omitted the ID; it never guesses an arbitrary newest file.
+The public transcript tool and System1 share proven identity resolution,
+including relevant continuation history. Contradictory or missing provenance
+fails as infrastructure, not as a content score.
+
+Every original JSONL range is read sequentially. Large histories are chunked,
+with contiguous byte/line/EOF coverage and per-chunk execution ledgers checked
+before judging. No 128-KiB head/tail or compressed index substitutes for original
+evidence. Execution-capacity limits fail visibly as infrastructure, never
+silently omit ranges. Only after full coverage is proven may the factual
+observations be compacted into the bounded final overview.
+
+Pi runs in an isolated cwd and agent directory with discovered extensions,
+project MCP, hooks, skills, context files and builtin bash/write/edit/read tools
+disabled. Its sole explicitly pinned `read_evidence` tool is restricted to the
+exact proven evidence paths. It has no Fixer/DB/lifecycle capability.
+
+Only a completed final assistant text from Pi's JSON event stream becomes the
+overview. Thinking, intermediate turns and tool results never reach Jev.
+Truncated, aborted, errored or mid-tool-execution runs fail closed. Durable run
+metadata records coverage, timing, redacted partial output and timeout errors;
+full secret-bearing argv/environment/auth files are never dumped.
 
 ## Judge payload (typed, size-bounded, stdin)
 
@@ -160,24 +171,25 @@ infrastructure failures, never content verdicts:
 
 ## Executors
 
-Both executors are bounded one-shot headless `cmd` CLI invocations (reader:
-10-minute timeout; Jev: 2-minute timeout; output captured) in the project runtime environment. They are not
-Netrunner sessions, and no homemade model HTTP API is ever called. Both send
-their full input on stdin — never on argv, where a transcript-sized prompt can
-exceed `ARG_MAX` — and run `cmd --print`, which reads that stdin.
+The reader uses restricted one-shot Pi executions (10-minute per-execution
+bound); Jev remains a bounded one-shot `cmd` call (2 minutes). They are review
+components, not Netrunner implementation sessions, and no homemade model HTTP
+API is called. Full inputs travel on stdin, never transcript-sized argv. The
+reader uses isolated capabilities; Jev receives only the bounded typed request.
 
 - Judge: `typesafe/jev` via `cmd -m typesafe/jev -p` with the typed request on
   stdin. Jev is not a chat model. The engine sends `state` plus one `noul`
   question per criterion, plus `stronger_but_different`. Jev returns
   probabilities. The engine applies the 0.75 / 0.5 rule itself.
-- Transcript reader: one-shot `cmd` with `xiaomi/mimo-v2.6-flash` and the
-  reader prompt plus transcript on stdin. It must not judge quality.
+- Transcript reader: Pi + existing CommandCode `xiaomi/mimo-v2.6-flash`, with
+  original transcript chunks on stdin and a pinned restricted evidence tool.
+  Coverage is verified before synthesis/judging. It must not judge quality.
 
 ## Default prompts
 
 ### Transcript reader (analyst) prompt
 
-> You are an independent transcript reader. Read the worker full session transcript and produce a FACTUAL overview of what actually happened. Do not judge quality. Sections: timeline with line references; commands actually executed and real outcomes; files actually modified; tests actually run and genuine results; errors, dead ends, reverts; a claims-vs-observed table against the worker final report (supported / partially / unsupported / not observable). Evidence over narration. If the transcript is missing or unreadable, say exactly what is missing. Stay under 1200 words.
+> You are an independent transcript reader. Read the worker full session transcript and produce a FACTUAL overview of what actually happened. Do not judge quality. Sections: timeline with line references; commands actually executed and real outcomes; files actually modified; tests actually run and genuine results; errors, dead ends, reverts; a claims-vs-observed table against the worker final report (supported / partially / unsupported / not observable). Evidence over narration. Read every original range and relevant continuation; if provenance or coverage is missing, report an infrastructure gap without inventing observations. Stay under 1200 words.
 
 ## Continuation text (failed check, budget remaining)
 

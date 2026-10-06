@@ -19,6 +19,7 @@ for a Hands lane on this model.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ from client_wires.backends.pi_adapter import (
 )
 
 LUNA = "openai-codex/gpt-5.6-luna"
-PI_DEFAULT_MODEL = "deepseek-v4.1-flash"
+PI_DEFAULT_MODEL = "mimo-v2.6-pro"
 
 
 @pytest.fixture
@@ -138,3 +139,55 @@ def test_stale_low_reasoning_for_deepseek_flux_is_corrected_not_crashed():
         fixer_wire_db._normalize_backend_reasoning(descriptor, "max", "deepseek-v4.1-flash")
         == "max"
     )
+
+
+def test_commandcode_mimo26_routes_and_aliases_reach_valid_pi_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_config = {
+        "providers": {
+            "commandcode-team": {
+                "baseUrl": "https://api.commandcode.ai/provider/v1",
+                "api": "openai-completions",
+                "models": [
+                    {"id": "xiaomi/mimo-v2.6-pro"},
+                    {"id": "xiaomi/mimo-v2.6-flash"},
+                ],
+            },
+            "cmd-test": {
+                "baseUrl": "https://api.commandcode.ai/provider/v1",
+                "api": "openai-completions",
+                "models": [
+                    {"id": "xiaomi/mimo-v2.6-pro"},
+                    {"id": "xiaomi/mimo-v2.6-flash"},
+                ],
+            },
+        }
+    }
+    (tmp_path / "models.json").write_text(json.dumps(models_config), encoding="utf-8")
+    monkeypatch.setenv("PI_AGENT_HOME", str(tmp_path))
+
+    adapter = PiBackendAdapter()
+
+    routes = (
+        ("mimo-v2.6-pro", "commandcode/xiaomi/mimo-v2.6-pro"),
+        ("commandcode/xiaomi/mimo-v2.6-pro", "commandcode/xiaomi/mimo-v2.6-pro"),
+        ("commandcode/xiaomi/mimo-v2.6-flash", "commandcode/xiaomi/mimo-v2.6-flash"),
+        ("mimo-v2.6-flash", "commandcode/xiaomi/mimo-v2.6-flash"),
+        ("commandcode-team/xiaomi/mimo-v2.6-pro", "commandcode-team/xiaomi/mimo-v2.6-pro"),
+        ("commandcode-team/xiaomi/mimo-v2.6-flash", "commandcode-team/xiaomi/mimo-v2.6-flash"),
+        ("cmd-test/xiaomi/mimo-v2.6-pro", "cmd-test/xiaomi/mimo-v2.6-pro"),
+        ("cmd-test/xiaomi/mimo-v2.6-flash", "cmd-test/xiaomi/mimo-v2.6-flash"),
+    )
+
+    for route_input, expected_internal in routes:
+        assert adapter._internal_model_id(route_input) == expected_internal
+        # Supports high, low, max
+        for reasoning in ("low", "high", "max"):
+            args = adapter.build_llm_args(SimpleNamespace(model=route_input, reasoning_effort=reasoning))
+            assert args == ["--model", expected_internal, "--thinking", reasoning]
+
+        # Does not support minimal
+        with pytest.raises(RuntimeError, match="does not support reasoning 'minimal'"):
+            adapter._validate_reasoning_for_model(route_input, "minimal")
+

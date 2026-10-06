@@ -289,7 +289,7 @@ func (r *Repository) SubmitHandsInstruction(ctx context.Context, projectID int, 
 	input.RequestedLane = strings.ToLower(strings.TrimSpace(input.RequestedLane))
 	input.RequestedModel = strings.TrimSpace(input.RequestedModel)
 	input.RequestedReasoning = strings.ToLower(strings.TrimSpace(input.RequestedReasoning))
-	if input.RequestedLane != "" && input.RequestedLane != "codex" && input.RequestedLane != "claude" && input.RequestedLane != "kimi-code" && input.RequestedLane != "antigravity" {
+	if input.RequestedLane != "" && input.RequestedLane != "pi" && input.RequestedLane != "codex" && input.RequestedLane != "grok" && input.RequestedLane != "antigravity" {
 		return HandsInstructionReceipt{}, fmt.Errorf("requested_lane is not registered")
 	}
 	input.IdempotencyKey = key

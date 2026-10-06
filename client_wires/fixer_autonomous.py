@@ -255,6 +255,57 @@ def _persist_detected_external_session_id(
     return resolved_external_session_id
 
 
+def _register_transcript_attempt_manifest(
+    cwd: Path,
+    *,
+    local_session_id: int,
+    global_session_id: int,
+    backend: str,
+    external_session_id: str | None,
+    launch_started_at: float,
+    headless_log_path: Path | None,
+    worker_pid: int,
+    worker_cwd: Path | None = None,
+) -> Path | None:
+    """Register one launch attempt in the durable append-only manifest (JSONL
+    files, no new DB schema): proven external id, launch/detection time, worker
+    pid, headless log, the worker cwd, and — for Pi — the full transcript
+    continuation evidence with id/cwd/time provenance for fresh and resumed
+    attempts. The evidence is recorded even when the external session id could
+    not be detected, so a detection failure can later be repaired from proven
+    files instead of becoming a missing-evidence block."""
+    resolved_external_session_id = (external_session_id or "").strip()
+    resolved_worker_cwd = Path(worker_cwd) if worker_cwd is not None else Path(cwd)
+    record: dict[str, Any] = {
+        "backend": backend,
+        "local_session_id": int(local_session_id),
+        "global_session_id": int(global_session_id),
+        "external_session_id": resolved_external_session_id,
+        "launch_started_at_epoch": float(launch_started_at),
+        "detected_at_epoch": time.time(),
+        "worker_pid": int(worker_pid or 0),
+        "headless_log_path": str(headless_log_path) if headless_log_path else "",
+        "worker_cwd": str(resolved_worker_cwd),
+    }
+    if backend == "pi":
+        if resolved_external_session_id:
+            record["transcripts"] = fixer_autonomous_transcripts._pi_transcript_attempt_evidence(
+                resolved_worker_cwd,
+                resolved_external_session_id,
+            )
+        else:
+            record["transcripts"] = fixer_autonomous_transcripts._pi_transcript_files_proven_for_cwd(
+                resolved_worker_cwd,
+                since_epoch=float(launch_started_at) - 60.0,
+            )
+    manifest_path = fixer_autonomous_transcripts.attempt_manifest_path(cwd, local_session_id, backend)
+    try:
+        fixer_autonomous_transcripts.append_attempt_manifest_record(manifest_path, record)
+    except OSError:
+        return None
+    return manifest_path
+
+
 def _positive_wave_int(name: str, value: int) -> int:
     return fixer_autonomous_wave._positive_wave_int(name, value)
 
@@ -501,6 +552,35 @@ def _wait_for_new_commandcode_session_id(
     )
 
 
+def _find_new_pi_session_id_from_transcript_store(
+    cwd: Path,
+    *,
+    launch_started_at: float | None,
+    sessions_root: Path | None = None,
+) -> str | None:
+    return fixer_autonomous_transcripts._find_new_pi_session_id_from_transcript_store(
+        cwd,
+        launch_started_at=launch_started_at,
+        sessions_root=sessions_root,
+    )
+
+
+def _wait_for_new_pi_session_id(
+    cwd: Path,
+    before: str | None,
+    *,
+    launch_started_at: float | None = None,
+    timeout_sec: float = 8.0,
+) -> str | None:
+    return fixer_autonomous_transcripts._wait_for_new_pi_session_id(
+        cwd,
+        before,
+        launch_started_at=launch_started_at,
+        timeout_sec=timeout_sec,
+        find_new_pi_session_id_from_transcript_store_fn=_find_new_pi_session_id_from_transcript_store,
+    )
+
+
 def _wait_for_new_external_session_id(
     backend: str,
     cwd: Path,
@@ -521,6 +601,7 @@ def _wait_for_new_external_session_id(
         wait_for_new_commandcode_session_id_fn=_wait_for_new_commandcode_session_id,
         wait_for_new_droid_session_id_fn=_wait_for_new_droid_session_id,
         wait_for_new_antigravity_conversation_id_fn=_wait_for_new_antigravity_conversation_id,
+        wait_for_new_pi_session_id_fn=_wait_for_new_pi_session_id,
     )
 
 
@@ -846,6 +927,16 @@ def launch_netrunner(
         backend=launch_selection.backend,
         external_session_id=new_session_id,
     )
+    _register_transcript_attempt_manifest(
+        cwd,
+        local_session_id=local_session_id,
+        global_session_id=selected_session.global_session_id,
+        backend=launch_selection.backend,
+        external_session_id=new_session_id,
+        launch_started_at=launch_started_at,
+        headless_log_path=log_path,
+        worker_pid=worker_pid,
+    )
 
     if not suppress_autonomous_wake:
         state["last_launched_netrunner_session_id"] = new_session_id
@@ -1053,6 +1144,17 @@ def launch_wave_netrunner_worker(
         global_session_id=global_session_id,
         backend=launch_selection.backend,
         external_session_id=new_session_id,
+    )
+    _register_transcript_attempt_manifest(
+        resolved_project_cwd,
+        local_session_id=normalized_session_id,
+        global_session_id=global_session_id,
+        backend=launch_selection.backend,
+        external_session_id=new_session_id,
+        launch_started_at=launch_started_at,
+        headless_log_path=log_path,
+        worker_pid=worker_pid,
+        worker_cwd=resolved_worker_cwd,
     )
 
     print(

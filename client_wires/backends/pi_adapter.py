@@ -48,14 +48,15 @@ PI_MODEL_INTERNAL_IDS: dict[str, str] = {
     "openai-codex/gpt-5.3-codex-spark": "openai-codex/gpt-5.3-codex-spark",
     "openai-codex/gpt-5.6-luna": "openai-codex/gpt-5.6-luna",
     "kimi-coding/k3": "kimi-coding/k3",
-    # MiMo 2.6 (Xiaomi). Cross-provider ids stay fully qualified; these are the
-    # ids the pi model store documents (models.json override): the OpenCode
-    # Personal account declares the pair, and both CommandCode accounts declare
-    # the xiaomi/* pair with the full low..max ladder.
-    "opencode-personal/mimo-v2.6-flash": "opencode-personal/mimo-v2.6-flash",
-    "opencode-personal/mimo-v2.6-pro": "opencode-personal/mimo-v2.6-pro",
+    # MiMo 2.6 (Xiaomi). Cross-provider ids stay fully qualified. Generic
+    # commandcode routes are the portable default; named provider accounts are
+    # discovered dynamically from the Pi agent inventory/config.
+    "mimo-v2.6-pro": "commandcode/xiaomi/mimo-v2.6-pro",
+    "mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
     "commandcode/xiaomi/mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
     "commandcode/xiaomi/mimo-v2.6-pro": "commandcode/xiaomi/mimo-v2.6-pro",
+    "opencode-personal/mimo-v2.6-flash": "opencode-personal/mimo-v2.6-flash",
+    "opencode-personal/mimo-v2.6-pro": "opencode-personal/mimo-v2.6-pro",
     # Claude Opus 5.5 (OpenCode catalog id `claude-opus-5-5`, declared on the
     # Stas account; also catalogued as anthropic/claude-opus-5.5).
     "opencode-stas/claude-opus-5-5": "opencode-stas/claude-opus-5-5",
@@ -65,6 +66,8 @@ PI_MODEL_INTERNAL_IDS: dict[str, str] = {
 # carry the fully qualified spelling for the opencode-go family; `pi --model`
 # takes either, so accept both and canonicalize to the catalog id.
 PI_MODEL_ALIASES: dict[str, str] = {
+    "commandcode/xiaomi/mimo-v2.6-pro": "mimo-v2.6-pro",
+    "mimo-v2.6-flash": "commandcode/xiaomi/mimo-v2.6-flash",
     "opencode-go/deepseek-v4.1-flash": "deepseek-v4.1-flash",
     "opencode-go/deepseek-v4-flash": "deepseek-v4-flash",
     "opencode-go/deepseek-v4-flash-vision-exp": "deepseek-v4-flash-vision-exp",
@@ -116,6 +119,22 @@ PI_MODEL_THINKING_LEVELS: dict[str, dict[str, str | None]] = {
         "max": "max",
     },
     "commandcode/xiaomi/mimo-v2.6-pro": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    },
+    "mimo-v2.6-pro": {
+        "minimal": None,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    },
+    "mimo-v2.6-flash": {
         "minimal": None,
         "low": "low",
         "medium": "medium",
@@ -451,6 +470,65 @@ def normalize_mcp_server_for_pi(source: Mapping[str, object]) -> dict[str, objec
     return payload
 
 
+COMMANDCODE_MIMO_THINKING_LEVELS: dict[str, str | None] = {
+    "minimal": None,
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+
+
+def _configured_pi_commandcode_routes(agent_dir: Path | None = None) -> set[str]:
+    """Dynamically discover configured named CommandCode provider routes from Pi models.json.
+
+    Validates actually configured named CommandCode routes (e.g. from team subscriptions,
+    H100 routes, or user accounts) from existing Pi inventory without reading or exposing
+    auth secrets, credentials, argv, env, or private config values.
+    """
+    agent = (agent_dir or _pi_agent_dir()).expanduser()
+    models_path = agent / "models.json"
+    if not models_path.is_file():
+        return set()
+    try:
+        data = json.loads(models_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        return set()
+    routes: set[str] = set()
+    for provider_name, provider_data in providers.items():
+        if not isinstance(provider_name, str) or not isinstance(provider_data, dict):
+            continue
+        p_name = provider_name.strip()
+        if not p_name or p_name == "commandcode":
+            continue
+        is_cc = (
+            p_name.startswith("commandcode-")
+            or p_name.startswith("cmd-")
+            or "commandcode.ai" in str(provider_data.get("baseUrl", ""))
+        )
+        models = provider_data.get("models")
+        has_mimo = False
+        if isinstance(models, list):
+            for m in models:
+                if isinstance(m, dict) and "id" in m:
+                    m_id = str(m["id"]).strip()
+                    if m_id in ("xiaomi/mimo-v2.6-pro", "xiaomi/mimo-v2.6-flash"):
+                        routes.add(f"{p_name}/{m_id}")
+                        has_mimo = True
+                    elif is_cc:
+                        routes.add(f"{p_name}/{m_id}")
+        if is_cc or has_mimo:
+            routes.add(f"{p_name}/xiaomi/mimo-v2.6-pro")
+            routes.add(f"{p_name}/xiaomi/mimo-v2.6-flash")
+    return routes
+
+
 def pi_supported_thinking_levels(model: str) -> tuple[str, ...] | None:
     """Reasoning levels this backend may pass to `pi --thinking` for `model`.
 
@@ -460,7 +538,10 @@ def pi_supported_thinking_levels(model: str) -> tuple[str, ...] | None:
     """
     level_map = PI_MODEL_THINKING_LEVELS.get(model)
     if level_map is None:
-        return None
+        if model.endswith("/xiaomi/mimo-v2.6-pro") or model.endswith("/xiaomi/mimo-v2.6-flash") or "mimo-v2.6" in model:
+            level_map = COMMANDCODE_MIMO_THINKING_LEVELS
+        else:
+            return None
     supported: list[str] = []
     for level in PI_REASONING_OPTIONS:
         if level not in level_map:
@@ -504,6 +585,14 @@ class PiBackendAdapter(BackendAdapter):
         )
         self.command = PI_COMMAND
         self.supports_resume = self.descriptor.resume_supported
+
+    @property
+    def model_options(self) -> tuple[str, ...]:
+        base_options = list(super().model_options)
+        for route in sorted(_configured_pi_commandcode_routes()):
+            if route not in base_options:
+                base_options.append(route)
+        return tuple(base_options)
 
     # ------------------------------------------------------------------ models
 

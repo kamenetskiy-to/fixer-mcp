@@ -129,6 +129,7 @@ var fixerToolNames = []string{
 	"get_mcp_binary_restart_state",
 	"set_mcp_binary_restart_state",
 	"cleanup_netrunner_wave",
+	"cancel_netrunner_wave",
 	"list_active_worker_processes",
 	"stop_active_worker_processes",
 	"launch_image_generation_job",
@@ -392,6 +393,7 @@ func registerFixerTools(server *mcp.Server) {
 	addMcpTool(server, "get_mcp_binary_restart_state", "Read the project-scoped MCP binary restart/build epoch marker.", GetMCPBinaryRestartState)
 	addMcpTool(server, "set_mcp_binary_restart_state", "Mark a project MCP binary build epoch as restart-required or confirm that the required epoch is running.", SetMCPBinaryRestartState)
 	addMcpTool(server, "cleanup_netrunner_wave", "Clean up terminal parallel Netrunner wave worktrees with explicit removal/prune flags and safety checks. Requires fixer role.", CleanupNetrunnerWave)
+	registerCancelNetrunnerWaveTool(server)
 	addMcpTool(server, "list_active_worker_processes", "List currently active Fixer-managed worker processes for the current project, with session mapping and liveness checks. Requires fixer role.", ListActiveWorkerProcesses)
 	addMcpTool(server, "stop_active_worker_processes", "Stop active Fixer-managed worker processes for the current project and optionally freeze orchestration follow-up. Requires fixer role.", StopActiveWorkerProcesses)
 	addMcpTool(server, "launch_image_generation_job", "Launch a dedicated Codex image-generation or image-editing subprocess for the current project and return a durable job id. Optional local input images can be attached for edit flows. Requires fixer role.", LaunchImageGenerationJob)

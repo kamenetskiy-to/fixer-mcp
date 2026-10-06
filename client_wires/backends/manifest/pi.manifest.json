@@ -4,6 +4,7 @@
   "description": "Pi coding agent CLI (pi, v0.85.x). One harness over the Architect's OpenAI, OpenCode Go, CommandCode and Kimi Coding subscriptions. Skills are injected as explicit --skill paths under --no-skills; MCP is delegated to the installed pi-mcp-adapter extension through a project-scoped --mcp-config file in exclusive config mode, with server environment left in the provider process (never serialized into the generated config).",
   "models": {
     "options": [
+      "mimo-v2.6-pro",
       "deepseek-v4.1-flash",
       "deepseek-v4-flash",
       "deepseek-v4-flash-vision-exp",
@@ -21,8 +22,9 @@
       "commandcode/xiaomi/mimo-v2.6-pro",
       "opencode-stas/claude-opus-5-5"
     ],
-    "default": "deepseek-v4.1-flash",
+    "default": "mimo-v2.6-pro",
     "internal_id_map": {
+      "mimo-v2.6-pro": "commandcode/xiaomi/mimo-v2.6-pro",
       "deepseek-v4.1-flash": "opencode-go/deepseek-v4.1-flash",
       "deepseek-v4-flash": "opencode-go/deepseek-v4-flash",
       "deepseek-v4-flash-vision-exp": "opencode-go/deepseek-v4-flash-vision-exp",

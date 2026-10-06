@@ -46,7 +46,109 @@ func recordWaveWorkerProcessLaunch(projectID int, sessionID int, pid int, launch
 	if err != nil {
 		return 0, err
 	}
+	// Atomically link the newly created worker_process to the parallel_wave_worker row
+	// so the worker process FK is never missing even if post-spawn startup waiting is interrupted.
+	if waveWorkerID > 0 {
+		_, _ = db.Exec(
+			`UPDATE parallel_wave_worker
+			 SET worker_process_id = ?,
+			     launch_epoch = ?,
+			     status = ?,
+			     failure_reason = '',
+			     launched_at = COALESCE(launched_at, CURRENT_TIMESTAMP),
+			     updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ?`,
+			int(insertID),
+			launchEpoch,
+			parallelWaveWorkerStatusRunning,
+			waveWorkerID,
+			projectID,
+		)
+	}
 	return int(insertID), nil
+}
+
+// recoverMatchingWaveWorkerProcess searches for an existing durable worker_process
+// row that strictly matches the worker's project, wave, worker, session, and
+// launch epoch identity. It never binds arbitrary latest processes or recycled PIDs.
+func recoverMatchingWaveWorkerProcess(projectID int, waveID int, waveWorkerID int, sessionID int, launchEpoch int) (workerProcessSnapshot, bool, error) {
+	var row workerProcessSnapshot
+	query := `SELECT id,
+	                 session_id,
+	                 pid,
+	                 launch_epoch,
+	                 COALESCE(launch_origin, ''),
+	                 status,
+	                 started_at,
+	                 updated_at,
+	                 COALESCE(stopped_at, ''),
+	                 COALESCE(stop_reason, '')
+	          FROM worker_process
+	          WHERE project_id = ?
+	            AND parallel_wave_id = ?
+	            AND parallel_wave_worker_id = ?
+	            AND session_id = ?`
+	args := []any{projectID, waveID, waveWorkerID, sessionID}
+	if launchEpoch > 0 {
+		query += " AND launch_epoch = ?"
+		args = append(args, launchEpoch)
+	}
+	query += " ORDER BY id DESC LIMIT 1"
+	err := db.QueryRow(query, args...).Scan(
+		&row.ID, &row.SessionID, &row.PID, &row.LaunchEpoch, &row.LaunchOrigin,
+		&row.Status, &row.StartedAt, &row.UpdatedAt, &row.StoppedAt, &row.StopReason,
+	)
+	if err == sql.ErrNoRows {
+		return workerProcessSnapshot{}, false, nil
+	}
+	if err != nil {
+		return workerProcessSnapshot{}, false, err
+	}
+	refreshed, err := refreshWorkerProcessSnapshot(projectID, row)
+	if err != nil {
+		return workerProcessSnapshot{}, false, err
+	}
+	return refreshed, true, nil
+}
+
+// recoverMatchingWaveWorkerMetadata scans the worker's artifact directory for
+// written launch artifacts (metadata, headless log, launcher log) matching
+// the worker session.
+func recoverMatchingWaveWorkerMetadata(projectCWD string, waveID, localSessionID, globalSessionID int) (string, string, string, explicitLaunchWorkerMetadata, bool) {
+	logDir := filepath.Join(projectCWD, ".codex", "netrunner_wave_artifacts", fmt.Sprintf("wave-%d", waveID), fmt.Sprintf("session-%d", localSessionID))
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return "", "", "", explicitLaunchWorkerMetadata{}, false
+	}
+	var latestMeta, latestHeadless, latestLauncher string
+	for _, entry := range entries {
+		name := entry.Name()
+		path := filepath.Join(logDir, name)
+		if strings.HasPrefix(name, "worker_metadata-") && strings.HasSuffix(name, ".json") {
+			if path > latestMeta {
+				latestMeta = path
+			}
+		} else if strings.HasPrefix(name, "headless-") && strings.HasSuffix(name, ".log") {
+			if path > latestHeadless {
+				latestHeadless = path
+			}
+		} else if strings.HasPrefix(name, "launcher-") && strings.HasSuffix(name, ".log") {
+			if path > latestLauncher {
+				latestLauncher = path
+			}
+		}
+	}
+	if latestMeta == "" {
+		return latestHeadless, latestLauncher, "", explicitLaunchWorkerMetadata{}, false
+	}
+	meta, err := readExplicitLaunchWorkerMetadata(latestMeta)
+	if err != nil {
+		return latestHeadless, latestLauncher, latestMeta, explicitLaunchWorkerMetadata{}, false
+	}
+	if meta.SessionID > 0 && meta.SessionID != globalSessionID {
+		return latestHeadless, latestLauncher, latestMeta, explicitLaunchWorkerMetadata{}, false
+	}
+	return latestHeadless, latestLauncher, latestMeta, meta, true
 }
 
 type CreateNetrunnerWaveInput struct {
@@ -192,7 +294,11 @@ type NetrunnerWaveSnapshot struct {
 }
 
 type NetrunnerWaveWorkerCounts struct {
-	Total        int `json:"total"`
+	Total int `json:"total"`
+	// Active counts every nonterminal worker (queued, launching, running,
+	// retry_wait, repair_wait, ...). Kept for wire compatibility; see
+	// NetrunnerWaveOperatorSummary.ActiveMeaning and the truthful counters
+	// below for the actual worker semantics.
 	Active       int `json:"active"`
 	Terminal     int `json:"terminal"`
 	ReviewReady  int `json:"review_ready"`
@@ -202,40 +308,69 @@ type NetrunnerWaveWorkerCounts struct {
 	StaleEpoch   int `json:"stale_epoch"`
 	Blocked      int `json:"blocked"`
 	RetryPending int `json:"retry_pending"`
+	Queued       int `json:"queued"`
+	Launching    int `json:"launching"`
+	Running      int `json:"running"`
+	RetryWaiting int `json:"retry_waiting"`
+	Live         int `json:"live"`
+	DeadProcess  int `json:"dead_process"`
+	Cancelled    int `json:"cancelled"`
+}
+
+// NetrunnerWaveWorkerRuntimeState exposes the truthful per-worker runtime
+// semantics an operator needs to decide what to do next: why a worker waits
+// (retry cause), when it becomes eligible again, what blocks it, which process
+// it currently owns, and what the retry scheduler will do with it.
+type NetrunnerWaveWorkerRuntimeState struct {
+	WorkerId          int    `json:"worker_id"`
+	SessionId         int    `json:"session_id"`
+	Status            string `json:"status"`
+	RetryAttempts     int    `json:"retry_attempts"`
+	RetryCause        string `json:"retry_cause,omitempty"`
+	RetryDueAt        string `json:"retry_due_at,omitempty"`
+	BlockingReason    string `json:"blocking_reason,omitempty"`
+	CurrentPid        int    `json:"current_pid,omitempty"`
+	ProcessAlive      bool   `json:"process_alive"`
+	ProcessStatus     string `json:"process_status,omitempty"`
+	SchedulerDecision string `json:"scheduler_decision"`
 }
 
 type NetrunnerWaveOperatorSummary struct {
-	SchemaVersion       string                    `json:"schema_version"`
-	WaveId              int                       `json:"wave_id"`
-	ProjectId           int                       `json:"project_id"`
-	OperatorState       string                    `json:"operator_state"`
-	Label               string                    `json:"label"`
-	NextAction          string                    `json:"next_action"`
-	LegacyStatus        string                    `json:"legacy_status"`
-	Phase               string                    `json:"phase"`
-	GateState           string                    `json:"gate_state"`
-	ControlState        string                    `json:"control_state"`
-	FailurePolicyState  string                    `json:"failure_policy_state"`
-	WorkerCounts        NetrunnerWaveWorkerCounts `json:"worker_counts"`
-	AllWorkersTerminal  bool                      `json:"all_workers_terminal"`
-	WaveReviewReady     bool                      `json:"wave_review_ready"`
-	RepairRequired      bool                      `json:"repair_required"`
-	ArchitectPaused     bool                      `json:"architect_paused"`
-	AcceptanceReady     bool                      `json:"acceptance_ready"`
-	WaveCompleted       bool                      `json:"wave_completed"`
-	ReviewSessionId     int                       `json:"review_session_id,omitempty"`
-	ReviewState         string                    `json:"review_state"`
-	ReviewPolicy        string                    `json:"review_policy"`
-	ReviewBackend       string                    `json:"review_backend"`
-	ReviewModel         string                    `json:"review_model"`
-	ReviewReasoning     string                    `json:"review_reasoning"`
-	AcceptanceSessionId int                       `json:"acceptance_session_id,omitempty"`
-	AcceptanceState     string                    `json:"acceptance_state"`
-	RepairWorkerId      int                       `json:"repair_worker_id,omitempty"`
-	RepairAttemptCount  int                       `json:"repair_attempt_count"`
-	PauseReason         string                    `json:"pause_reason,omitempty"`
-	FailureReason       string                    `json:"failure_reason,omitempty"`
-	UpdatedAt           string                    `json:"updated_at,omitempty"`
+	SchemaVersion      string                    `json:"schema_version"`
+	WaveId             int                       `json:"wave_id"`
+	ProjectId          int                       `json:"project_id"`
+	OperatorState      string                    `json:"operator_state"`
+	Label              string                    `json:"label"`
+	NextAction         string                    `json:"next_action"`
+	LegacyStatus       string                    `json:"legacy_status"`
+	Phase              string                    `json:"phase"`
+	GateState          string                    `json:"gate_state"`
+	ControlState       string                    `json:"control_state"`
+	FailurePolicyState string                    `json:"failure_policy_state"`
+	WorkerCounts       NetrunnerWaveWorkerCounts `json:"worker_counts"`
+	// ActiveMeaning labels the wire-compatible WorkerCounts.Active field: it
+	// counts every nonterminal worker, not only running ones.
+	ActiveMeaning       string                            `json:"active_meaning"`
+	WorkerRuntime       []NetrunnerWaveWorkerRuntimeState `json:"worker_runtime,omitempty"`
+	AllWorkersTerminal  bool                              `json:"all_workers_terminal"`
+	WaveReviewReady     bool                              `json:"wave_review_ready"`
+	RepairRequired      bool                              `json:"repair_required"`
+	ArchitectPaused     bool                              `json:"architect_paused"`
+	AcceptanceReady     bool                              `json:"acceptance_ready"`
+	WaveCompleted       bool                              `json:"wave_completed"`
+	ReviewSessionId     int                               `json:"review_session_id,omitempty"`
+	ReviewState         string                            `json:"review_state"`
+	ReviewPolicy        string                            `json:"review_policy"`
+	ReviewBackend       string                            `json:"review_backend"`
+	ReviewModel         string                            `json:"review_model"`
+	ReviewReasoning     string                            `json:"review_reasoning"`
+	AcceptanceSessionId int                               `json:"acceptance_session_id,omitempty"`
+	AcceptanceState     string                            `json:"acceptance_state"`
+	RepairWorkerId      int                               `json:"repair_worker_id,omitempty"`
+	RepairAttemptCount  int                               `json:"repair_attempt_count"`
+	PauseReason         string                            `json:"pause_reason,omitempty"`
+	FailureReason       string                            `json:"failure_reason,omitempty"`
+	UpdatedAt           string                            `json:"updated_at,omitempty"`
 }
 
 func boundedParallelWaveSummaryText(raw string, maxBytes int) string {
@@ -260,7 +395,86 @@ func parallelWaveSessionState(sessionID int, status string) string {
 	return "pending"
 }
 
+const (
+	// maxParallelWaveRetryAttempts is the retry budget a worker consumes
+	// before the scheduler blocks it for operator attention.
+	maxParallelWaveRetryAttempts = 5
+	// parallelWaveRetryCauseQuotaExhausted labels a retry wait driven by a
+	// genuine provider quota exhaustion verdict.
+	parallelWaveRetryCauseQuotaExhausted = "quota_exhausted"
+)
+
+// buildNetrunnerWaveWorkerRuntime derives truthful per-worker runtime state.
+// Process liveness is read from the recorded worker_process row when the
+// package DB is available; pure callers simply see no process detail.
+func buildNetrunnerWaveWorkerRuntime(wave NetrunnerWaveSnapshot) []NetrunnerWaveWorkerRuntimeState {
+	runtime := make([]NetrunnerWaveWorkerRuntimeState, 0, len(wave.Workers))
+	for _, worker := range wave.Workers {
+		state := NetrunnerWaveWorkerRuntimeState{
+			WorkerId:      worker.Id,
+			SessionId:     worker.SessionId,
+			Status:        worker.Status,
+			RetryAttempts: worker.RetryAttemptCount,
+			RetryCause:    strings.TrimSpace(worker.RetryCause),
+			RetryDueAt:    strings.TrimSpace(worker.RetryNextEligibleAt),
+		}
+		if reason := strings.TrimSpace(worker.FailureReason); reason != "" {
+			state.BlockingReason = boundedParallelWaveSummaryText(reason, 240)
+		}
+		_, terminal := parallelWaveWorkerTerminalCondition(worker.Status)
+		if db != nil && worker.WorkerProcessId > 0 {
+			if processRow, found, err := fetchWorkerProcessByID(worker.WorkerProcessId, worker.ProjectId); err == nil && found {
+				state.CurrentPid = processRow.PID
+				state.ProcessAlive = processRow.Alive
+				state.ProcessStatus = processRow.Status
+			}
+		}
+		state.SchedulerDecision = parallelWaveWorkerSchedulerDecision(worker, state, terminal)
+		runtime = append(runtime, state)
+	}
+	return runtime
+}
+
+// parallelWaveWorkerSchedulerDecision states what the engine will do next with
+// a worker: relaunch it now, wait for backoff or a quota reset, block it, or
+// reconcile its dead process.
+func parallelWaveWorkerSchedulerDecision(worker NetrunnerWaveWorkerSnapshot, state NetrunnerWaveWorkerRuntimeState, terminal bool) string {
+	switch worker.Status {
+	case parallelWaveWorkerStatusCreated, parallelWaveWorkerStatusWorktreeReady:
+		return "queued_for_launch"
+	case parallelWaveWorkerStatusLaunching:
+		return "launching"
+	case parallelWaveWorkerStatusRepairWait:
+		return "waiting_governed_repair"
+	case parallelWaveWorkerStatusRetryWait:
+		if worker.RetryAttemptCount >= maxParallelWaveRetryAttempts {
+			return "retry_blocked_max_attempts"
+		}
+		due := parseParallelWaveRetryEligibility(worker.RetryNextEligibleAt)
+		if !due.IsZero() && time.Now().UTC().Before(due) {
+			if strings.TrimSpace(worker.RetryCause) == parallelWaveRetryCauseQuotaExhausted {
+				return "retry_waiting_quota_reset"
+			}
+			return "retry_waiting_backoff"
+		}
+		return "retry_eligible_now"
+	case parallelWaveWorkerStatusRunning:
+		if worker.WorkerProcessId <= 0 {
+			return "running_process_unrecorded"
+		}
+		if !state.ProcessAlive {
+			return "process_dead_pending_reconcile"
+		}
+		return "running"
+	}
+	if terminal {
+		return "terminal:" + worker.Status
+	}
+	return worker.Status
+}
+
 func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWaveOperatorSummary {
+	workerRuntime := buildNetrunnerWaveWorkerRuntime(wave)
 	counts := NetrunnerWaveWorkerCounts{Total: len(wave.Workers)}
 	for _, worker := range wave.Workers {
 		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
@@ -281,15 +495,34 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 			counts.StaleEpoch++
 		case parallelWaveWorkerStatusBlocked:
 			counts.Blocked++
+		case parallelWaveWorkerStatusCancelled:
+			counts.Cancelled++
+		case parallelWaveWorkerStatusCreated, parallelWaveWorkerStatusWorktreeReady:
+			counts.Queued++
+		case parallelWaveWorkerStatusLaunching:
+			counts.Launching++
+		case parallelWaveWorkerStatusRunning:
+			counts.Running++
+		case parallelWaveWorkerStatusRetryWait:
+			counts.RetryWaiting++
 		}
 		if worker.Status == parallelWaveWorkerStatusRetryWait || strings.TrimSpace(worker.RetryNextEligibleAt) != "" {
 			counts.RetryPending++
 		}
 	}
+	for _, state := range workerRuntime {
+		if state.ProcessAlive {
+			counts.Live++
+		}
+		if state.Status == parallelWaveWorkerStatusRunning && state.ProcessStatus != "" && !state.ProcessAlive {
+			counts.DeadProcess++
+		}
+	}
 
 	allWorkersTerminal := counts.Total > 0 && counts.Terminal == counts.Total
 	architectPaused := wave.ControlState == parallelWaveControlPausedForArchitect || wave.FailurePolicyState == parallelWaveFailurePolicyPaused
-	waveCompleted := wave.Phase == parallelWavePhaseCompleted && wave.GateState == parallelWaveGateClosed
+	waveCancelled := wave.Status == parallelWaveStatusCancelled
+	waveCompleted := !waveCancelled && wave.Phase == parallelWavePhaseCompleted && wave.GateState == parallelWaveGateClosed
 	repairRequired := wave.GateState == parallelWaveGateImplementationRepair || wave.FailurePolicyState == parallelWaveFailurePolicyRepairRequired || wave.FailurePolicyState == parallelWaveFailurePolicyRepairAuthorized || wave.FailurePolicyState == parallelWaveFailurePolicyRepairInProgress
 	waveReviewReady := wave.GateState == parallelWaveGateImplementationReview && wave.FailurePolicyState == parallelWaveFailurePolicyPassed
 	acceptanceReady := wave.Phase == parallelWavePhaseAcceptance && wave.AcceptanceSessionId > 0 && wave.AcceptanceSessionStatus == "completed"
@@ -303,6 +536,8 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 
 	operatorState, label, nextAction := "implementation_active", "Implementation running", "wait"
 	switch {
+	case waveCancelled:
+		operatorState, label, nextAction = "cancelled", "Wave cancelled", "none"
 	case architectPaused:
 		operatorState, label, nextAction = "architect_paused", "Paused for Architect", "resume_by_architect"
 	case waveCompleted:
@@ -338,6 +573,8 @@ func buildNetrunnerWaveOperatorSummary(wave NetrunnerWaveSnapshot) NetrunnerWave
 		ControlState:        wave.ControlState,
 		FailurePolicyState:  wave.FailurePolicyState,
 		WorkerCounts:        counts,
+		ActiveMeaning:       "nonterminal",
+		WorkerRuntime:       workerRuntime,
 		AllWorkersTerminal:  allWorkersTerminal,
 		WaveReviewReady:     waveReviewReady,
 		RepairRequired:      repairRequired,
@@ -439,6 +676,7 @@ type NetrunnerWaveCleanupWorkerResult struct {
 	Removed              bool   `json:"removed"`
 	Missing              bool   `json:"missing"`
 	Skipped              bool   `json:"skipped"`
+	Preserved            bool   `json:"preserved,omitempty"`
 	Diagnostic           string `json:"diagnostic,omitempty"`
 	Error                string `json:"error,omitempty"`
 }
@@ -1523,6 +1761,8 @@ func parallelWaveWorkerTerminalCondition(status string) (string, bool) {
 		return "cleaned", true
 	case parallelWaveWorkerStatusBlocked:
 		return "blocked", true
+	case parallelWaveWorkerStatusCancelled:
+		return "cancelled", true
 	default:
 		return "", false
 	}
@@ -1715,6 +1955,11 @@ func refreshParallelWaveAggregateStatus(waveID int, projectID int) error {
 	if err != nil {
 		return err
 	}
+	// A cancelled wave is a governed terminal outcome; aggregate refresh must
+	// never resurrect it into running/failed bookkeeping.
+	if wave.Status == parallelWaveStatusCancelled {
+		return nil
+	}
 	if len(wave.Workers) == 0 {
 		return nil
 	}
@@ -1730,6 +1975,10 @@ func refreshParallelWaveAggregateStatus(waveID int, projectID int) error {
 			hasReviewReady = true
 			allCompleted = false
 		case parallelWaveWorkerStatusCompleted:
+		case parallelWaveWorkerStatusCancelled:
+			// Governed cancellation is terminal but is neither completion nor
+			// failure.
+			allCompleted = false
 		case parallelWaveWorkerStatusFailed, parallelWaveWorkerStatusStaleEpoch, parallelWaveWorkerStatusStopped, parallelWaveWorkerStatusBlocked:
 			hasFailed = true
 			allCompleted = false
@@ -1822,6 +2071,9 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 	if worker.Status == parallelWaveWorkerStatusRetryWait {
 		return candidate, false, nil
 	}
+	if worker.Status == parallelWaveWorkerStatusWorktreeReady {
+		return candidate, false, nil
+	}
 	globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, authorizedProjectId)
 	if err == sql.ErrNoRows {
 		updatedWorker, updateErr := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusFailed, fmt.Sprintf("session %d not found in current project", worker.SessionId))
@@ -1889,15 +2141,81 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 		return candidate, true, nil
 	}
 
+	// Recover matching durable process row and launch metadata if worker_process_id was missing or unlinked.
+	if worker.WorkerProcessId <= 0 {
+		matchingProcess, found, recErr := recoverMatchingWaveWorkerProcess(authorizedProjectId, wave.Id, worker.Id, globalSessionID, worker.LaunchEpoch)
+		if recErr != nil {
+			return parallelWaveWaitCandidate{}, false, recErr
+		}
+		headless, launcher, metaPath, meta, metaFound := recoverMatchingWaveWorkerMetadata(projectCWD, wave.Id, worker.SessionId, globalSessionID)
+		if !found && metaFound && meta.WorkerPID > 0 {
+			res, insertErr := db.Exec(
+				`INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, launch_origin, status, parallel_wave_id, parallel_wave_worker_id, updated_at)
+				 VALUES (?, ?, ?, ?, 'wave_worker', ?, ?, ?, CURRENT_TIMESTAMP)`,
+				authorizedProjectId, globalSessionID, meta.WorkerPID, worker.LaunchEpoch, workerStatusRunning, wave.Id, worker.Id,
+			)
+			if insertErr == nil {
+				insertID, _ := res.LastInsertId()
+				matchingProcess = workerProcessSnapshot{
+					ID:           int(insertID),
+					SessionID:    globalSessionID,
+					PID:          meta.WorkerPID,
+					LaunchEpoch:  worker.LaunchEpoch,
+					LaunchOrigin: "wave_worker",
+					Status:       workerStatusRunning,
+				}
+				found = true
+			}
+		}
+		if found {
+			worker.WorkerProcessId = matchingProcess.ID
+			if worker.WorkerMetadataPath != "" {
+				metaPath = worker.WorkerMetadataPath
+			}
+			if worker.HeadlessLogPath != "" {
+				headless = worker.HeadlessLogPath
+			}
+			if worker.LauncherLogPath != "" {
+				launcher = worker.LauncherLogPath
+			}
+			_, _ = db.Exec(
+				`UPDATE parallel_wave_worker
+				 SET worker_process_id = ?,
+				     launch_epoch = CASE WHEN launch_epoch = 0 THEN ? ELSE launch_epoch END,
+				     status = CASE WHEN status = ? THEN ? ELSE status END,
+				     worker_metadata_path = CASE WHEN worker_metadata_path = '' THEN ? ELSE worker_metadata_path END,
+				     headless_log_path = CASE WHEN headless_log_path = '' THEN ? ELSE headless_log_path END,
+				     launcher_log_path = CASE WHEN launcher_log_path = '' THEN ? ELSE launcher_log_path END,
+				     updated_at = CURRENT_TIMESTAMP
+				 WHERE id = ? AND project_id = ?`,
+				matchingProcess.ID,
+				matchingProcess.LaunchEpoch,
+				parallelWaveWorkerStatusLaunching,
+				parallelWaveWorkerStatusRunning,
+				metaPath,
+				headless,
+				launcher,
+				worker.Id,
+				authorizedProjectId,
+			)
+			worker.WorkerMetadataPath = metaPath
+			worker.HeadlessLogPath = headless
+			worker.LauncherLogPath = launcher
+			candidate.Worker = worker
+		}
+	}
+
 	// A retry can leave review/completed state from an older attempt while the
 	// newest launcher is still writing. Never finalize or capture its worktree
 	// until that latest process has stopped.
-	process, processFound, err := latestWorkerProcessForSession(authorizedProjectId, globalSessionID)
-	if err != nil {
-		return parallelWaveWaitCandidate{}, false, err
-	}
-	if processFound && !isWorkerProcessTerminal(process) {
-		return candidate, false, nil
+	if worker.WorkerProcessId > 0 {
+		proc, procFound, procErr := fetchWorkerProcessByID(worker.WorkerProcessId, authorizedProjectId)
+		if procErr != nil {
+			return parallelWaveWaitCandidate{}, false, procErr
+		}
+		if procFound && !isWorkerProcessTerminal(proc) {
+			return candidate, false, nil
+		}
 	}
 
 	if reason := malformedReviewSnapshotReason(worker.SessionId, status, report, proposalIDs); reason != "" {
@@ -1933,6 +2251,9 @@ func inspectParallelWaveWorkerForWait(projectCWD string, wave NetrunnerWaveSnaps
 	}
 
 	if worker.WorkerProcessId <= 0 {
+		if worker.Status == parallelWaveWorkerStatusLaunching {
+			return candidate, false, nil
+		}
 		updatedWorker, err := finalizeParallelWaveWorker(projectCWD, wave, worker, parallelWaveWorkerStatusFailed, "worker process linkage missing")
 		if err != nil {
 			return parallelWaveWaitCandidate{}, false, err
@@ -2207,6 +2528,173 @@ func scheduleCreatedParallelWaveWorkers(
 	return nil
 }
 
+// scheduleWorktreeReadyWaveWorkers checks for workers whose worktrees have already
+// been created (e.g. following an interrupted wave launch or parent completion)
+// and safely launches them without double-launching by using deterministic CAS claims.
+func scheduleWorktreeReadyWaveWorkers(
+	ctx context.Context,
+	projectCWD string,
+	wave NetrunnerWaveSnapshot,
+	launchEpoch int,
+	deferredLaunchTimeout time.Duration,
+) error {
+	if wave.FailurePolicyState != parallelWaveFailurePolicyNone && wave.FailurePolicyState != parallelWaveFailurePolicyPassed {
+		return nil
+	}
+	workerBySessionID := make(map[int]NetrunnerWaveWorkerSnapshot, len(wave.Workers))
+	for _, worker := range wave.Workers {
+		workerBySessionID[worker.SessionId] = worker
+	}
+	parentsByChild := make(map[int][]int64, len(wave.Dependencies))
+	for _, dependency := range wave.Dependencies {
+		parentsByChild[int(dependency.Child)] = append(parentsByChild[int(dependency.Child)], dependency.Parents...)
+	}
+
+	for _, worker := range wave.Workers {
+		// Stalled launching recovery: if worker was left in "launching" with no worker_process FK
+		// for longer than deferredLaunchTimeout, either recover the matching process or revert to worktree_ready.
+		if worker.Status == parallelWaveWorkerStatusLaunching && worker.WorkerProcessId <= 0 {
+			globalSessionID, err := globalSessionIDFromProjectScoped(worker.SessionId, wave.ProjectId)
+			if err == nil {
+				matching, found, recErr := recoverMatchingWaveWorkerProcess(wave.ProjectId, wave.Id, worker.Id, globalSessionID, worker.LaunchEpoch)
+				headless, launcher, metaPath, meta, metaFound := recoverMatchingWaveWorkerMetadata(projectCWD, wave.Id, worker.SessionId, globalSessionID)
+				if recErr == nil && !found && metaFound && meta.WorkerPID > 0 {
+					res, insertErr := db.Exec(
+						`INSERT INTO worker_process (project_id, session_id, pid, launch_epoch, launch_origin, status, parallel_wave_id, parallel_wave_worker_id, updated_at)
+						 VALUES (?, ?, ?, ?, 'wave_worker', ?, ?, ?, CURRENT_TIMESTAMP)`,
+						wave.ProjectId, globalSessionID, meta.WorkerPID, worker.LaunchEpoch, workerStatusRunning, wave.Id, worker.Id,
+					)
+					if insertErr == nil {
+						insertID, _ := res.LastInsertId()
+						matching = workerProcessSnapshot{
+							ID:           int(insertID),
+							SessionID:    globalSessionID,
+							PID:          meta.WorkerPID,
+							LaunchEpoch:  worker.LaunchEpoch,
+							LaunchOrigin: "wave_worker",
+							Status:       workerStatusRunning,
+						}
+						found = true
+					}
+				}
+				if recErr == nil && found {
+					worker.WorkerProcessId = matching.ID
+					if worker.WorkerMetadataPath != "" {
+						metaPath = worker.WorkerMetadataPath
+					}
+					if worker.HeadlessLogPath != "" {
+						headless = worker.HeadlessLogPath
+					}
+					if worker.LauncherLogPath != "" {
+						launcher = worker.LauncherLogPath
+					}
+					_, _ = db.Exec(
+						`UPDATE parallel_wave_worker
+						 SET worker_process_id = ?,
+						     status = ?,
+						     worker_metadata_path = CASE WHEN worker_metadata_path = '' THEN ? ELSE worker_metadata_path END,
+						     headless_log_path = CASE WHEN headless_log_path = '' THEN ? ELSE headless_log_path END,
+						     launcher_log_path = CASE WHEN launcher_log_path = '' THEN ? ELSE launcher_log_path END,
+						     updated_at = CURRENT_TIMESTAMP
+						 WHERE id = ? AND project_id = ?`,
+						matching.ID,
+						parallelWaveWorkerStatusRunning,
+						metaPath,
+						headless,
+						launcher,
+						worker.Id,
+						wave.ProjectId,
+					)
+					worker.Status = parallelWaveWorkerStatusRunning
+					worker.WorkerMetadataPath = metaPath
+					worker.HeadlessLogPath = headless
+					worker.LauncherLogPath = launcher
+				} else {
+					var updatedAtStr string
+					if err := db.QueryRow("SELECT updated_at FROM parallel_wave_worker WHERE id = ?", worker.Id).Scan(&updatedAtStr); err == nil {
+						updatedAt := parseParallelWaveRetryEligibility(updatedAtStr)
+						if !updatedAt.IsZero() && time.Since(updatedAt) > deferredLaunchTimeout {
+							_, _ = db.Exec(
+								`UPDATE parallel_wave_worker
+								 SET status = ?, failure_reason = '', updated_at = CURRENT_TIMESTAMP
+								 WHERE id = ? AND project_id = ? AND status = ? AND worker_process_id IS NULL`,
+								parallelWaveWorkerStatusWorktreeReady,
+								worker.Id,
+								wave.ProjectId,
+								parallelWaveWorkerStatusLaunching,
+							)
+							worker.Status = parallelWaveWorkerStatusWorktreeReady
+						}
+					}
+				}
+			}
+		}
+
+		if worker.Status != parallelWaveWorkerStatusWorktreeReady {
+			continue
+		}
+
+		readyToLaunch := true
+		dependencyFailed := false
+		for _, parentSessionID := range parentsByChild[worker.SessionId] {
+			parent, found := workerBySessionID[int(parentSessionID)]
+			if !found {
+				_ = blockParallelWaveWorker(wave, worker, "blocked: parent dependency missing")
+				dependencyFailed = true
+				break
+			}
+			switch parent.Status {
+			case parallelWaveWorkerStatusReviewReady, parallelWaveWorkerStatusCleaned, parallelWaveWorkerStatusCompleted:
+			case parallelWaveWorkerStatusFailed, parallelWaveWorkerStatusBlocked, parallelWaveWorkerStatusStopped, parallelWaveWorkerStatusStaleEpoch:
+				reason := "blocked: parent session failed"
+				if strings.TrimSpace(parent.FailureReason) != "" {
+					reason = "blocked: " + parent.FailureReason
+				}
+				_ = blockParallelWaveWorker(wave, worker, reason)
+				dependencyFailed = true
+				break
+			default:
+				readyToLaunch = false
+			}
+			if dependencyFailed {
+				break
+			}
+		}
+		if dependencyFailed || !readyToLaunch {
+			continue
+		}
+
+		// Deterministic CAS claim to ensure concurrent launches or wait loops don't double launch
+		claim, err := db.Exec(
+			`UPDATE parallel_wave_worker
+			 SET status = ?, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ? AND status = ?`,
+			parallelWaveWorkerStatusLaunching,
+			worker.Id,
+			wave.ProjectId,
+			parallelWaveWorkerStatusWorktreeReady,
+		)
+		if err != nil {
+			return err
+		}
+		claimed, _ := claim.RowsAffected()
+		if claimed == 0 {
+			continue
+		}
+
+		worktreePath, err := resolveParallelWaveWorktreePath(projectCWD, worker.WorktreePath)
+		if err != nil {
+			_ = markParallelWaveWorkerFailed(worker.Id, wave.ProjectId, err.Error())
+			continue
+		}
+
+		if err := launchParallelWaveWorkerProcess(ctx, projectCWD, wave, worker, worktreePath, LaunchNetrunnerWaveInput{}, launchEpoch, deferredLaunchTimeout); err != nil {
+			_ = markParallelWaveWorkerFailed(worker.Id, wave.ProjectId, fmt.Sprintf("launch failed: %v", err))
+		}
+	}
+	return nil
+}
+
 func markActiveParallelWaveWorkersStale(projectCWD string, wave NetrunnerWaveSnapshot, reason string) error {
 	for _, worker := range wave.Workers {
 		if _, terminal := parallelWaveWorkerTerminalCondition(worker.Status); terminal {
@@ -2400,7 +2888,7 @@ func launchParallelWaveWorkerProcess(
 		if retErr != nil {
 			reason = reason + ": " + retErr.Error()
 		}
-		abortLaunchedWaveWorkerProcess(command, launcherExited, metadataPath, workerPID, workerProcessID, authorizedProjectId, reason)
+		abortLaunchedWaveWorkerProcess(command, launcherExited, metadataPath, workerPID, workerProcessID, authorizedProjectId, worker.Id, reason)
 	}()
 
 	launcherPID := 0
@@ -2438,23 +2926,31 @@ func launchParallelWaveWorkerProcess(
 	if err != nil {
 		return fmt.Errorf("failed to persist wave worker process metadata: %v", err)
 	}
-
-	externalSessionID, err := waitForSessionExternalID(ctx, globalSessionID, launchConfig.Backend, startupTimeout)
-	if err != nil {
-		return fmt.Errorf("failed while waiting for backend session metadata: %v", err)
-	}
-	if err := updateParallelWaveWorkerLaunch(
+	_ = updateParallelWaveWorkerLaunch(
 		worker.Id,
 		authorizedProjectId,
 		parallelWaveWorkerStatusRunning,
 		launchEpoch,
 		workerProcessID,
-		externalSessionID,
+		"",
 		headlessLogPath,
 		launcherLogPath,
 		metadataPath,
-	); err != nil {
-		return fmt.Errorf("DB update error: %v", err)
+	)
+
+	externalSessionID, err := waitForSessionExternalID(ctx, globalSessionID, launchConfig.Backend, startupTimeout)
+	if err != nil {
+		return fmt.Errorf("failed while waiting for backend session metadata: %v", err)
+	}
+	if strings.TrimSpace(externalSessionID) != "" {
+		_, _ = db.Exec(
+			`UPDATE parallel_wave_worker
+			 SET external_session_id = ?, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ?`,
+			externalSessionID,
+			worker.Id,
+			authorizedProjectId,
+		)
 	}
 	launchCompleted = true
 	return nil
@@ -2474,6 +2970,7 @@ func abortLaunchedWaveWorkerProcess(
 	workerPID int,
 	workerProcessID int,
 	projectID int,
+	waveWorkerID int,
 	reason string,
 ) {
 	if workerPID <= 0 {
@@ -2511,6 +3008,21 @@ func abortLaunchedWaveWorkerProcess(
 			workerStatusRunning,
 		); markErr != nil {
 			log.Printf("warning: failed to mark aborted wave worker process %d terminal: %v", workerProcessID, markErr)
+		}
+	}
+	if waveWorkerID > 0 {
+		if workerProcessID > 0 || workerPID > 0 {
+			_ = markParallelWaveWorkerFailed(waveWorkerID, projectID, reason)
+		} else {
+			_, _ = db.Exec(
+				`UPDATE parallel_wave_worker
+				 SET status = ?, failure_reason = '', updated_at = CURRENT_TIMESTAMP
+				 WHERE id = ? AND project_id = ? AND status = ?`,
+				parallelWaveWorkerStatusWorktreeReady,
+				waveWorkerID,
+				projectID,
+				parallelWaveWorkerStatusLaunching,
+			)
 		}
 	}
 }
@@ -2928,6 +3440,13 @@ func WaitForNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input W
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, fmt.Errorf("DB query error: %v", err)
 		}
+		if err := scheduleWorktreeReadyWaveWorkers(ctx, normalizedProjectCWD, wave, control.OrchestrationEpoch, deferredLaunchTimeout); err != nil {
+			return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, fmt.Errorf("failed to schedule ready wave workers: %v", err)
+		}
+		wave, err = fetchNetrunnerWaveSnapshot(input.WaveId, authorizedProjectId)
+		if err != nil {
+			return &mcp.CallToolResult{IsError: true}, WaitForNetrunnerWaveOutput{}, fmt.Errorf("DB query error: %v", err)
+		}
 
 		qualifying := []parallelWaveWaitCandidate{}
 		allTerminal := true
@@ -3204,17 +3723,28 @@ func CleanupNetrunnerWave(ctx context.Context, req *mcp.CallToolRequest, input C
 			continue
 		}
 
-		removeSpec, err := gitWorktreeRemoveCommand(normalizedProjectCWD, resolvedPath, input.Force)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("worker %d: %w", worker.SessionId, err)
-		}
-		if _, err := runGitCommandSpec(removeSpec); err != nil {
-			diagnostic := err.Error()
+		removed, preserveDiagnostic, removeErr := removeTerminalWorktreeSafely(normalizedProjectCWD, resolvedPath, input.Force)
+		if removeErr != nil {
+			diagnostic := removeErr.Error()
 			if err := updateParallelWaveWorkerCleanup(worker, authorizedProjectId, parallelWaveCleanupStatusFailed, diagnostic, false); err != nil {
 				return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("DB update error: %v", err)
 			}
 			result.CleanupStatus = parallelWaveCleanupStatusFailed
 			result.Error = diagnostic
+			hadFailure = true
+			results = append(results, result)
+			continue
+		}
+		if !removed {
+			// Unknown dirty submodule data was preserved, never deleted.
+			diagnostic := preserveDiagnostic
+			if err := updateParallelWaveWorkerCleanup(worker, authorizedProjectId, parallelWaveCleanupStatusPreserved, diagnostic, false); err != nil {
+				return &mcp.CallToolResult{IsError: true}, CleanupNetrunnerWaveOutput{}, fmt.Errorf("DB update error: %v", err)
+			}
+			result.CleanupStatus = parallelWaveCleanupStatusPreserved
+			result.Preserved = true
+			result.Diagnostic = diagnostic
+			orphanDiagnostics = append(orphanDiagnostics, diagnostic)
 			hadFailure = true
 			results = append(results, result)
 			continue
@@ -3377,6 +3907,71 @@ func backendToProviderName(backend string) string {
 	}
 }
 
+const (
+	// parallelWaveQuotaResetGrace pads a genuine quota reset before relaunch.
+	parallelWaveQuotaResetGrace = 5 * time.Minute
+	// parallelWaveQuotaEligibilityTolerance keeps persisted quota eligibility
+	// stable: sub-tolerance drift between scheduler passes must never push the
+	// stored timestamp later (the "sliding eligibility" failure where a quota
+	// wait receded into the future on every pass).
+	parallelWaveQuotaEligibilityTolerance = 30 * time.Minute
+)
+
+// parallelWaveQuotaExhaustionDelay consults the quota gate for the provider the
+// worker is actually configured with and reports a genuine exhaustion verdict.
+// Only a parsed real 0% window exhausts the quota; malformed cells, provider
+// errors, and rows that cannot be attributed to the worker's account are never
+// invented exhaustion and fall back to plain backoff.
+func parallelWaveQuotaExhaustionDelay(providerName string, backoffDelay time.Duration) (bool, time.Duration, string) {
+	if DefaultQuotaGate == nil || strings.TrimSpace(providerName) == "" {
+		return false, 0, ""
+	}
+	quota, found, err := checkQuotaForAccount(DefaultQuotaGate, providerName, "")
+	if err != nil {
+		log.Printf("quota gate check failed for %s: %v", providerName, err)
+		return false, 0, ""
+	}
+	if !found || quota.PercentLeft != 0 {
+		return false, 0, ""
+	}
+	window := strings.TrimSpace(quota.Window)
+	if window == "" {
+		window = "unknown"
+	}
+	detail := fmt.Sprintf("quota exhausted: %s %s window reports 0%% left", providerName, window)
+	if quota.ResetKnown && quota.ResetDelay > 0 {
+		return true, quota.ResetDelay + parallelWaveQuotaResetGrace, fmt.Sprintf("%s, reset in %s", detail, quota.ResetDelay)
+	}
+	// Genuine exhaustion with an unknown reset: do not invent a long quota
+	// wait — plain backoff decides when to retry.
+	return true, backoffDelay, detail + ", reset unknown"
+}
+
+// persistParallelWaveWorkerQuotaEligibility records quota-driven eligibility as
+// a stable absolute timestamp. It is written once and only extended when the
+// newly computed reset is materially later, so repeated scheduler passes can
+// never slide the deadline forward forever.
+func persistParallelWaveWorkerQuotaEligibility(worker NetrunnerWaveWorkerSnapshot, projectID int, eligibleAt time.Time, detail string) error {
+	if stored := parseParallelWaveRetryEligibility(worker.RetryNextEligibleAt); !stored.IsZero() && !eligibleAt.After(stored.Add(parallelWaveQuotaEligibilityTolerance)) {
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE parallel_wave_worker
+		 SET retry_cause = ?,
+		     retry_next_eligible_at = ?,
+		     failure_reason = ?,
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ? AND status = ?`,
+		parallelWaveRetryCauseQuotaExhausted,
+		eligibleAt.Format(time.RFC3339Nano),
+		detail,
+		worker.Id,
+		projectID,
+		parallelWaveWorkerStatusRetryWait,
+	)
+	return err
+}
+
 func markParallelWaveWorkerProviderRetryWait(worker NetrunnerWaveWorkerSnapshot) error {
 	nextEligible := time.Now().UTC().Add(calculateBackoff(worker.RetryAttemptCount)).Format(time.RFC3339Nano)
 	_, err := db.Exec(
@@ -3426,7 +4021,7 @@ func processParallelWaveWorkerRetries(ctx context.Context, projectCWD string, wa
 		providerName := backendToProviderName(backend)
 
 		attempts := worker.RetryAttemptCount
-		if attempts >= 5 {
+		if attempts >= maxParallelWaveRetryAttempts {
 			if err := updateParallelWaveWorkerStatus(worker.Id, wave.ProjectId, parallelWaveWorkerStatusBlocked, "blocked: max retries reached"); err != nil {
 				return err
 			}
@@ -3449,20 +4044,14 @@ func processParallelWaveWorkerRetries(ctx context.Context, projectCWD string, wa
 			nextEligible = time.Now().UTC()
 		}
 
-		quotaDelay := delay
-		if DefaultQuotaGate != nil && providerName != "" {
-			q, found, err := DefaultQuotaGate.CheckQuota(providerName)
-			if err != nil {
-				log.Printf("quota gate check failed for %s: %v", providerName, err)
-			} else if found && q.PercentLeft == 0 {
-				quotaDelay = q.ResetDelay + 5*time.Minute
-			}
-		}
-
-		if quotaDelay > delay {
+		quotaExhausted, quotaDelay, quotaDetail := parallelWaveQuotaExhaustionDelay(providerName, delay)
+		if quotaExhausted {
 			quotaEligible := time.Now().UTC().Add(quotaDelay)
 			if quotaEligible.After(nextEligible) {
 				nextEligible = quotaEligible
+				if err := persistParallelWaveWorkerQuotaEligibility(worker, wave.ProjectId, nextEligible, quotaDetail); err != nil {
+					log.Printf("warning: failed to persist quota eligibility for wave worker %d: %v", worker.Id, err)
+				}
 			}
 		}
 

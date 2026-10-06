@@ -7,6 +7,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -37,6 +38,7 @@ _PROVIDER_THREAD_CAPABILITIES = {
     "codex": ProviderThreadCapability("codex", "jsonl", True, "headless_resume"),
     "commandcode": ProviderThreadCapability("commandcode", "jsonl", True, "headless_resume"),
     "droid": ProviderThreadCapability("droid", "jsonl", True, "headless_resume"),
+    "pi": ProviderThreadCapability("pi", "jsonl", True, "headless_resume"),
     "claude": ProviderThreadCapability(
         "claude",
         "metadata_only",
@@ -157,13 +159,20 @@ def _provider_message_from_payload(
     record = nested if isinstance(nested, dict) else payload
     record_type = str(record.get("type") or payload.get("type") or "").strip()
     role = _normalize_message_role(record.get("role"), record_type)
+    text = ""
+    nested_message = record.get("message")
+    if not role and isinstance(nested_message, dict):
+        # Pi JSONL nests the conversation message under "message".
+        role = _normalize_message_role(nested_message.get("role"), record_type)
+        text = _message_text(nested_message.get("content")) or _message_text(nested_message)
     if not role:
         return None
-    text = (
-        _message_text(record.get("content"))
-        or _message_text(record.get("message"))
-        or _message_text(record.get("text"))
-    )
+    if not text:
+        text = (
+            _message_text(record.get("content"))
+            or _message_text(record.get("message"))
+            or _message_text(record.get("text"))
+        )
     if not text:
         return None
     created_at = str(payload.get("timestamp") or record.get("timestamp") or "").strip()
@@ -681,6 +690,301 @@ def _wait_for_new_commandcode_session_id(
     return None
 
 
+def _pi_sessions_root() -> Path:
+    """Pi agent session store: ``~/.pi/agent/sessions`` (mirrors pi_adapter)."""
+    return Path.home() / ".pi" / "agent" / "sessions"
+
+
+def _pi_project_dir_name(cwd: Path) -> str:
+    """Mirror pi's session directory encoding: strip one leading separator,
+    replace '/', '\\' and ':' with '-', wrap in '--...--'."""
+    cleaned = os.path.normpath(str(cwd))
+    trimmed = cleaned[1:] if cleaned[:1] in ("/", "\\") else cleaned
+    safe = trimmed.replace("/", "-").replace("\\", "-").replace(":", "-")
+    return f"--{safe}--"
+
+
+def _pi_filename_session_id(name: str) -> str | None:
+    """Session identity encoded in a Pi transcript filename: pi writes
+    ``<timestamp>_<id>.jsonl``; a bare ``<id>.jsonl`` stem is the identity.
+    Substring matches are never accepted as identities."""
+    if not name.endswith(".jsonl"):
+        return None
+    stem = name[: -len(".jsonl")]
+    if not stem:
+        return None
+    if "_" in stem:
+        candidate = stem.rsplit("_", 1)[1]
+        return candidate or None
+    return stem or None
+
+
+def _pi_session_header_from_transcript(path: Path) -> dict[str, str] | None:
+    """Read the leading ``{"type":"session","id":...,"cwd":...,"timestamp":...}``
+    record of a Pi JSONL transcript. The original file is only read, never
+    modified."""
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for index, raw_line in enumerate(fh):
+                if index >= 8:
+                    break
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if str(payload.get("type") or "").strip() != "session":
+                    continue
+                header: dict[str, str] = {}
+                for key in ("id", "session_id", "sessionId"):
+                    value = payload.get(key)
+                    if value not in (None, ""):
+                        header["id"] = str(value).strip()
+                        break
+                for key in ("cwd", "current_working_directory", "workingDirectory"):
+                    value = payload.get(key)
+                    if value not in (None, ""):
+                        header["cwd"] = str(value).strip()
+                        break
+                for key in ("timestamp", "created_at", "createdAt"):
+                    value = payload.get(key)
+                    if value not in (None, ""):
+                        header["timestamp"] = str(value).strip()
+                        break
+                return header
+    except OSError:
+        return None
+    return None
+
+
+def _pi_transcript_proven_identity(path: Path, expected_cwd: Path) -> str | None:
+    """Return the proven session id of one Pi transcript file, or None.
+
+    Provenance requires agreement between the filename identity and the
+    session header identity plus a matching header cwd. A header that
+    contradicts the filename (and is not an embedded id) is contradictory
+    provenance and yields None — never a guessed binding.
+    """
+    header = _pi_session_header_from_transcript(path) or {}
+    header_id = header.get("id") or None
+    filename_id = _pi_filename_session_id(path.name)
+    if header_id and filename_id and header_id != filename_id:
+        if header_id not in filename_id and filename_id not in header_id:
+            return None
+    identity = header_id or filename_id
+    if not identity:
+        return None
+    header_cwd = header.get("cwd") or ""
+    if not header_cwd:
+        return None
+    try:
+        same_cwd = Path(header_cwd).resolve() == Path(expected_cwd).resolve()
+    except OSError:
+        same_cwd = header_cwd == str(expected_cwd)
+    if not same_cwd:
+        return None
+    return identity
+
+
+def _find_new_pi_session_id_from_transcript_store(
+    cwd: Path,
+    *,
+    launch_started_at: float | None,
+    sessions_root: Path | None = None,
+    pi_sessions_root_fn: Callable[[], Path] = _pi_sessions_root,
+) -> str | None:
+    """Detect the Pi session JSONL a launch just produced (fresh run or a
+    resumed attempt appending/updating its file) with proven id/cwd identity.
+    No arbitrary newest file is ever returned."""
+    root = sessions_root if sessions_root is not None else pi_sessions_root_fn()
+    if not root.is_dir():
+        return None
+    cutoff = (launch_started_at - 1.0) if launch_started_at is not None else None
+    candidates: list[tuple[float, Path]] = []
+    for path in root.rglob("*.jsonl"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if cutoff is not None and stat.st_mtime < cutoff:
+            continue
+        candidates.append((stat.st_mtime, path))
+    for _mtime, path in sorted(candidates, reverse=True):
+        identity = _pi_transcript_proven_identity(path, cwd)
+        if identity:
+            return identity
+    return None
+
+
+def _pi_transcript_attempt_evidence(
+    cwd: Path,
+    session_id: str,
+    *,
+    sessions_root: Path | None = None,
+    pi_sessions_root_fn: Callable[[], Path] = _pi_sessions_root,
+) -> list[dict[str, object]]:
+    """Durable evidence records for every transcript file provably bound to
+    one Pi session id (fresh and resumed/continuation attempts), ordered
+    chronologically. Records carry id/cwd/time provenance so a continuation
+    history is unambiguously linked to the current worker head."""
+    resolved_id = (session_id or "").strip()
+    if not resolved_id:
+        return []
+    root = sessions_root if sessions_root is not None else pi_sessions_root_fn()
+    if not root.is_dir():
+        return []
+    records: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*.jsonl")):
+        header = _pi_session_header_from_transcript(path) or {}
+        header_id = header.get("id") or ""
+        filename_id = _pi_filename_session_id(path.name) or ""
+        if resolved_id not in (header_id, filename_id):
+            continue
+        if header_id and filename_id and header_id != filename_id:
+            if header_id not in filename_id and filename_id not in header_id:
+                continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        records.append(
+            {
+                "path": str(path),
+                "bytes": stat.st_size,
+                "mtime_epoch": stat.st_mtime,
+                "session_id": resolved_id,
+                "session_cwd": header.get("cwd") or "",
+                "session_timestamp": header.get("timestamp") or "",
+                "header_identity": header_id,
+                "filename_identity": filename_id,
+            }
+        )
+    records.sort(key=lambda record: (str(record.get("session_timestamp") or ""), float(record.get("mtime_epoch") or 0.0)))
+    return records
+
+
+def _pi_timestamp_epoch(timestamp: str) -> float | None:
+    """Parse a Pi session-header timestamp into epoch seconds, or None."""
+    trimmed = (timestamp or "").strip()
+    if not trimmed:
+        return None
+    try:
+        parsed = datetime.fromisoformat(trimmed.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _pi_transcript_files_proven_for_cwd(
+    cwd: Path,
+    *,
+    since_epoch: float | None = None,
+    sessions_root: Path | None = None,
+    pi_sessions_root_fn: Callable[[], Path] = _pi_sessions_root,
+) -> list[dict[str, object]]:
+    """Durable evidence records for every Pi transcript provably bound to one
+    worker cwd at or after a launch bound (used when the external session id
+    could not be detected at launch). Only files with proven id/cwd identity
+    are returned — a missing detection never falls back to an arbitrary newest
+    file, and a contradictory header is never bound."""
+    resolved_cwd = Path(cwd)
+    root = sessions_root if sessions_root is not None else pi_sessions_root_fn()
+    if not root.is_dir():
+        return []
+    records: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*.jsonl")):
+        identity = _pi_transcript_proven_identity(path, resolved_cwd)
+        if not identity:
+            continue
+        header = _pi_session_header_from_transcript(path) or {}
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        timestamp = str(header.get("timestamp") or "")
+        if since_epoch is not None:
+            started = _pi_timestamp_epoch(timestamp)
+            if started is None:
+                started = stat.st_mtime
+            if started < float(since_epoch) - 1.0:
+                continue
+        records.append(
+            {
+                "path": str(path),
+                "bytes": stat.st_size,
+                "mtime_epoch": stat.st_mtime,
+                "session_id": identity,
+                "session_cwd": header.get("cwd") or "",
+                "session_timestamp": timestamp,
+                "header_identity": header.get("id") or "",
+                "filename_identity": _pi_filename_session_id(path.name) or "",
+            }
+        )
+    records.sort(key=lambda record: (str(record.get("session_timestamp") or ""), float(record.get("mtime_epoch") or 0.0)))
+    return records
+
+
+def _wait_for_new_pi_session_id(
+    cwd: Path,
+    before: str | None,
+    *,
+    launch_started_at: float | None = None,
+    timeout_sec: float = 8.0,
+    find_new_pi_session_id_from_transcript_store_fn: Callable[..., str | None] = _find_new_pi_session_id_from_transcript_store,
+    pi_transcript_attempt_evidence_fn: Callable[..., list[dict[str, object]]] = _pi_transcript_attempt_evidence,
+) -> str | None:
+    """Wait for the Pi session identity of a launch.
+
+    Fresh runs are detected from the new session JSONL (proven id/cwd). A
+    resumed run that has not appended yet falls back to the already-known id
+    ``before`` — but only when real transcript files with proven identity
+    exist for it, so a missing file never silently becomes a bound session.
+    """
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        session_id = find_new_pi_session_id_from_transcript_store_fn(
+            cwd,
+            launch_started_at=launch_started_at,
+        )
+        if session_id:
+            return session_id
+        resumed_id = (before or "").strip()
+        if resumed_id and pi_transcript_attempt_evidence_fn(cwd, resumed_id):
+            return resumed_id
+        time.sleep(0.5)
+    return None
+
+
+def attempt_manifest_path(cwd: Path, local_session_id: int, backend: str) -> Path:
+    """Durable append-only attempt manifest location (no DB schema needed):
+    one JSONL file per worker session and backend."""
+    return Path(cwd) / ".codex" / "netrunner_attempt_manifests" / f"session-{int(local_session_id)}-{backend}.jsonl"
+
+
+def append_attempt_manifest_record(path: Path, record: dict[str, object]) -> dict[str, object]:
+    """Append one attempt record to the manifest. The manifest is append-only:
+    attempt numbers derive from the existing lines, existing history is never
+    rewritten, and each record carries the proven identity/continuation
+    evidence for that attempt."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    attempt_number = 1
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    attempt_number += 1
+    except OSError:
+        pass
+    payload = dict(record)
+    payload["attempt_number"] = attempt_number
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    return payload
+
+
 def _wait_for_new_external_session_id(
     backend: str,
     cwd: Path,
@@ -694,6 +998,7 @@ def _wait_for_new_external_session_id(
     wait_for_new_commandcode_session_id_fn: Callable[..., str | None],
     wait_for_new_droid_session_id_fn: Callable[..., str | None],
     wait_for_new_antigravity_conversation_id_fn: Callable[..., str | None],
+    wait_for_new_pi_session_id_fn: Callable[..., str | None] = _wait_for_new_pi_session_id,
 ) -> str | None:
     normalized_backend = normalize_backend_name_fn(backend)
     if normalized_backend in {"codex", "commandcode"}:
@@ -715,6 +1020,13 @@ def _wait_for_new_external_session_id(
     if normalized_backend == "antigravity":
         return wait_for_new_antigravity_conversation_id_fn(
             cwd,
+            launch_started_at=launch_started_at,
+            timeout_sec=timeout_sec,
+        )
+    if normalized_backend == "pi":
+        return wait_for_new_pi_session_id_fn(
+            cwd,
+            before,
             launch_started_at=launch_started_at,
             timeout_sec=timeout_sec,
         )

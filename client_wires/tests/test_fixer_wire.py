@@ -975,6 +975,7 @@ cwd = "./frontend"
             patch.object(fixer_wire, "_inject_research_query_server", side_effect=lambda servers, _cwd: servers),
             patch.object(fixer_wire, "_inject_figma_console_server", side_effect=lambda servers, _cwd: servers),
             patch.object(fixer_wire, "_inject_forced_fixer_server", side_effect=lambda servers: servers),
+            patch.object(fixer_wire, "_ensure_forced_fixer_server_resolved", side_effect=lambda servers: None),
             patch.object(
                 fixer_wire,
                 "_load_project_web_mcp_servers",
@@ -2709,6 +2710,7 @@ class MainDispatchTests(unittest.TestCase):
             dry_run: bool,
             Option: object,
             single_select_items: object,
+            **kwargs: object,
         ) -> int:
             captured["passthrough_args"] = list(passthrough_args)
             captured["dry_run"] = dry_run

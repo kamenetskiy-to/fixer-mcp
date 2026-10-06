@@ -537,7 +537,8 @@ class FixerAutonomousTests(unittest.TestCase):
         self.assertIn("Do not merge, rebase, remove worktrees, or alter wave state.", prompt)
         self.assertIn("Report changed files in the completion report.", prompt)
         self.assertIn("Do not call fixer_mcp.wake_fixer_autonomous", prompt)
-        self.assertIn("submit the mandatory doc proposal and completion report", prompt)
+        self.assertIn("submit a doc proposal only if there is real canonical doc impact", prompt)
+        self.assertIn("submit the mandatory completion report", prompt)
 
     def test_wave_worker_cli_has_no_declared_write_scope_option(self) -> None:
         stdout = io.StringIO()

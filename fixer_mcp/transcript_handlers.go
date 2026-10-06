@@ -548,6 +548,613 @@ func resolveBackendTranscriptPath(backend string, projectCWD string, externalSes
 	}
 }
 
+// resolveBackendTranscriptHistory returns every transcript file provably
+// belonging to one external session — earlier continuation attempts plus the
+// head file — in chronological order. It never returns an arbitrary newest
+// file: every returned file is linked to the exact external session id, and
+// for Pi the linkage is proven from the filename identity and the session
+// header (id/cwd). Backends without resumable continuation files resolve to a
+// single-element history.
+func resolveBackendTranscriptHistory(backend string, projectCWD string, externalSessionID string, diagnostics *[]string) []string {
+	sessionID := strings.TrimSpace(externalSessionID)
+	if sessionID == "" {
+		*diagnostics = append(*diagnostics, "external session id is empty; cannot resolve transcript history")
+		return nil
+	}
+	switch backend {
+	case "pi":
+		return piTranscriptHistory(projectCWD, sessionID, diagnostics)
+	default:
+		path := resolveBackendTranscriptPath(backend, projectCWD, externalSessionID, diagnostics)
+		if path == "" {
+			return nil
+		}
+		return []string{path}
+	}
+}
+
+// piTranscriptHistory collects every Pi transcript file whose filename encodes
+// the exact external session id (fresh and resumed attempts write
+// <timestamp>_<id>.jsonl files for the same session), ordered chronologically
+// by the filename timestamp and then mtime. A file whose session header
+// contradicts the filename identity is refused as contradictory provenance.
+func piTranscriptHistory(projectCWD string, externalSessionID string, diagnostics *[]string) []string {
+	root := strings.TrimSpace(piSessionTranscriptRoot)
+	if root == "" {
+		*diagnostics = append(*diagnostics, "Pi transcript root is not configured")
+		return nil
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Pi transcript root not found: %s", root))
+		return nil
+	}
+	type historyEntry struct {
+		path      string
+		timestamp string
+		modTime   time.Time
+	}
+	seen := map[string]struct{}{}
+	entries := []historyEntry{}
+	for _, path := range candidateTranscriptFiles(root, "") {
+		if !piTranscriptFileNameMatches(filepath.Base(path), externalSessionID) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		timestamp := ""
+		if headerID, _, headerTimestamp := piTranscriptHeaderIdentity(path); headerID != "" {
+			if headerID != externalSessionID {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"Pi transcript %q declares session id %q but %q was requested; refusing contradictory provenance",
+					path, headerID, externalSessionID,
+				))
+				continue
+			}
+			timestamp = headerTimestamp
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		entries = append(entries, historyEntry{path: path, timestamp: timestamp, modTime: info.ModTime()})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].timestamp != entries[j].timestamp {
+			return entries[i].timestamp < entries[j].timestamp
+		}
+		return entries[i].modTime.Before(entries[j].modTime)
+	})
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		paths = append(paths, entry.path)
+	}
+	if len(paths) == 0 {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("no Pi JSONL history for external session id %q under %s", externalSessionID, root))
+	}
+	return paths
+}
+
+// piTranscriptHeaderIdentity reads the leading session header record of a Pi
+// transcript ({"type":"session","id":...,"cwd":...,"timestamp":...}).
+func piTranscriptHeaderIdentity(path string) (string, string, string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", ""
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	lines := 0
+	for scanner.Scan() {
+		lines++
+		if lines > 8 {
+			break
+		}
+		if id, cwd, timestamp := transcriptHeaderIdentity(scanner.Text()); id != "" || cwd != "" {
+			return id, cwd, timestamp
+		}
+	}
+	return "", "", ""
+}
+
+// ---------------------------------------------------------------------------
+// Durable launcher evidence provenance
+//
+// The persisted external session id is written by the launcher at spawn time.
+// When that registration is missing or stale (for example a launcher build
+// that predates Pi session detection), the original transcript must not
+// become unresolvable while it exists: Architect feedback #113 forbids curing
+// a detection failure with a missing-evidence block. The fallback below
+// derives the identity only from durable launcher evidence — the wave worker
+// anchor (DB-recorded per-worker worktree binding) and the append-only
+// attempt manifest (launcher-registered attempts) — verified against the Pi
+// store with proven id/cwd identity. It never binds an arbitrary newest file,
+// never binds by a shared project cwd, and refuses contradictory provenance.
+
+// piProvenTranscript is one Pi session transcript whose identity is proven
+// from the filename and the session header (matching ids, declared cwd).
+type piProvenTranscript struct {
+	Path      string
+	Identity  string
+	HeaderCWD string
+	Timestamp string
+	ModTime   time.Time
+}
+
+// piTranscriptProvenRecord proves one transcript file's identity the same way
+// the Python launcher does: the filename identity (“transcriptFileNameSessionID“)
+// and the session header identity must agree (a contradiction is refused), and
+// the session header must declare the cwd so the worker binding is provable.
+func piTranscriptProvenRecord(path string, diagnostics *[]string) (piProvenTranscript, bool) {
+	headerID, headerCWD, headerTimestamp := piTranscriptHeaderIdentity(path)
+	filenameID := transcriptFileNameSessionID(filepath.Base(path))
+	if headerID != "" && filenameID != "" && headerID != filenameID &&
+		!strings.Contains(filenameID, headerID) && !strings.Contains(headerID, filenameID) {
+		*diagnostics = append(*diagnostics, fmt.Sprintf(
+			"Pi transcript %q declares session id %q but the filename encodes %q; refusing contradictory provenance",
+			path, headerID, filenameID,
+		))
+		return piProvenTranscript{}, false
+	}
+	identity := headerID
+	if identity == "" {
+		identity = filenameID
+	}
+	if identity == "" || strings.TrimSpace(headerCWD) == "" {
+		// Without an id or without a declared cwd the file cannot prove whose
+		// session it is; it is never bound by guesswork.
+		return piProvenTranscript{}, false
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		return piProvenTranscript{}, false
+	}
+	return piProvenTranscript{
+		Path:      path,
+		Identity:  identity,
+		HeaderCWD: headerCWD,
+		Timestamp: headerTimestamp,
+		ModTime:   info.ModTime(),
+	}, true
+}
+
+// transcriptTime orders proven transcripts by their declared session
+// timestamp, falling back to file mtime when the header carries none.
+func (record piProvenTranscript) transcriptTime() time.Time {
+	if parsed, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil {
+		return parsed
+	}
+	return record.ModTime
+}
+
+func sortProvenTranscripts(records []piProvenTranscript) {
+	sort.SliceStable(records, func(i, j int) bool {
+		left, right := records[i].transcriptTime(), records[j].transcriptTime()
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return records[i].ModTime.Before(records[j].ModTime)
+	})
+}
+
+// provenTranscriptsBoundToCWD returns every Pi transcript provably belonging
+// to one execution cwd at or after a time bound, ordered chronologically.
+// The cwd binding is only used for per-worker worktree cwds (see the anchor
+// caller), so a shared project cwd can never mix other sessions in.
+func provenTranscriptsBoundToCWD(cwd string, notBefore time.Time, diagnostics *[]string) []piProvenTranscript {
+	root := strings.TrimSpace(piSessionTranscriptRoot)
+	if root == "" || strings.TrimSpace(cwd) == "" {
+		return nil
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return nil
+	}
+	records := []piProvenTranscript{}
+	for _, path := range candidateTranscriptFiles(root, "") {
+		record, proven := piTranscriptProvenRecord(path, diagnostics)
+		if !proven {
+			continue
+		}
+		if !sameTranscriptCWD(record.HeaderCWD, cwd) {
+			continue
+		}
+		if !notBefore.IsZero() && record.transcriptTime().Before(notBefore) {
+			continue
+		}
+		records = append(records, record)
+	}
+	sortProvenTranscripts(records)
+	return records
+}
+
+// provenTranscriptsForIdentity returns every proven Pi transcript carrying one
+// exact external session id, ordered chronologically.
+func provenTranscriptsForIdentity(identity string, diagnostics *[]string) []piProvenTranscript {
+	root := strings.TrimSpace(piSessionTranscriptRoot)
+	resolvedIdentity := strings.TrimSpace(identity)
+	if root == "" || resolvedIdentity == "" {
+		return nil
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return nil
+	}
+	records := []piProvenTranscript{}
+	for _, path := range candidateTranscriptFiles(root, "") {
+		record, proven := piTranscriptProvenRecord(path, diagnostics)
+		if !proven {
+			continue
+		}
+		if record.Identity != resolvedIdentity {
+			continue
+		}
+		records = append(records, record)
+	}
+	sortProvenTranscripts(records)
+	return records
+}
+
+// attemptManifestTranscript mirrors one continuation-evidence entry written by
+// the launcher's append-only attempt manifest.
+type attemptManifestTranscript struct {
+	Path             string `json:"path"`
+	SessionID        string `json:"session_id"`
+	SessionCWD       string `json:"session_cwd"`
+	SessionTimestamp string `json:"session_timestamp"`
+	HeaderIdentity   string `json:"header_identity"`
+	FilenameIdentity string `json:"filename_identity"`
+}
+
+// attemptManifestRecord mirrors one launcher-registered attempt.
+type attemptManifestRecord struct {
+	Backend              string                      `json:"backend"`
+	LocalSessionID       int                         `json:"local_session_id"`
+	GlobalSessionID      int                         `json:"global_session_id"`
+	ExternalSessionID    string                      `json:"external_session_id"`
+	LaunchStartedAtEpoch float64                     `json:"launch_started_at_epoch"`
+	DetectedAtEpoch      float64                     `json:"detected_at_epoch"`
+	WorkerPID            int                         `json:"worker_pid"`
+	HeadlessLogPath      string                      `json:"headless_log_path"`
+	WorkerCWD            string                      `json:"worker_cwd"`
+	AttemptNumber        int                         `json:"attempt_number"`
+	Transcripts          []attemptManifestTranscript `json:"transcripts"`
+}
+
+// attemptManifestPath is the durable append-only attempt manifest the launcher
+// registers for one worker session and backend (no DB schema involved).
+func attemptManifestPath(projectCWD string, localSessionID int, backend string) string {
+	return filepath.Join(
+		projectCWD,
+		".codex",
+		"netrunner_attempt_manifests",
+		fmt.Sprintf("session-%d-%s.jsonl", localSessionID, backend),
+	)
+}
+
+// readAttemptManifestRecords reads the append-only manifest. A malformed line
+// is corrupted provenance and surfaces as an error so callers can fail closed.
+func readAttemptManifestRecords(path string) ([]attemptManifestRecord, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	records := []attemptManifestRecord{}
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		var record attemptManifestRecord
+		if err := json.Unmarshal([]byte(raw), &record); err != nil {
+			return nil, fmt.Errorf("attempt manifest %s line %d is malformed: %v", path, lineNumber, err)
+		}
+		records = append(records, record)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// waveWorkerTranscriptAnchor is the DB-recorded launcher evidence binding one
+// global session to its execution worktree.
+type waveWorkerTranscriptAnchor struct {
+	WorktreePath string
+	CreatedAt    time.Time
+}
+
+func parseTranscriptAnchorTime(raw string) time.Time {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+// fetchWaveWorkerTranscriptAnchor reads the wave worker rows recorded at
+// launch. Multiple rows (relaunches) must agree on one worktree; a conflict
+// is contradictory provenance and is surfaced to the caller.
+func fetchWaveWorkerTranscriptAnchor(globalSessionID int) ([]waveWorkerTranscriptAnchor, bool, error) {
+	if !dbTableExists("parallel_wave_worker") || !dbTableHasColumn("parallel_wave_worker", "worktree_path") {
+		return nil, false, nil
+	}
+	rows, err := db.Query(
+		`SELECT COALESCE(TRIM(worktree_path), ''), COALESCE(created_at, '')
+		 FROM parallel_wave_worker
+		 WHERE session_id = ?
+		 ORDER BY id`,
+		globalSessionID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	anchors := []waveWorkerTranscriptAnchor{}
+	for rows.Next() {
+		var worktreePath string
+		var createdAt string
+		if err := rows.Scan(&worktreePath, &createdAt); err != nil {
+			return nil, false, err
+		}
+		anchors = append(anchors, waveWorkerTranscriptAnchor{
+			WorktreePath: worktreePath,
+			CreatedAt:    parseTranscriptAnchorTime(createdAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return anchors, len(anchors) > 0, nil
+}
+
+// resolveTranscriptProvenanceFromDurableEvidence derives the proven worker
+// head, its full attempt history, and the external session id from durable
+// launcher evidence alone. It is the fail-open complement to the persisted
+// external session id for Pi sessions: the original JSONL files exist and
+// must be read (host feedback #113), while every binding stays proven
+// (id/cwd/time/attempt) and contradictory provenance fails closed.
+func resolveTranscriptProvenanceFromDurableEvidence(
+	globalSessionID int,
+	localSessionID int,
+	projectCWD string,
+	backend string,
+	diagnostics *[]string,
+) (piProvenTranscript, []piProvenTranscript, string) {
+	if backend != "pi" {
+		// Only the Pi store carries proven id/cwd session headers; other
+		// backends resolve through their persisted external session id.
+		return piProvenTranscript{}, nil, ""
+	}
+
+	provenance := map[string]piProvenTranscript{}
+
+	// 1) Wave worker anchor: the DB-recorded per-worker worktree binding.
+	// The cwd scan is only safe for that per-worker worktree; a shared
+	// project cwd must never bind sessions by recency.
+	anchors, foundAnchor, err := fetchWaveWorkerTranscriptAnchor(globalSessionID)
+	if err != nil {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("failed to read wave worker provenance anchor: %v", err))
+		return piProvenTranscript{}, nil, ""
+	}
+	if foundAnchor {
+		worktrees := map[string]struct{}{}
+		createdAt := time.Time{}
+		for _, anchor := range anchors {
+			resolved := anchor.WorktreePath
+			if resolved != "" && !filepath.IsAbs(resolved) {
+				resolved = filepath.Join(projectCWD, resolved)
+			}
+			if resolved != "" {
+				worktrees[resolved] = struct{}{}
+			}
+			if !anchor.CreatedAt.IsZero() && (createdAt.IsZero() || anchor.CreatedAt.Before(createdAt)) {
+				createdAt = anchor.CreatedAt
+			}
+		}
+		if len(worktrees) > 1 {
+			*diagnostics = append(*diagnostics, "contradictory provenance: wave worker rows bind one session to multiple worktrees")
+			return piProvenTranscript{}, nil, ""
+		}
+		for worktree := range worktrees {
+			if sameTranscriptCWD(worktree, projectCWD) {
+				*diagnostics = append(*diagnostics, "wave worker anchor points at the shared project cwd; refusing cwd-only binding across sessions")
+				continue
+			}
+			notBefore := time.Time{}
+			if !createdAt.IsZero() {
+				notBefore = createdAt.Add(-15 * time.Minute)
+			}
+			for _, record := range provenTranscriptsBoundToCWD(worktree, notBefore, diagnostics) {
+				provenance[record.Path] = record
+			}
+		}
+	}
+
+	// 2) Attempt manifest: launcher-registered attempts with their recorded
+	// continuation evidence. Every recorded claim is re-verified against the
+	// original files before it can bind anything.
+	manifestRecords, err := readAttemptManifestRecords(attemptManifestPath(projectCWD, localSessionID, backend))
+	if err != nil {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("contradictory provenance: %v", err))
+		return piProvenTranscript{}, nil, ""
+	}
+	manifestHeadID := ""
+	for _, record := range manifestRecords {
+		claimedID := strings.TrimSpace(record.ExternalSessionID)
+		for _, entry := range record.Transcripts {
+			probe := strings.TrimSpace(entry.Path)
+			if probe == "" {
+				continue
+			}
+			proven, ok := piTranscriptProvenRecord(probe, diagnostics)
+			if !ok {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"contradictory provenance: attempt manifest references %q without a proven transcript identity", probe,
+				))
+				return piProvenTranscript{}, nil, ""
+			}
+			if entry.SessionID != "" && proven.Identity != entry.SessionID {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"contradictory provenance: attempt manifest claims session id %q for %q but the file proves %q",
+					entry.SessionID, probe, proven.Identity,
+				))
+				return piProvenTranscript{}, nil, ""
+			}
+			if claimedID != "" && proven.Identity != claimedID {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"contradictory provenance: attempt manifest claims external session id %q but %q proves %q",
+					claimedID, probe, proven.Identity,
+				))
+				return piProvenTranscript{}, nil, ""
+			}
+			expectedCWD := strings.TrimSpace(entry.SessionCWD)
+			if expectedCWD == "" {
+				expectedCWD = strings.TrimSpace(record.WorkerCWD)
+			}
+			if expectedCWD == "" || !sameTranscriptCWD(proven.HeaderCWD, expectedCWD) {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"contradictory provenance: attempt manifest cwd %q does not match the session header cwd %q of %q",
+					expectedCWD, proven.HeaderCWD, probe,
+				))
+				return piProvenTranscript{}, nil, ""
+			}
+			provenance[proven.Path] = proven
+		}
+		if claimedID != "" {
+			matched := false
+			for _, proven := range provenance {
+				if proven.Identity == claimedID {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				for _, proven := range provenTranscriptsForIdentity(claimedID, diagnostics) {
+					provenance[proven.Path] = proven
+					matched = true
+				}
+			}
+			if !matched {
+				*diagnostics = append(*diagnostics, fmt.Sprintf(
+					"contradictory provenance: attempt manifest claims external session id %q with no proven transcript file",
+					claimedID,
+				))
+				return piProvenTranscript{}, nil, ""
+			}
+			manifestHeadID = claimedID
+		}
+	}
+
+	if len(provenance) == 0 {
+		*diagnostics = append(*diagnostics, "no durable launcher evidence binds a Pi transcript to this worker")
+		return piProvenTranscript{}, nil, ""
+	}
+	history := make([]piProvenTranscript, 0, len(provenance))
+	for _, record := range provenance {
+		history = append(history, record)
+	}
+	sortProvenTranscripts(history)
+	head := history[len(history)-1]
+	if manifestHeadID != "" && manifestHeadID != head.Identity {
+		*diagnostics = append(*diagnostics, fmt.Sprintf(
+			"contradictory provenance: the latest attempt manifest record claims %q but the proven worker head is %q",
+			manifestHeadID, head.Identity,
+		))
+		return piProvenTranscript{}, nil, ""
+	}
+	return head, history, head.Identity
+}
+
+// resolveWorkerTranscriptProvenance resolves the head transcript, the full
+// attempt history, and the external session id for one netrunner session. The
+// persisted external session id stays authoritative when it is present and
+// current; when it is missing — or stale after a relaunch whose detection
+// never landed — durable launcher evidence recovers the proven identity and
+// the link is refreshed so later lookups stay stable.
+func resolveWorkerTranscriptProvenance(
+	globalSessionID int,
+	localSessionID int,
+	backend string,
+	projectCWD string,
+	diagnostics *[]string,
+) (string, []string, string) {
+	externalSessionID, err := fetchSessionExternalID(globalSessionID, backend)
+	if err != nil {
+		*diagnostics = append(*diagnostics, fmt.Sprintf("failed to resolve external session id: %v", err))
+		return "", nil, ""
+	}
+
+	provenHead := piProvenTranscript{}
+	provenHistory := []piProvenTranscript{}
+	provenID := ""
+	if backend == "pi" {
+		provenHead, provenHistory, provenID = resolveTranscriptProvenanceFromDurableEvidence(
+			globalSessionID, localSessionID, projectCWD, backend, diagnostics,
+		)
+	}
+
+	resolvedID := strings.TrimSpace(externalSessionID)
+	if resolvedID == "" {
+		if provenID == "" {
+			*diagnostics = append(*diagnostics, "transcript unavailable: no persisted external session id; transcript identity cannot be proven")
+			return "", nil, ""
+		}
+		if err := persistDiscoveredSessionExternalID(globalSessionID, backend, provenID); err != nil {
+			*diagnostics = append(*diagnostics, fmt.Sprintf("failed to persist discovered external session id %q: %v", provenID, err))
+		}
+		*diagnostics = append(*diagnostics, fmt.Sprintf(
+			"external session id %q recovered from durable launcher evidence (attempt manifest / wave worker anchor + Pi store proven identity)",
+			provenID,
+		))
+		resolvedID = provenID
+	}
+
+	if len(provenHistory) > 0 {
+		if provenID != resolvedID {
+			// The durable evidence proves a later attempt than the persisted
+			// link (a relaunch whose detection never landed). The time-proven
+			// worker head and its full history win; the link is refreshed.
+			if err := persistDiscoveredSessionExternalID(globalSessionID, backend, provenID); err != nil {
+				*diagnostics = append(*diagnostics, fmt.Sprintf("failed to refresh persisted external session id %q: %v", provenID, err))
+			}
+			*diagnostics = append(*diagnostics, fmt.Sprintf(
+				"persisted external session id %q is stale for this worker; proven head %q and its full attempt history are used",
+				resolvedID, provenID,
+			))
+			resolvedID = provenID
+		}
+		history := make([]string, 0, len(provenHistory))
+		for _, record := range provenHistory {
+			history = append(history, record.Path)
+		}
+		return provenHead.Path, history, resolvedID
+	}
+
+	history := resolveBackendTranscriptHistory(backend, projectCWD, resolvedID, diagnostics)
+	if len(history) == 0 {
+		return "", nil, resolvedID
+	}
+	head := resolveBackendTranscriptPath(backend, projectCWD, resolvedID, diagnostics)
+	if strings.TrimSpace(head) == "" {
+		head = history[len(history)-1]
+	}
+	return head, history, resolvedID
+}
+
 func persistDiscoveredSessionExternalID(sessionID int, backend string, externalSessionID string) error {
 	normalizedBackend, err := normalizeCliBackend(backend)
 	if err != nil {
@@ -673,11 +1280,11 @@ func GetNetrunnerTranscriptPath(ctx context.Context, req *mcp.CallToolRequest, i
 	}
 
 	diagnostics := []string{}
-	var transcriptPath string
-	if strings.TrimSpace(externalSessionID) == "" {
-		diagnostics = append(diagnostics, "transcript unavailable: no persisted external session id; transcript identity cannot be proven")
-	} else {
-		transcriptPath = resolveBackendTranscriptPath(backend, projectCWD, externalSessionID, &diagnostics)
+	transcriptPath, _, resolvedExternalSessionID := resolveWorkerTranscriptProvenance(
+		globalSessionID, input.SessionId, backend, projectCWD, &diagnostics,
+	)
+	if strings.TrimSpace(resolvedExternalSessionID) != "" {
+		externalSessionID = resolvedExternalSessionID
 	}
 
 	exists, readable, fileSize, modifiedAt := transcriptFileMetadata(transcriptPath)

@@ -180,7 +180,7 @@ def _build_project_hands_prompt(
         Submit instructions to the current project without creating or asking for a Netrunner session ID.
         Provider names select execution lanes for the same actor and mailbox; they never create another actor.
         Repository-write results remain awaiting explicit Fixer review. Never simulate acceptance or weaken the review gate.
-        Execute only the channel initialization checklist first. Then answer in one short line: confirm that the channel is initialized, state the current Hands task, and ask whether to bring the app up through tmux-flow. Do not print actor IDs, lanes, queue counts, journal state, history, a checklist report, or any extra explanation.
+        Execute only the channel initialization checklist first. Then answer in one short line: confirm that the channel is initialized, state the current Hands task, and wait for the Architect's instruction. Do not print actor IDs, lanes, queue counts, journal state, history, a checklist report, or any extra explanation.
         """
     ).strip()
     extra_blocks: list[str] = []

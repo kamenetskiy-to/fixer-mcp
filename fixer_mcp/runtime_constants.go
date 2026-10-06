@@ -18,17 +18,17 @@ const (
 	explicitLaunchDefaultPoll   = 5
 	explicitLaunchMaxPoll       = 60
 	defaultCliBackend           = "codex"
-	defaultCliModel             = "gpt-5.6-luna"
+	defaultCliModel             = "gpt-6.1-sol"
 	defaultCliReasoning         = "high"
 	defaultCommandCodeCliModel  = "commandcode/zai-org/glm-5.3-flash"
 	defaultDroidCliModel        = "kimi-k2.6"
 	defaultDroidCliReasoning    = "high"
-	defaultAntigravityReasoning = "default"
+	defaultAntigravityReasoning = "high"
 	defaultKimiCodeCliModel     = "kimi-k3-256k"
 	defaultKimiCodeReasoning    = "default"
 	defaultJunieCliReasoning    = "default"
-	defaultGrokCliModel         = "grok-4.6"
-	defaultGrokCliReasoning     = "default"
+	defaultGrokCliModel         = "grok-4.7"
+	defaultGrokCliReasoning     = "high"
 	reworkRepairThreshold       = 2
 	workerStatusRunning         = "running"
 	workerStatusStopped         = "stopped"
@@ -85,25 +85,20 @@ var supportedKimiCodeCliModels = map[string]struct{}{
 
 var supportedGrokCliModels = map[string]struct{}{
 	defaultGrokCliModel: {},
+	"grok-4.6":          {},
 	"grok-4.5":          {},
 }
 
 func handsProviderConfig(provider string) (model string, reasoning string, ok bool) {
 	switch provider {
-	case "codex":
-		return defaultCliModel, defaultCliReasoning, true
-	case "commandcode":
-		return defaultCommandCodeCliModel, "medium", true
-	case "claude":
-		return "sonnet", "high", true
-	case "kimi-code":
-		return "kimi-k3-256k", "default", true
-	case "antigravity":
-		return "Gemini 3.7 Flash", "medium", true
-	case "grok":
-		return defaultGrokCliModel, defaultGrokCliReasoning, true
 	case "pi":
-		return "openai-codex/gpt-5.6-luna", "high", true
+		return "mimo-v2.6-pro", "high", true
+	case "codex":
+		return "gpt-6.1-sol", "high", true
+	case "grok":
+		return "grok-4.7", "high", true
+	case "antigravity", "agy":
+		return "gemini-3.8-flash", "high", true
 	default:
 		return "", "", false
 	}

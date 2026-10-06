@@ -1,0 +1,3 @@
+interface:
+  display_name: "Init Unattached Fixer"
+  short_description: "Initialize scratch Fixer mode"
